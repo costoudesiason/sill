@@ -33,13 +33,14 @@ final class Palette: NSObject {
     private let scroll = NSScrollView()
     private let table = PaletteTable()
     private let footer = FlippedView()
-    /// The footer's controls: soft fills on the card's glass, not glass of
-    /// their own. Glass on glass is against Apple's rules, and every layer of
-    /// it samples the page behind again whenever the page changes. The pill
-    /// does what Return does, or shows the chosen row's other actions.
+    /// The footer's controls are Liquid Glass of their own, as in Raycast and
+    /// Spotlight: a round button on the left, and on the right a capsule that
+    /// does what Return does or opens the chosen row's other actions. One
+    /// container holds both so the system renders them together.
+    private let footerGlass = NSGlassEffectContainerView()
     private let footerContent = FlippedView()
     private let pill = FooterPill()
-    private let settingsButton = FillButton()
+    private let settingsButton = NSButton()
 
     private(set) var isOpen = false
     private(set) var mode: Mode = .newTab
@@ -120,10 +121,13 @@ final class Palette: NSObject {
         scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 6, right: 0)
         content.addSubview(scroll)
 
-        settingsButton.isBordered = false
-        settingsButton.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings")
+        settingsButton.bezelStyle = .glass
+        settingsButton.borderShape = .circle
+        settingsButton.controlSize = .large
+        settingsButton.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "Settings")?
+            .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
         settingsButton.imagePosition = .imageOnly
-        settingsButton.toolTip = "Settings"
+        settingsButton.toolTip = "Settings (⌘,)"
         settingsButton.target = self
         settingsButton.action = #selector(openSettings)
         pill.onPrimary = { [weak self] in self?.performSelected() }
@@ -131,7 +135,9 @@ final class Palette: NSObject {
         field.onCommandK = { [weak self] in self?.showActions() }
         footerContent.addSubview(settingsButton)
         footerContent.addSubview(pill)
-        footer.addSubview(footerContent)
+        footerGlass.contentView = footerContent
+        footerGlass.spacing = 8
+        footer.addSubview(footerGlass)
         content.addSubview(footer)
     }
 
@@ -148,6 +154,15 @@ final class Palette: NSObject {
         card.appearance = named
         content.appearance = named
         Ink.current = Ink(dark: named?.name == .darkAqua)
+        // In dark mode the glass is the clear kind (more refraction) under a
+        // dark tint, so a white page behind it can't wash it out to white.
+        if Ink.current.dark {
+            glass.style = .clear
+            glass.tintColor = NSColor(white: 0.06, alpha: 0.55)
+        } else {
+            glass.style = .regular
+            glass.tintColor = nil
+        }
         field.textColor = Ink.current.primary
         searchIcon.contentTintColor = Ink.current.secondary
         pill.needsLayout = true
@@ -259,7 +274,8 @@ final class Palette: NSObject {
     }
 
     private func layoutFooter() {
-        footerContent.frame = footer.bounds
+        footerGlass.frame = footer.bounds
+        footerContent.frame = footerGlass.bounds
         let w = footer.bounds.width
         let size: CGFloat = 36
         let y = (Self.footerHeight - size) / 2 - 2
@@ -841,9 +857,12 @@ final class Keycap: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override var wantsUpdateLayer: Bool { true }
+    /// Outlined, as Raycast draws its keys on glass: a hairline, no fill.
     override func updateLayer() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.backgroundColor = Ink.current.fill.cgColor
+            layer?.borderWidth = 1
+            layer?.borderColor = Ink.current.tertiary.cgColor
         }
         label.textColor = Ink.current.secondary
     }
@@ -862,25 +881,25 @@ enum Fill {
     static var soft: CGColor { NSColor.labelColor.withAlphaComponent(0.08).cgColor }
 }
 
-/// The footer's capsule: the main action with its ↩, and Actions ⌘K. A fill
-/// on the card's glass, not a second glass.
+/// The footer's capsule, Liquid Glass: the main action with its ↩, and
+/// Actions ⌘K. Interactive glass, so it answers a press as system controls do.
 final class FooterPill: NSView {
     var onPrimary: (() -> Void)?
     var onActions: (() -> Void)?
     var primaryTitle = "" { didSet { primary.title = primaryTitle; needsLayout = true } }
 
+    private let glass = NSGlassEffectView()
     private let row = FlippedView()
     private let primary = PillSegment(title: "Open", keys: ["↩"])
     private let actions = PillSegment(title: "Actions", keys: ["⌘", "K"])
 
     override var isFlipped: Bool { true }
-    override var wantsUpdateLayer: Bool { true }
 
     init() {
         super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerCurve = .continuous
-        addSubview(row)
+        glass.effectIsInteractive = true
+        glass.contentView = row
+        addSubview(glass)
         row.addSubview(primary)
         row.addSubview(actions)
         primary.onClick = { [weak self] in self?.onPrimary?() }
@@ -892,43 +911,14 @@ final class FooterPill: NSView {
     var fittingWidth: CGFloat { 6 + primary.fittingWidth + 2 + actions.fittingWidth + 6 }
     var actionsAnchor: NSRect { convert(actions.frame, from: row) }
 
-    override func updateLayer() {
-        layer?.cornerRadius = bounds.height / 2
-        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = Fill.soft }
-    }
-
     override func layout() {
         super.layout()
-        needsDisplay = true
-        row.frame = bounds
+        glass.frame = bounds
+        glass.cornerRadius = bounds.height / 2
+        row.frame = glass.bounds
         let h = bounds.height - 8
         primary.frame = NSRect(x: 4, y: 4, width: primary.fittingWidth, height: h)
         actions.frame = NSRect(x: primary.frame.maxX + 2, y: 4, width: actions.fittingWidth, height: h)
-    }
-}
-
-/// A round icon button with the same soft fill as the pill.
-final class FillButton: NSButton {
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-        layer?.cornerCurve = .continuous
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func layout() {
-        super.layout()
-        layer?.cornerRadius = bounds.height / 2
-        refill()
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        refill()
-    }
-
-    private func refill() {
-        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = Fill.soft }
     }
 }
 
