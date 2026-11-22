@@ -93,6 +93,7 @@ final class Tab: NSObject {
         // A configuration WebKit hands over for a new window is a copy made
         // inside WebKit: picture in picture is allowed again to be sure.
         PictureInPicture.allow(view.configuration.preferences)
+        Web.backspaceStays(view.configuration.preferences)
         view.tab = self
         view.navigationDelegate = self
         view.uiDelegate = self

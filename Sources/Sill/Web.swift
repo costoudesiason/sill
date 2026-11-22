@@ -27,6 +27,15 @@ enum Web {
         return "Version/\(version) Safari/605.1.15"
     }()
 
+    /// Backspace edits text and nothing else: WebKit's old habit of going back
+    /// a page on Backspace (Safari dropped it) would throw away a half-filled form.
+    static func backspaceStays(_ preferences: WKPreferences) {
+        let set = NSSelectorFromString("_setBackspaceKeyNavigationEnabled:")
+        guard preferences.responds(to: set) else { return }
+        typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
+        unsafeBitCast(preferences.method(for: set), to: Setter.self)(preferences, set, false)
+    }
+
     static func configuration(private isPrivate: Bool) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = controller
@@ -42,6 +51,7 @@ enum Web {
         // nothing. A page playing sound or video, or still loading, isn't
         // idle, so background audio and picture in picture carry on.
         PictureInPicture.allow(configuration.preferences)
+        backspaceStays(configuration.preferences)
         return configuration
     }
 }
@@ -49,6 +59,13 @@ enum Web {
 /// The web view, knowing which tab it belongs to.
 final class SillWebView: WKWebView {
     weak var tab: Tab?
+
+    /// Clicking into one half of a split brings that half's tab to the front.
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became, let tab, let host = tab.host as? BrowserWindowController { host.paneFocused(tab) }
+        return became
+    }
 
     /// "New Window" reads "New Tab" here: that's what it does.
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {

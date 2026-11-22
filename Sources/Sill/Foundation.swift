@@ -164,7 +164,7 @@ final class Preferences: ObservableObject {
     private init() {
         store.register(defaults: ["suggestions": true, "restoresTabs": true, "applePasswords": true,
                                   "glassBar": true, "glassWash": 0.25, "cornerRadius": 26.0, "showsLinkPreview": true,
-                                  "autoPiP": true, "sleepsTabs": true, "sleepAfterMinutes": 45, "blocksAds": true])
+                                  "autoPiP": true, "sleepsTabs": true, "sleepAfterMinutes": 120, "blocksAds": true])
         theme = Theme(rawValue: store.string(forKey: "theme") ?? "") ?? .system
         glassBar = store.bool(forKey: "glassBar")
         glassWash = store.double(forKey: "glassWash")

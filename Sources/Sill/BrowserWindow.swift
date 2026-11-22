@@ -46,6 +46,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private lazy var bar = TopBar(strip: strip)
     private let stage = StageView()
     private let pageHost = PageHostView()
+    /// Two tabs side by side, if one was split (the tab menu's Split Left/Right).
+    private(set) var split: SplitPair?
+    private var neighbourWarming: DispatchWorkItem?
+    private lazy var splitView: PageSplitView = {
+        let view = PageSplitView()
+        view.onResize = { [weak self] fraction in self?.split?.fraction = fraction }
+        return view
+    }()
+    private lazy var chooser: SplitChooser = {
+        let view = SplitChooser()
+        view.onPick = { [weak self] tab in self?.fillSplit(with: tab) }
+        view.onCancel = { [weak self] in self?.unsplit() }
+        return view
+    }()
     private let top = TopClipView()
     /// Made the first time they're used, not at the window's first layout.
     private var madePalette: Palette?
@@ -299,8 +313,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // page taken out of the window first would have it cancelled. Only
         // a page playing something is asked; any other leaves at once.
         var keep: WKWebView?
+        let sideBySide = split?.contains(previous) == true && split?.contains(tab) == true
         if previous !== tab, let previous, let old = previous.webView, Preferences.shared.autoPictureInPicture,
-           previous.playingVideo || Self.isPlayingAudio(old) {
+           !sideBySide, previous.playingVideo || Self.isPlayingAudio(old) {
             keep = old
             PictureInPicture.leave(previous) { [weak self, weak old, weak previous] floated in
                 guard let self else { return }
@@ -315,12 +330,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         selected = tab
         tab.lastShown = Date()
         let webView = tab.materialize()
-        if previous !== tab || webView.superview !== pageHost {
-            pageHost.subviews.forEach { if $0 !== keep { $0.removeFromSuperview() } }
-            webView.frame = pageHost.bounds
-            webView.autoresizingMask = [.width, .height]
-            pageHost.addSubview(webView)
-        }
+        placePages(keep: keep)
         tab.reloadIfCrashed()
         // Back from picture in picture: WebKit puts a video back in its page
         // only once that page is in the window, so after it is.
@@ -331,6 +341,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // Clicks, ⌘1–9 and ⌃Tab only move the selection; a tab added or
         // closed changes the row.
         if strip.matches(tabs) { strip.select(tab) } else { strip.sync(animated: animated) }
+        strip.markPaired(split?.contains(tab) == true ? split?.other(than: tab) : nil)
+        warmNeighbours(of: tab)
         window?.title = tab.displayTitle
         updateNavigation()
         status.show(nil)
@@ -345,6 +357,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             if closed.count > 30 { closed.removeFirst() }
         }
         tabs.remove(at: index)
+        // A split loses one side: the page left over has the window to itself.
+        if let split, split.contains(tab) { self.split = nil; strip.markPaired(nil) }
         // Its video goes with it, not left floating with nothing to return to.
         tab.webView?.closeAllMediaPresentations { }
         if pictured === tab { pictured = nil }
@@ -475,6 +489,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             self.addTab(url: url, at: index + 1)
         }
         add("Copy Link", { if let url = tab.webView?.url ?? tab.url { Pasteboard.copy(url) } }, enabled: tab.url != nil)
+        menu.addItem(.separator())
+        if split?.contains(tab) == true {
+            add("Separate Split View") { [weak self] in self?.unsplit() }
+        } else {
+            add("Split Left") { [weak self] in self?.split(tab, onLeft: true) }
+            add("Split Right") { [weak self] in self?.split(tab, onLeft: false) }
+        }
         // Off for the one site it broke, rather than everywhere.
         if Preferences.shared.blocksAds, let host = (tab.webView?.url ?? tab.url)?.host(), !host.isEmpty {
             let paused = Shield.shared.isPaused(on: host)
@@ -678,5 +699,100 @@ enum Pasteboard {
         board.clearContents()
         board.writeObjects([url as NSURL])
         board.setString(url.absoluteString, forType: .string)
+    }
+}
+
+
+// MARK: - Split view
+
+extension BrowserWindowController {
+    /// The page area: the one tab in front, or both halves of its split.
+    fileprivate func placePages(keep: WKWebView?) {
+        guard let selected else { return }
+        if let split, split.contains(selected) {
+            for view in pageHost.subviews where view !== keep && view !== splitView { view.removeFromSuperview() }
+            if splitView.superview !== pageHost {
+                splitView.frame = pageHost.bounds
+                splitView.autoresizingMask = [.width, .height]
+                pageHost.addSubview(splitView)
+            }
+            for (pane, tab) in [(splitView.leftPane, split.left), (splitView.rightPane, split.right)] {
+                if let tab {
+                    pane.show(tab.materialize())
+                } else {
+                    chooser.offer(tabs.filter { !split.contains($0) })
+                    pane.show(chooser)
+                }
+            }
+            splitView.layoutSubtreeIfNeeded()
+            splitView.apply(fraction: split.fraction)
+        } else {
+            let webView = selected.materialize()
+            for view in pageHost.subviews where view !== keep && view !== webView { view.removeFromSuperview() }
+            if webView.superview !== pageHost {
+                webView.frame = pageHost.bounds
+                webView.autoresizingMask = [.width, .height]
+                pageHost.addSubview(webView)
+            }
+        }
+    }
+
+    /// Split Left / Split Right: the tab goes to that side, and the other side
+    /// asks which open tab to show there.
+    func split(_ tab: Tab, onLeft: Bool) {
+        split = onLeft ? SplitPair(left: tab, right: nil) : SplitPair(left: nil, right: tab)
+        if selected === tab {
+            placePages(keep: nil)
+            strip.markPaired(nil)
+        } else {
+            select(tab)
+        }
+    }
+
+    fileprivate func fillSplit(with tab: Tab) {
+        guard let split else { return }
+        if split.left == nil { split.left = tab } else { split.right = tab }
+        select(tab)
+        placePages(keep: nil)
+        strip.markPaired(split.other(than: tab))
+    }
+
+    @objc func unsplit() {
+        guard split != nil else { return }
+        split = nil
+        strip.markPaired(nil)
+        placePages(keep: nil)
+        if let webView = selected?.webView { window?.makeFirstResponder(webView) }
+    }
+
+    /// Starts a sleeping or never-shown tab loading in the background.
+    func warm(_ tab: Tab) {
+        guard tab.webView == nil, tab.url != nil, tabs.contains(where: { $0 === tab }) else { return }
+        tab.materialize()
+    }
+
+    /// The tabs either side of the one in front, a moment after it changes:
+    /// the next ⌃Tab, or a click next door, finds its page already there.
+    fileprivate func warmNeighbours(of tab: Tab) {
+        neighbourWarming?.cancel()
+        let work = DispatchWorkItem { [weak self, weak tab] in
+            guard let self, let tab, tab === self.selected, let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
+            for i in [index - 1, index + 1] where self.tabs.indices.contains(i) { self.warm(self.tabs[i]) }
+        }
+        neighbourWarming = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    /// A click into the other half of a split makes that page the one in
+    /// front: the address, back and forward and page commands follow it.
+    func paneFocused(_ tab: Tab) {
+        guard let split, split.contains(tab), selected !== tab, tabs.contains(where: { $0 === tab }) else { return }
+        selected = tab
+        tab.lastShown = Date()
+        strip.select(tab)
+        strip.markPaired(split.other(than: tab))
+        window?.title = tab.displayTitle
+        updateNavigation()
+        changed()
     }
 }

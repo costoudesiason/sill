@@ -141,6 +141,12 @@ final class TabStripView: NSView {
         items.count == tabs.count && zip(items, tabs).allSatisfy { $0.tab === $1 }
     }
 
+    /// The other half of the split in front wears a lighter fill, so the
+    /// pair reads as one.
+    func markPaired(_ tab: Tab?) {
+        for item in items { item.isPaired = item.tab === tab }
+    }
+
     func prefsChanged() {
         items.forEach { $0.needsLayout = true }
         layoutItems(animated: true)
@@ -243,13 +249,14 @@ final class TabItemView: NSView {
     /// While a tab grows in or collapses out, its contents stay laid out at
     /// this width and the frame clips them.
     var layoutWidth: CGFloat? { didSet { if layoutWidth != oldValue { Motion.still { layoutContents() } } } }
+    var isPaired = false { didSet { if isPaired != oldValue { needsDisplay = true } } }
     var isFront = false { didSet { if isFront != oldValue { restyle() } } }
     private var isHovered = false { didSet { if isHovered != oldValue { restyle() } } }
 
     private let icon = NSImageView()
     private let spinner = NSProgressIndicator()
     private let label = NSTextField(labelWithString: "")
-    private let closeButton = NSButton()
+    private let closeButton = TabCloseButton()
     private let fade = CAGradientLayer()
 
     override var isFlipped: Bool { true }
@@ -284,8 +291,6 @@ final class TabItemView: NSView {
         fade.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
         addSubview(label)
 
-        closeButton.isBordered = false
-        closeButton.bezelStyle = .accessoryBarAction
         closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Tab")?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
         closeButton.contentTintColor = .secondaryLabelColor
@@ -308,8 +313,26 @@ final class TabItemView: NSView {
                                        owner: self, userInfo: nil))
     }
 
-    override func mouseEntered(with event: NSEvent) { isHovered = true; needsLayout = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false; needsLayout = true }
+    private var warming: DispatchWorkItem?
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        needsLayout = true
+        // A moment's pause over a sleeping tab starts loading it, so it's ready
+        // by the time it's clicked.
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isHovered else { return }
+            self.strip?.browser?.warm(self.tab)
+        }
+        warming = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        warming?.cancel()
+        needsLayout = true
+    }
 
     // MARK: content
 
@@ -354,6 +377,8 @@ final class TabItemView: NSView {
                 // The selected segment of a macOS 27 segmented control: a
                 // lighter capsule on the bar.
                 color = dark ? NSColor(white: 1, alpha: 0.16) : NSColor(white: 1, alpha: 0.95)
+            } else if isPaired {
+                color = dark ? NSColor(white: 1, alpha: 0.09) : NSColor(white: 1, alpha: 0.6)
             } else if isHovered {
                 color = NSColor.labelColor.withAlphaComponent(0.06)
             } else {
@@ -439,5 +464,49 @@ final class TabItemView: NSView {
 
     @objc private func closeClicked() {
         strip?.close(self)
+    }
+}
+
+
+/// A tab's close button: a soft circle under the pointer, a little stronger
+/// while pressed, as Safari's are.
+final class TabCloseButton: NSButton {
+    private var hovering = false { didSet { needsDisplay = true } }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        isBordered = false
+        wantsLayer = true
+        setButtonType(.momentaryChange)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    override func updateLayer() {
+        guard let layer else { return }
+        layer.cornerRadius = min(bounds.width, bounds.height) / 2
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let alpha: CGFloat = isHighlighted ? 0.2 : hovering ? 0.12 : 0
+            layer.backgroundColor = NSColor.labelColor.withAlphaComponent(alpha).cgColor
+        }
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        hovering = false
     }
 }
