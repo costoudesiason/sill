@@ -35,3 +35,11 @@ nearby iPhone, or a security key). Sill also offers the user's iCloud Keychain
 passwords under sign-in fields, through Apple's Passwords browser helper.
 
 **Distribution:** Developer ID, outside the Mac App Store.
+
+## Status
+
+Submitted 22 Nov 2026 (Request ID 8AHXZ33V5U), after registering the explicit
+App ID com.iasoncostoudes.sill (description "Sill") on team B6WAZ4WYX7.
+Once Apple grants it: create a Developer ID provisioning profile for that App
+ID with the capability, save it as Sill.provisionprofile beside build.sh, and
+run ./build.sh.
