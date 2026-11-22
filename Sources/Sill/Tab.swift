@@ -6,6 +6,9 @@ import WebKit
 @MainActor
 protocol TabHost: AnyObject {
     var window: NSWindow? { get }
+    /// The page area's size: pages loaded out of sight are laid out at it,
+    /// so they're ready to show as they are, and readable by agents.
+    var pageBounds: NSRect { get }
     func tabChanged(_ tab: Tab, _ what: Tab.Change)
     func open(from tab: Tab, url: URL?, configuration: WKWebViewConfiguration?, background: Bool) -> Tab
     func openPopup(from tab: Tab, configuration: WKWebViewConfiguration, size: NSSize) -> Tab?
@@ -40,6 +43,8 @@ final class Tab: NSObject {
     /// Whether a video is playing in the page, as its script last said.
     private(set) var playingVideo = false
     var lastShown = Date()
+    /// Opened by an agent through Sill's agent socket.
+    var openedByAgent = false
 
     private var pending: URL?
     /// The page's back/forward list and place in it, kept while the tab
@@ -79,7 +84,8 @@ final class Tab: NSObject {
     @discardableResult
     func materialize(with configuration: WKWebViewConfiguration? = nil) -> SillWebView {
         if let webView { return webView }
-        let view = SillWebView(frame: .zero, configuration: configuration ?? Web.configuration(private: isPrivate))
+        let view = SillWebView(frame: host?.pageBounds ?? NSRect(x: 0, y: 0, width: 1280, height: 800),
+                               configuration: configuration ?? Web.configuration(private: isPrivate))
         adopt(view, popup: configuration != nil)
         return view
     }
@@ -88,7 +94,7 @@ final class Tab: NSObject {
     /// window keeps one ready while ⌘T is open), and loads what's waiting.
     /// `popup`: WebKit made its configuration for a window a page opened,
     /// and loads it itself.
-    func adopt(_ view: SillWebView, popup: Bool = false) {
+    func adopt(_ view: SillWebView, popup: Bool = false, loaded: Bool = false) {
         guard webView == nil else { return }
         // A configuration WebKit hands over for a new window is a copy made
         // inside WebKit: picture in picture is allowed again to be sure.
@@ -103,6 +109,19 @@ final class Tab: NSObject {
         view.isInspectable = true
         webView = view
         watch(view)
+        // Already loading (or loaded) this very page: keep it, take its place.
+        if loaded {
+            pending = nil
+            savedState = nil
+            if let url = view.url { self.url = url }
+            if let title = view.title, !title.isEmpty { self.title = title }
+            if !isPrivate, let url = view.url { History.shared.record(url, title: view.title, typed: true) }
+            favicon = Favicons.shared.cached(for: view.url ?? url)
+            isLoading = view.isLoading
+            host?.tabChanged(self, .url)
+            host?.tabChanged(self, .title)
+            return
+        }
         // Unseen until it draws, when there's a page coming; a popup's view
         // is already drawing what its opener put there.
         if !popup, savedState != nil || pending != nil { view.holdForFirstFrame() }

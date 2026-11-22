@@ -78,82 +78,145 @@ final class PaneView: NSView {
     }
 }
 
-/// "Choose a tab for this side": the open tabs in the system's pop-up menu.
-/// Picking one fills the side; Cancel puts the page back on its own.
+/// The empty side of a split: your open tabs as a list, in the palette's
+/// glass, each with its icon, title and site. A click fills the side; Cancel
+/// puts the page back on its own.
 final class SplitChooser: NSView {
     var onPick: ((Tab) -> Void)?
     var onCancel: (() -> Void)?
-    private let box = NSView()
+    private let glass = NSGlassEffectView()
+    private let body = FlippedView()
     private let title = NSTextField(labelWithString: "Choose a tab for this side")
-    private let popUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let scroll = NSScrollView()
+    private let list = FlippedView()
     private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
-    private var choices: [Tab] = []
+    private let empty = NSTextField(labelWithString: "No other tabs are open.")
+    private var rows: [ChoiceRow] = []
 
     override var isFlipped: Bool { true }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        wantsLayer = true
-        box.wantsLayer = true
-        box.layer?.cornerRadius = 14
-        box.layer?.cornerCurve = .continuous
-        addSubview(box)
+        glass.cornerRadius = 24
+        glass.contentView = body
+        addSubview(glass)
         title.font = .systemFont(ofSize: 13, weight: .semibold)
-        title.alignment = .center
-        box.addSubview(title)
-        popUp.target = self
-        popUp.action = #selector(picked)
-        box.addSubview(popUp)
-        cancel.bezelStyle = .push
+        title.textColor = .secondaryLabelColor
+        body.addSubview(title)
+        scroll.documentView = list
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        body.addSubview(scroll)
+        empty.textColor = .secondaryLabelColor
+        empty.alignment = .center
+        body.addSubview(empty)
+        cancel.bezelStyle = .glass
         cancel.target = self
         cancel.action = #selector(cancelled)
-        box.addSubview(cancel)
+        body.addSubview(cancel)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override var wantsUpdateLayer: Bool { true }
-    override func updateLayer() {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-            box.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05).cgColor
+    func offer(_ tabs: [Tab]) {
+        rows.forEach { $0.removeFromSuperview() }
+        rows = tabs.map { tab in
+            let row = ChoiceRow(tab: tab)
+            row.onClick = { [weak self] in self?.onPick?(tab) }
+            list.addSubview(row)
+            return row
         }
+        empty.isHidden = !tabs.isEmpty
+        needsLayout = true
     }
 
-    func offer(_ tabs: [Tab]) {
-        choices = tabs
-        popUp.removeAllItems()
-        let prompt = NSMenuItem(title: tabs.isEmpty ? "No other tabs open" : "Choose a Tab", action: nil, keyEquivalent: "")
-        popUp.menu?.addItem(prompt)
-        for tab in tabs {
-            let item = NSMenuItem(title: tab.displayTitle, action: nil, keyEquivalent: "")
-            if let icon = tab.favicon?.copy() as? NSImage {
-                icon.size = NSSize(width: 16, height: 16)
-                item.image = icon
-            }
-            popUp.menu?.addItem(item)
+    private static let rowHeight: CGFloat = 40
+
+    override func layout() {
+        super.layout()
+        let width = min(420, bounds.width - 48)
+        let listHeight = min(CGFloat(max(rows.count, 1)) * Self.rowHeight, bounds.height - 200)
+        let height = 44 + max(listHeight, 40) + 64
+        glass.frame = NSRect(x: (bounds.width - width) / 2, y: max(24, (bounds.height - height) / 2), width: width, height: height)
+        body.frame = glass.bounds
+        title.sizeToFit()
+        title.frame.origin = NSPoint(x: 20, y: 18)
+        scroll.frame = NSRect(x: 0, y: 44, width: width, height: max(listHeight, 40))
+        list.frame = NSRect(x: 0, y: 0, width: width, height: CGFloat(rows.count) * Self.rowHeight)
+        for (i, row) in rows.enumerated() {
+            row.frame = NSRect(x: 8, y: CGFloat(i) * Self.rowHeight, width: width - 16, height: Self.rowHeight)
         }
-        popUp.selectItem(at: 0)
-        popUp.isEnabled = !tabs.isEmpty
-        needsLayout = true
+        empty.frame = NSRect(x: 0, y: 56, width: width, height: 18)
+        cancel.sizeToFit()
+        cancel.frame.origin = NSPoint(x: (width - cancel.frame.width) / 2, y: height - cancel.frame.height - 16)
+    }
+
+    @objc private func cancelled() { onCancel?() }
+}
+
+/// One open tab offered for the empty side.
+private final class ChoiceRow: NSView {
+    var onClick: (() -> Void)?
+    private let icon = NSImageView()
+    private let label = NSTextField(labelWithString: "")
+    private let site = NSTextField(labelWithString: "")
+    private var hovering = false { didSet { needsDisplay = true } }
+
+    override var isFlipped: Bool { true }
+    override var wantsUpdateLayer: Bool { true }
+
+    init(tab: Tab) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 11
+        layer?.cornerCurve = .continuous
+        icon.image = tab.favicon ?? NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
+        icon.contentTintColor = tab.favicon == nil ? .secondaryLabelColor : nil
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        addSubview(icon)
+        label.stringValue = tab.displayTitle
+        label.font = .systemFont(ofSize: 14)
+        label.lineBreakMode = .byTruncatingTail
+        addSubview(label)
+        site.stringValue = Domains.bare(tab.url?.host())
+        site.font = .systemFont(ofSize: 12.5)
+        site.textColor = .secondaryLabelColor
+        site.alignment = .right
+        addSubview(site)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(tab.displayTitle)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func mouseDown(with event: NSEvent) {}
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
+    }
+
+    override func updateLayer() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = hovering ? NSColor.labelColor.withAlphaComponent(0.08).cgColor : NSColor.clear.cgColor
+        }
     }
 
     override func layout() {
         super.layout()
-        let width: CGFloat = min(320, bounds.width - 40)
-        let height: CGFloat = 132
-        box.frame = NSRect(x: (bounds.width - width) / 2, y: (bounds.height - height) / 2, width: width, height: height)
-        title.frame = NSRect(x: 16, y: 20, width: width - 32, height: 18)
-        popUp.frame = NSRect(x: 20, y: 50, width: width - 40, height: 28)
-        cancel.sizeToFit()
-        cancel.frame.origin = NSPoint(x: (width - cancel.frame.width) / 2, y: 90)
+        let h = bounds.height
+        icon.frame = NSRect(x: 12, y: (h - 18) / 2, width: 18, height: 18)
+        let siteWidth = min(140, ceil(site.attributedStringValue.size().width) + 4)
+        site.frame = NSRect(x: bounds.width - 12 - siteWidth, y: (h - 16) / 2, width: siteWidth, height: 16)
+        let labelHeight = ceil(label.intrinsicContentSize.height)
+        label.frame = NSRect(x: 42, y: (h - labelHeight) / 2, width: site.frame.minX - 10 - 42, height: labelHeight)
     }
-
-    @objc private func picked() {
-        let index = popUp.indexOfSelectedItem - 1
-        guard index >= 0, index < choices.count else { return }
-        onPick?(choices[index])
-    }
-
-    @objc private func cancelled() { onCancel?() }
 }

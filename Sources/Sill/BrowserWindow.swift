@@ -100,6 +100,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// The page whose video is still on its way out to Picture in Picture.
     private weak var leaving: WKWebView?
     private var expected = Set<String>()
+    /// What the spare is already loading, guessed from the palette's top hit.
+    private var prerendered: URL?
+    private var prerenderTimer: Timer?
 
     init(isPrivate: Bool, popup: Bool = false) {
         self.isPrivate = isPrivate
@@ -297,8 +300,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             if !shouldSelect {
                 tab.materialize()
             } else if let view = spare {
+                // Return on the site the palette was already loading: the page
+                // is there, mid-load or done, and becomes the tab as it is.
+                let ready = prerendered.map { Self.samePage($0, url) } ?? false
                 spare = nil
-                tab.adopt(view)
+                prerendered = nil
+                tab.adopt(view, loaded: ready)
             }
         }
         if shouldSelect { select(tab, animated: true) } else { strip.sync(animated: true) }
@@ -422,7 +429,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             // On the next turn, so the palette is on screen first.
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.spare == nil, self.window?.isVisible == true else { return }
-                self.spare = SillWebView(frame: .zero, configuration: Web.configuration(private: self.isPrivate))
+                self.spare = SillWebView(frame: self.pageBounds, configuration: Web.configuration(private: self.isPrivate))
                 self.expect(Preferences.shared.engine.search(""))
             }
         } else {
@@ -443,6 +450,33 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         view.perform(connect, with: root)
     }
 
+    /// While ⌘T is open, its top hit, when it's a site you've been to, starts
+    /// loading out of sight in the spare view: Return then shows a page that
+    /// is already there. A short pause first, so passing letters don't load.
+    func prerenderSoon(_ url: URL?) {
+        prerenderTimer?.invalidate()
+        guard let url, paletteOpen, palette.mode == .newTab, !isPrivate,
+              let host = url.host(), History.shared.knows(host: host) else { return }
+        if let prerendered, Self.samePage(prerendered, url) { return }
+        prerenderTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.paletteOpen else { return }
+                let view = self.spare ?? SillWebView(frame: self.pageBounds, configuration: Web.configuration(private: self.isPrivate))
+                self.spare = view
+                self.prerendered = url
+                view.stopLoading()
+                Shield.shared.whenReady { [weak view] in view?.load(URLRequest(url: url)) }
+            }
+        }
+    }
+
+    static func samePage(_ a: URL, _ b: URL) -> Bool {
+        func key(_ url: URL) -> String {
+            Domains.bare(url.host()) + (url.path == "/" ? "" : url.path) + (url.query.map { "?" + $0 } ?? "")
+        }
+        return key(a) == key(b)
+    }
+
     func paletteClosed() {
         expected = []
         if let webView = selected?.webView { window?.makeFirstResponder(webView) }
@@ -450,7 +484,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // Later in the turn, so the Return that closed the palette can claim it.
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.paletteOpen else { return }
+            self.prerenderTimer?.invalidate()
+            self.spare?.stopLoading()
             self.spare = nil
+            self.prerendered = nil
         }
     }
 
@@ -816,6 +853,12 @@ extension BrowserWindowController {
         strip.markPaired(nil)
         placePages(keep: nil)
         if let webView = selected?.webView { window?.makeFirstResponder(webView) }
+    }
+
+    var windowNumber: Int { window?.windowNumber ?? 0 }
+
+    var pageBounds: NSRect {
+        pageHost.bounds.width > 0 ? NSRect(origin: .zero, size: pageHost.bounds.size) : NSRect(x: 0, y: 0, width: 1280, height: 800)
     }
 
     /// Starts a sleeping or never-shown tab loading in the background.

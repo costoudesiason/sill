@@ -23,7 +23,8 @@ struct Visit: Codable, Hashable {
 @MainActor
 final class History {
     static let shared = History()
-    private(set) var visits: [String: Visit] = [:]
+    private(set) var visits: [String: Visit] = [:] { didSet { knownHosts = nil } }
+    private var knownHosts: Set<String>?
     /// Five seconds: a page changing its title or address in a burst is one write, not many.
     private let saver = Saver<[Visit]>(Places.support.appendingPathComponent("history.json"), delay: 5)
     private static let cap = 6000
@@ -157,6 +158,13 @@ final class History {
             if result.count == limit { break }
         }
         return result
+    }
+
+    /// Whether you've been to this site before (www or not).
+    func knows(host: String) -> Bool {
+        let bare = Domains.bare(host)
+        if knownHosts == nil { knownHosts = Set(visits.values.compactMap { $0.address.map { Domains.bare($0.host()) } }) }
+        return knownHosts?.contains(bare) ?? false
     }
 
     /// Lately visited, one per address.

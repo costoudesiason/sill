@@ -33,6 +33,11 @@ controls), plain content everywhere else.
   zoom, downloads to ~/Downloads, private windows (⇧⌘N, nothing written),
   reopen closed tab (⇧⌘T), ⌘1–9, ⌃Tab, Web Inspector (⌥⌘I), default browser.
 
+## Agents
+
+Any agent on your Mac (Claude Code, Codex, any MCP client) can drive Sill once you turn it on
+in Settings › Agents. See [AGENTS.md](AGENTS.md).
+
 ## iCloud Passwords and passkeys
 
 Sill speaks the same protocol as Apple's iCloud Passwords extension for

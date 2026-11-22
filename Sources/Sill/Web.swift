@@ -13,6 +13,10 @@ enum Web {
         let controller = WKUserContentController()
         controller.addUserScript(WKUserScript(source: PageScripts.main, injectionTime: .atDocumentEnd,
                                               forMainFrameOnly: true, in: world))
+        // What agents use to read and act on a page (AgentControl.swift), in
+        // Sill's own world where pages can't see or change it.
+        controller.addUserScript(WKUserScript(source: AgentScript.source, injectionTime: .atDocumentEnd,
+                                              forMainFrameOnly: true, in: world))
         controller.add(router, contentWorld: world, name: "sill")
         return controller
     }()
