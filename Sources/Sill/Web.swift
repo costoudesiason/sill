@@ -39,6 +39,7 @@ enum Web {
         configuration.defaultWebpagePreferences.preferredContentMode = .desktop
         // Pages out of sight keep running, with WebKit's timer throttling.
         configuration.preferences.inactiveSchedulingPolicy = .throttle
+        PictureInPicture.allow(configuration.preferences)
         return configuration
     }
 }
@@ -290,54 +291,79 @@ final class Favicons {
 
 // MARK: - Picture in Picture
 
-/// Leaving a tab that is playing a video takes the video with you, floating,
-/// as Safari does; coming back puts it back in the page.
+/// Leaving a tab that is playing a video takes the video with you, floating
+/// in macOS's own picture in picture window, as Safari does; coming back
+/// puts it back in the page.
+///
+/// Two things make it work. WebKit lets a page into picture in picture on
+/// macOS only with a preference outside the public framework, off by default
+/// in any app but Safari: without it the page is told PiP isn't there at
+/// all. And WebKit wants a user gesture: a script the app runs with
+/// evaluateJavaScript counts as one, but only for its synchronous part, so
+/// the scripts below never await. They run in Sill's world; the videos are
+/// the same elements there, as the DOM is shared between worlds.
+///
+/// Sill's scripts see the main frame only, so a video embedded from another
+/// site (an iframe) doesn't float by itself; youtube.com, Netflix and Twitch
+/// play theirs in the main frame.
 @MainActor
 enum PictureInPicture {
-    /// Resolves true once the video is floating, false if there was none.
-    private static let enter = """
-    const v = [...document.querySelectorAll('video')].find(v => !v.paused && !v.ended && v.readyState > 1
-      && v.getBoundingClientRect().width > 100);
-    if (!v || document.pictureInPictureElement === v) return false;
-    v.dataset.sillPip = '1';
-    try {
-      if (document.pictureInPictureEnabled && !v.disablePictureInPicture) {
-        await v.requestPictureInPicture();
-        return true;
-      }
-    } catch (_) {}
-    if (v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode('picture-in-picture')) {
-      v.webkitSetPresentationMode('picture-in-picture');
-      await new Promise(r => setTimeout(r, 450));
-      return v.webkitPresentationMode === 'picture-in-picture';
+    /// Lets pages in `preferences` use picture in picture, as Safari does.
+    /// Always on: the setting only decides whether Sill floats a video by
+    /// itself, and pages' own PiP buttons work either way.
+    static func allow(_ preferences: WKPreferences) {
+        let set = NSSelectorFromString("_setAllowsPictureInPictureMediaPlayback:")
+        guard preferences.responds(to: set) else { return }
+        typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
+        unsafeBitCast(preferences.method(for: set), to: Setter.self)(preferences, set, true)
     }
-    delete v.dataset.sillPip;
-    return false;
-    """
-    private static let exit = """
-    const v = document.querySelector('video[data-sill-pip]');
-    if (!v) return false;
-    delete v.dataset.sillPip;
-    if (document.pictureInPictureElement === v) { await document.exitPictureInPicture(); return true; }
-    if (v.webkitPresentationMode === 'picture-in-picture') v.webkitSetPresentationMode('inline');
-    return true;
+
+    /// The largest video playing, into picture in picture. Answers "in",
+    /// "none" (nothing playing) or "refused".
+    private static let enter = """
+    (function () {
+      var videos = document.querySelectorAll('video'), best = null, area = 0;
+      for (var i = 0; i < videos.length; i++) {
+        var v = videos[i];
+        if (v.webkitPresentationMode === 'picture-in-picture') return 'in';
+        if (v.paused || v.ended || v.readyState < 2) continue;
+        var box = v.getBoundingClientRect();
+        if (box.width * box.height >= area) { area = box.width * box.height; best = v; }
+      }
+      if (!best) return 'none';
+      if (!best.webkitSupportsPresentationMode || !best.webkitSupportsPresentationMode('picture-in-picture')) return 'refused';
+      try { best.webkitSetPresentationMode('picture-in-picture'); return 'in'; } catch (e) { return 'refused'; }
+    })();
     """
 
-    /// `done` runs once the video has floated (after the window animation)
-    /// or straight away when there's nothing to float.
-    static func leave(_ tab: Tab, done: @escaping () -> Void) {
-        guard let webView = tab.webView else { return done() }
-        webView.callAsyncJavaScript(enter, arguments: [:], in: nil, in: .page) { result in
-            let floated = (try? result.get()) as? Bool ?? false
-            if floated {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: done)
+    /// Back into the page, whatever is floating from it.
+    private static let exit = """
+    (function () {
+      var videos = document.querySelectorAll('video'), out = false;
+      for (var i = 0; i < videos.length; i++) {
+        if (videos[i].webkitPresentationMode === 'picture-in-picture') {
+          try { videos[i].webkitSetPresentationMode('inline'); out = true; } catch (e) {}
+        }
+      }
+      return out ? 'out' : 'none';
+    })();
+    """
+
+    /// `done(true)` runs once the video has floated (after the window
+    /// animation), `done(false)` straight away when nothing did.
+    static func leave(_ tab: Tab, done: @escaping (Bool) -> Void) {
+        // A video in full screen is already where it wants to be.
+        guard let webView = tab.webView, webView.fullscreenState == .notInFullscreen else { return done(false) }
+        webView.evaluateJavaScript(enter, in: nil, in: Web.world) { result in
+            if (try? result.get()) as? String == "in" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { done(true) }
             } else {
-                done()
+                done(false)
             }
         }
     }
 
     static func `return`(to tab: Tab) {
-        tab.webView?.callAsyncJavaScript(exit, arguments: [:], in: nil, in: .page) { _ in }
+        tab.webView?.evaluateJavaScript(exit, in: nil, in: Web.world) { _ in }
     }
 }

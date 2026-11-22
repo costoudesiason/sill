@@ -42,6 +42,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     var onChange: (() -> Void)?
     private var napTimer: Timer?
     private var watchingPrefs: AnyCancellable?
+    /// The tab whose video Sill sent to picture in picture, to bring back when it's shown again.
+    private weak var pictured: Tab?
 
     init(isPrivate: Bool, popup: Bool = false) {
         self.isPrivate = isPrivate
@@ -225,12 +227,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         var keep: WKWebView?
         if previous !== tab, let previous, let old = previous.webView, Preferences.shared.autoPictureInPicture {
             keep = old
-            PictureInPicture.leave(previous) { [weak self, weak old] in
-                guard let self, let old, old !== self.selected?.webView else { return }
+            PictureInPicture.leave(previous) { [weak self, weak old, weak previous] floated in
+                guard let self else { return }
+                if floated, let previous {
+                    // Back on it before the video landed: it comes straight back.
+                    if previous === self.selected { PictureInPicture.return(to: previous) } else { self.pictured = previous }
+                }
+                guard let old, old !== self.selected?.webView else { return }
                 old.removeFromSuperview()
             }
         }
-        if previous !== tab { PictureInPicture.return(to: tab) }
         selected = tab
         tab.lastShown = Date()
         let webView = tab.materialize()
@@ -239,6 +245,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             webView.frame = pageHost.bounds
             webView.autoresizingMask = [.width, .height]
             pageHost.addSubview(webView)
+        }
+        // Back from picture in picture: WebKit puts a video back in its page
+        // only once that page is in the window, so after it is.
+        if tab === pictured {
+            pictured = nil
+            PictureInPicture.return(to: tab)
         }
         strip.sync(animated: animated)
         window?.title = tab.displayTitle
@@ -255,6 +267,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             if closed.count > 30 { closed.removeFirst() }
         }
         tabs.remove(at: index)
+        // Its video goes with it, not left floating with nothing to return to.
+        tab.webView?.closeAllMediaPresentations { }
+        if pictured === tab { pictured = nil }
         tab.webView?.removeFromSuperview()
         if tabs.isEmpty {
             selected = nil
@@ -329,10 +344,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         guard Preferences.shared.sleepsTabs else { return }
         let after = TimeInterval(max(5, Preferences.shared.sleepAfterMinutes) * 60)
         let now = Date()
-        for tab in tabs where tab !== selected {
+        for tab in tabs where tab !== selected && tab !== pictured {
+            // A floating video may be muted, so not "playing audio": it counts anyway.
             guard let webView = tab.webView, now.timeIntervalSince(tab.lastShown) > after,
                   webView.cameraCaptureState == .none, webView.microphoneCaptureState == .none,
-                  !Self.isPlayingAudio(webView)
+                  webView.fullscreenState == .notInFullscreen, !Self.isPlayingAudio(webView)
             else { continue }
             tab.sleep()
         }
@@ -506,6 +522,12 @@ extension BrowserWindowController: TabHost {
     }
 
     func closeRequested(_ tab: Tab) { close(tab) }
+
+    func bringBack(_ tab: Tab) {
+        select(tab, animated: true)
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+    }
 
     func hovered(_ tab: Tab, link: String?) {
         guard tab === selected, !palette.isOpen, Preferences.shared.showsLinkPreview else { return }

@@ -10,6 +10,8 @@ protocol TabHost: AnyObject {
     func open(from tab: Tab, url: URL?, configuration: WKWebViewConfiguration?, background: Bool) -> Tab
     func openPopup(from tab: Tab, configuration: WKWebViewConfiguration, size: NSSize) -> Tab?
     func closeRequested(_ tab: Tab)
+    /// To the front, with its window: its video is coming back from picture in picture.
+    func bringBack(_ tab: Tab)
     func hovered(_ tab: Tab, link: String?)
     func focused(_ tab: Tab, field: LoginField)
 }
@@ -66,6 +68,9 @@ final class Tab: NSObject {
     func materialize(with configuration: WKWebViewConfiguration? = nil) -> SillWebView {
         if let webView { return webView }
         let view = SillWebView(frame: .zero, configuration: configuration ?? Web.configuration(private: isPrivate))
+        // A configuration WebKit hands over for a new window is a copy made
+        // inside WebKit: picture in picture is allowed again to be sure.
+        PictureInPicture.allow(view.configuration.preferences)
         view.tab = self
         view.navigationDelegate = self
         view.uiDelegate = self
@@ -308,6 +313,14 @@ extension Tab: WKUIDelegate {
 
     func webViewDidClose(_ webView: WKWebView) {
         host?.closeRequested(self)
+    }
+
+    /// The button on macOS's picture in picture window that puts the video
+    /// back. WebKit puts it back into its page only once that page is seen,
+    /// and the page is a tab behind another: it comes to the front first.
+    @objc(_webViewFullscreenMayReturnToInline:)
+    func webViewFullscreenMayReturnToInline(_ webView: WKWebView) {
+        host?.bringBack(self)
     }
 
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
