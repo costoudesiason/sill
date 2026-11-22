@@ -16,6 +16,9 @@ APP="build/Sill.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Sill"
+# Without its symbol tables the binary is half the size and maps in faster;
+# nothing looks them up at run time.
+strip -rSTx "$APP/Contents/MacOS/Sill"
 # The icon: an Icon Composer file, compiled the way Xcode would, so macOS
 # renders its glass layers (Assets.car) with a flat fallback (AppIcon.icns).
 xcrun actool --compile "$APP/Contents/Resources" --app-icon AppIcon --platform macosx \
