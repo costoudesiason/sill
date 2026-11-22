@@ -154,11 +154,12 @@ final class Palette: NSObject {
         card.appearance = named
         content.appearance = named
         Ink.current = Ink(dark: named?.name == .darkAqua)
-        // In dark mode the glass is the clear kind (more refraction) under a
-        // dark tint, so a white page behind it can't wash it out to white.
+        // Frosted, as Raycast's: regular glass blurs what's behind so rows
+        // stay readable over busy pages, under a soft mid-grey tint so a
+        // white page can't wash it out to white, nor a dark one to black.
         if Ink.current.dark {
-            glass.style = .clear
-            glass.tintColor = NSColor(white: 0.06, alpha: 0.55)
+            glass.style = .regular
+            glass.tintColor = NSColor(white: 0.32, alpha: 0.42)
         } else {
             glass.style = .regular
             glass.tintColor = nil
