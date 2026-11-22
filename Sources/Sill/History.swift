@@ -177,14 +177,18 @@ final class History {
         ContiguousArray(text.precomposedStringWithCanonicalMapping.utf8)
     }
 
-    /// The words' bytes held still for as long as `body` looks at them.
+    /// The words' bytes held still for as long as `body` looks at them: one
+    /// run of memory however many words there are.
     private static func pointers(to words: [ContiguousArray<UInt8>], _ body: ([UnsafeRawBufferPointer]) -> Void) {
-        var held: [UnsafeRawBufferPointer] = []
-        func hold(_ index: Int) {
-            guard index < words.count else { body(held); return }
-            words[index].withUnsafeBytes { held.append($0); hold(index + 1) }
+        var all = ContiguousArray<UInt8>()
+        for word in words { all.append(contentsOf: word) }
+        all.withUnsafeBytes { all in
+            var start = 0
+            body(words.map { word in
+                defer { start += word.count }
+                return UnsafeRawBufferPointer(rebasing: all[start..<start + word.count])
+            })
         }
-        hold(0)
     }
 
     private func reading(_ visit: Visit) -> Reading {
