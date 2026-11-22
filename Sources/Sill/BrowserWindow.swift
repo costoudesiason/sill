@@ -381,6 +381,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         tab.webView?.closeAllMediaPresentations { }
         if pictured === tab { pictured = nil }
         tab.webView?.removeFromSuperview()
+        Web.releaseIdleProcesses()
         if tabs.isEmpty {
             selected = nil
             window?.close()
@@ -536,6 +537,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         peekWatch = nil
         endPeek()
         for tab in tabs { tab.webView?.removeFromSuperview() }
+        Web.releaseIdleProcesses()
         AppDelegate.shared.windowClosed(self)
     }
 

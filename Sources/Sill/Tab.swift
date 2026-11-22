@@ -199,6 +199,8 @@ final class Tab: NSObject {
         watching = []
         webView.removeFromSuperview()
         self.webView = nil
+        // Asleep to give memory back: its process isn't kept waiting either.
+        Web.releaseIdleProcesses()
     }
 
     /// Sleeps, unless something has been typed into the page and not sent:
