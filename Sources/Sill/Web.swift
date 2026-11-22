@@ -63,14 +63,16 @@ enum Web {
     /// put to sleep) for the site's next page, for half an hour, with some
     /// of what the page had allocated still in it: tens of megabytes each,
     /// over a hundred for a heavy site. They are let go once tabs have stopped
-    /// going; the process kept started for the next page is not one of them.
-    /// A site's service worker outlives its page by some seconds and only
-    /// then is its process kept, hence the second pass.
+    /// going for half a minute, not sooner: while tabs are still being closed
+    /// and opened the kept processes are what the next pages start in. The
+    /// process kept started for the next page is not one of them. A site's
+    /// service worker outlives its page by some seconds and only then is its
+    /// process kept, hence the second pass.
     static func releaseIdleProcesses() {
         let clear = NSSelectorFromString("_clearWebProcessCache")
         guard pool.responds(to: clear) else { return }
         releases.forEach { $0.cancel() }
-        releases = [2, 20].map { delay in
+        releases = [30, 50].map { delay in
             let work = DispatchWorkItem { pool.perform(clear) }
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
             return work
