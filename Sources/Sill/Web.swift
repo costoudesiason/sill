@@ -242,7 +242,17 @@ enum PageScripts {
 
       // Links under the pointer.
       let hovered = null;
-      const hover = (href) => { if (href !== hovered) { hovered = href; post({ t: 'hover', href }); } };
+      // While the page scrolls, links pass under a still pointer many times
+      // a second; the preview waits for the scroll to settle.
+      let wanted = null, settle = 0, scrolledAt = 0;
+      const tell = () => { if (wanted !== hovered) { hovered = wanted; post({ t: 'hover', href: wanted }); } };
+      const hover = (href) => {
+        wanted = href;
+        clearTimeout(settle);
+        const wait = 150 - (performance.now() - scrolledAt);
+        if (wait > 0) settle = setTimeout(tell, wait); else tell();
+      };
+      addEventListener('scroll', () => { scrolledAt = performance.now(); }, { passive: true, capture: true });
       document.addEventListener('mouseover', (e) => {
         const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
         hover(a && a.href && !a.href.startsWith('javascript:') ? a.href : null);
