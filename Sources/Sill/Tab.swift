@@ -56,6 +56,7 @@ final class Tab: NSObject {
     private var lastRetitled: (url: URL, title: String)?
     /// Typed or picked in the palette: counts for more in history.
     private var typedNavigation = false
+    private var adoptedPreload = false
 
     init(url: URL?, title: String = "", isPrivate: Bool) {
         self.url = url
@@ -90,6 +91,10 @@ final class Tab: NSObject {
     /// and loads it itself.
     func adopt(_ view: SillWebView, popup: Bool = false) {
         guard webView == nil else { return }
+        let preload = view.takePreload()
+        let reuse = !popup && savedState == nil && preload?.started == true
+            && pending.map { preload?.matches($0) == true } == true
+        if preload != nil { view.setAllMediaPlaybackSuspended(false) }
         // A configuration WebKit hands over for a new window is a copy made
         // inside WebKit: picture in picture is allowed again to be sure.
         PictureInPicture.allow(view.configuration.preferences)
@@ -103,6 +108,16 @@ final class Tab: NSObject {
         view.isInspectable = true
         webView = view
         watch(view)
+        if reuse, let preload {
+            pending = nil
+            adoptedPreload = !preload.finished
+            let drawn = view.hasDrawnPage
+            if preload.committed { self.webView(view, didCommit: nil) }
+            view.hasDrawnPage = drawn
+            if !drawn && !preload.finished { view.holdForFirstFrame() }
+            refreshPreloadedPage()
+            return
+        }
         // Unseen until it draws, when there's a page coming; a popup's view
         // is already drawing what its opener put there.
         if !popup, savedState != nil || pending != nil { view.holdForFirstFrame() }
@@ -124,7 +139,7 @@ final class Tab: NSObject {
 
     private func watch(_ view: SillWebView) {
         watching = [
-            view.observe(\.title, options: [.new]) { [weak self] view, _ in
+            view.observe(\.title, options: [.initial, .new]) { [weak self] view, _ in
                 MainActor.assumeIsolated {
                     guard let self, let title = view.title, !title.isEmpty || view.url != nil else { return }
                     self.title = title
@@ -135,7 +150,7 @@ final class Tab: NSObject {
                     self.host?.tabChanged(self, .title)
                 }
             },
-            view.observe(\.url, options: [.new]) { [weak self] view, _ in
+            view.observe(\.url, options: [.initial, .new]) { [weak self] view, _ in
                 MainActor.assumeIsolated {
                     guard let self, let url = view.url else { return }
                     let hostChanged = url.host() != self.url?.host()
@@ -144,21 +159,21 @@ final class Tab: NSObject {
                     self.host?.tabChanged(self, .url)
                 }
             },
-            view.observe(\.isLoading, options: [.new]) { [weak self] view, _ in
+            view.observe(\.isLoading, options: [.initial, .new]) { [weak self] view, _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.isLoading = view.isLoading
                     self.host?.tabChanged(self, .loading)
                 }
             },
-            view.observe(\.canGoBack, options: [.new]) { [weak self] view, _ in
+            view.observe(\.canGoBack, options: [.initial, .new]) { [weak self] view, _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.canGoBack = view.canGoBack
                     self.host?.tabChanged(self, .navigation)
                 }
             },
-            view.observe(\.canGoForward, options: [.new]) { [weak self] view, _ in
+            view.observe(\.canGoForward, options: [.initial, .new]) { [weak self] view, _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.canGoForward = view.canGoForward
@@ -212,6 +227,8 @@ final class Tab: NSObject {
 
     func load(_ url: URL, typed: Bool = false) {
         webView?.cancelNavigationTrace()
+        webView?.hasDrawnPage = false
+        adoptedPreload = false
         typedNavigation = typed
         self.url = url
         if let webView {
@@ -270,6 +287,10 @@ final class Tab: NSObject {
             self.favicon = image
             self.host?.tabChanged(self, .icon)
         }
+    }
+
+    private func refreshPreloadedPage() {
+        webView?.evaluateJavaScript("dispatchEvent(new Event('sill-adopt'))", in: nil, in: Web.world) { _ in }
     }
 }
 
@@ -334,6 +355,7 @@ extension Tab: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         (webView as? SillWebView)?.tracedNavigationCommitted = true
+        (webView as? SillWebView)?.hasDrawnPage = false
         scrolled(false)
         playingVideo = false
         guard let url = webView.url else { return }
@@ -346,6 +368,7 @@ extension Tab: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if adoptedPreload { refreshPreloadedPage(); adoptedPreload = false }
         // A page with nothing to lay out never has a first frame: done is done.
         (webView as? SillWebView)?.showFirstFrame()
     }
@@ -429,6 +452,7 @@ extension Tab: WKUIDelegate {
     @objc(_webView:renderingProgressDidChange:)
     func webView(_ webView: WKWebView, renderingProgressDidChange events: UInt) {
         if events & SillWebView.firstFrame != 0 {
+            (webView as? SillWebView)?.hasDrawnPage = true
             (webView as? SillWebView)?.finishNavigationTrace()
             (webView as? SillWebView)?.showFirstFrame()
         }

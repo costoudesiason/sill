@@ -50,6 +50,10 @@ final class Palette: NSObject {
     /// What was actually typed, not counting the inline completion.
     private var typed = ""
     private var completing = true
+    private var inlineCompleted: String?
+    private var preloadTimer: Timer?
+    private var searchPreconnected = false
+    private var rebuilding = false
 
     static let width: CGFloat = 680
     static let fieldHeight: CGFloat = 58
@@ -141,6 +145,8 @@ final class Palette: NSObject {
         guard let browser else { return }
         let interval = Perf.begin("Palette open to visible")
         self.mode = mode
+        inlineCompleted = nil
+        searchPreconnected = false
         // Glass picks its look from what's behind it a frame late; pin the
         // window's own, and fixed colours with it, before anything is drawn,
         // so no text (placeholder included) flips from dark to light.
@@ -188,11 +194,13 @@ final class Palette: NSObject {
         }
         if !wasOpen { appear { Perf.end("Palette open to visible", interval) } }
         else { Perf.end("Palette open to visible", interval) }
+        headStart()
     }
 
     func close(animated: Bool = true) {
         guard isOpen else { return }
         isOpen = false
+        preloadTimer?.invalidate()
         suggestionTask?.cancel()
         suggestionTimer?.invalidate()
         catcher.isHidden = true
@@ -277,7 +285,12 @@ final class Palette: NSObject {
     private func rebuild(keepSelection: Bool = false) {
         guard let browser else { return }
         let interval = Perf.begin("Palette rebuild")
-        defer { Perf.end("Palette rebuild", interval) }
+        rebuilding = true
+        defer {
+            rebuilding = false
+            headStart()
+            Perf.end("Palette rebuild", interval)
+        }
         let previous = keepSelection ? selectedItemKey : nil
         let text = query
         var rows: [Row] = []
@@ -397,6 +410,48 @@ final class Palette: NSObject {
         }
         pill.primaryTitle = text
         layoutFooter()
+        if !rebuilding { headStart() }
+    }
+
+    private var returnItem: Item? {
+        let row = table.selectedRow
+        if row >= 0, row < rows.count, let item = rows[row].item { return item }
+        guard !query.isEmpty, mode != .tabs else { return nil }
+        return Address.url(from: query).map(Item.go) ?? .search(query)
+    }
+
+    func headStart() {
+        guard isOpen, let browser else { return }
+        preloadTimer?.invalidate()
+        var url: URL?
+        var visit: Visit?
+        var search = false
+        switch returnItem {
+        case .go(let address)?:
+            url = address
+            if query == inlineCompleted, let key = History.key(address) { visit = History.shared.visits[key] }
+        case .visit(let match)?:
+            url = match.address
+            visit = match
+        case .search(let text)?, .suggestion(let text)?:
+            url = Preferences.shared.engine.search(text)
+            search = true
+        default: break
+        }
+        guard let view = browser.preparePaletteTarget(url, mode: mode), let url else { return }
+        if !search || !searchPreconnected {
+            Web.preconnect(url, in: view)
+            if search { searchPreconnected = true }
+        }
+        guard mode == .newTab, !query.isEmpty, let visit,
+              visit.typed > 0 || (visit.count >= 10 && visit.score() >= 20),
+              view.preload == nil else { return }
+        preloadTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isOpen else { return }
+                self.browser?.preloadPalette(url)
+            }
+        }
     }
 
     // MARK: - suggestions
@@ -501,12 +556,7 @@ final class Palette: NSObject {
     }
 
     private func performSelected(tracingReturn: Bool = false) {
-        let row = table.selectedRow
-        if row >= 0, row < rows.count, let item = rows[row].item {
-            perform(item, tracingReturn: tracingReturn)
-        } else if !query.isEmpty, mode != .tabs {
-            perform(Address.url(from: query).map(Item.go) ?? .search(query), tracingReturn: tracingReturn)
-        }
+        if let item = returnItem { perform(item, tracingReturn: tracingReturn) }
     }
 
     private func perform(_ item: Item, tracingReturn: Bool = false) {
@@ -536,6 +586,7 @@ final class Palette: NSObject {
     // MARK: - inline completion
 
     private func complete() {
+        inlineCompleted = nil
         guard let editor = field.currentEditor() as? NSTextView else { return }
         let text = editor.string
         typed = text
@@ -547,6 +598,7 @@ final class Palette: NSObject {
         guard !rest.isEmpty else { return }
         let start = (text as NSString).length
         editor.string = text + rest
+        inlineCompleted = text + rest
         editor.setSelectedRange(NSRange(location: start, length: (rest as NSString).length))
     }
 }

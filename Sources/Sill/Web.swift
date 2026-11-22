@@ -103,16 +103,49 @@ enum Web {
 /// The web view, knowing which tab it belongs to.
 final class SillWebView: WKWebView {
     weak var tab: Tab?
+    private(set) var preload: PreloadedPage?
+    var hasDrawnPage = false
     private var navigationInterval: Perf.Interval?
     var tracedNavigationCommitted = false
 
     func traceNavigation(_ interval: Perf.Interval) {
+        let committed = tracedNavigationCommitted
         cancelNavigationTrace()
+        tracedNavigationCommitted = committed
+        if hasDrawnPage {
+            Perf.end("Palette Return to first frame", interval)
+            return
+        }
         let observe = NSSelectorFromString("_setObservedRenderingProgressEvents:")
         guard responds(to: observe) else { Perf.cancel("Palette Return to first frame", interval); return }
         typealias Setter = @convention(c) (AnyObject, Selector, UInt) -> Void
         unsafeBitCast(method(for: observe), to: Setter.self)(self, observe, Self.firstFrame)
         navigationInterval = interval
+    }
+
+    func beginPreload(_ url: URL) {
+        guard preload == nil else { return }
+        let page = PreloadedPage(url)
+        preload = page
+        navigationDelegate = page
+        uiDelegate = page
+        setAllMediaPlaybackSuspended(true)
+        let observe = NSSelectorFromString("_setObservedRenderingProgressEvents:")
+        if responds(to: observe) {
+            typealias Setter = @convention(c) (AnyObject, Selector, UInt) -> Void
+            unsafeBitCast(method(for: observe), to: Setter.self)(self, observe, Self.firstFrame)
+        }
+        Shield.shared.whenReady { [weak self, weak page] in
+            guard let self, let page, self.preload === page else { return }
+            page.started = true
+            self.load(URLRequest(url: url))
+        }
+    }
+
+    func takePreload() -> PreloadedPage? {
+        let page = preload
+        preload = nil
+        return page
     }
 
     func finishNavigationTrace() {
@@ -189,6 +222,88 @@ final class SillWebView: WKWebView {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { once() }
         typealias After = @convention(c) (AnyObject, Selector, @escaping @convention(block) () -> Void) -> Void
         unsafeBitCast(method(for: presented), to: After.self)(self, presented) { DispatchQueue.main.async { once() } }
+    }
+}
+
+/// A page nobody has chosen yet: it reports nothing outside its spare view.
+@MainActor
+final class PreloadedPage: NSObject, WKNavigationDelegate, WKUIDelegate {
+    let url: URL
+    var started = false
+    private(set) var committed = false
+    private(set) var finished = false
+    private(set) var failed = false
+
+    init(_ url: URL) { self.url = url; super.init() }
+
+    func matches(_ url: URL) -> Bool {
+        guard !failed, let key = History.key(self.url) else { return false }
+        return key == History.key(url)
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        committed = false
+        finished = false
+        (webView as? SillWebView)?.hasDrawnPage = false
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        committed = true
+        (webView as? SillWebView)?.hasDrawnPage = false
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finished = true }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed = true }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed = true }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { failed = true }
+
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        let scheme = action.request.url?.scheme?.lowercased() ?? ""
+        guard !action.shouldPerformDownload, ["http", "https", "about", "data", "blob"].contains(scheme) else {
+            failed = true
+            return decisionHandler(.cancel)
+        }
+        decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        let attachment = (response.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Disposition")?
+            .lowercased().hasPrefix("attachment") == true
+        guard response.canShowMIMEType, !attachment else { failed = true; return decisionHandler(.cancel) }
+        decisionHandler(.allow)
+    }
+
+    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                 completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust else {
+            failed = true
+            return completionHandler(.cancelAuthenticationChallenge, nil)
+        }
+        completionHandler(.performDefaultHandling, nil)
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) { failed = true; completionHandler() }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) { failed = true; completionHandler(false) }
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) { failed = true; completionHandler(nil) }
+
+    func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+                 initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
+                 decisionHandler: @escaping (WKPermissionDecision) -> Void) { failed = true; decisionHandler(.deny) }
+
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) { failed = true; completionHandler(nil) }
+
+    @objc(_webView:renderingProgressDidChange:)
+    func webView(_ webView: WKWebView, renderingProgressDidChange events: UInt) {
+        if events & SillWebView.firstFrame != 0 { (webView as? SillWebView)?.hasDrawnPage = true }
     }
 }
 
@@ -312,6 +427,13 @@ enum PageScripts {
         post({ t: 'icon', href: best || new URL('/favicon.ico', location.href).href });
       };
       if (document.readyState === 'complete') icon(); else addEventListener('load', icon, { once: true });
+
+      addEventListener('sill-adopt', () => {
+        icon();
+        playing = false;
+        media();
+        post({ t: 'scroll', v: (document.scrollingElement || document.documentElement).scrollTop > 0 });
+      });
 
       // Sign-in boxes.
       const textual = (el) => el instanceof HTMLInputElement && ['text', 'email', 'tel', ''].includes(el.type);

@@ -303,7 +303,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
                 tab.materialize()
             } else if let view = spare {
                 spare = nil
-                tab.adopt(view)
+                if let preload = view.preload, !preload.matches(url) || state != nil {
+                    view.stopLoading()
+                    _ = view.takePreload()
+                    tab.materialize()
+                } else {
+                    tab.adopt(view)
+                }
             }
         }
         if shouldSelect { select(tab, animated: true) } else { strip.sync(animated: true) }
@@ -429,10 +435,28 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if mode == .newTab, spare == nil {
             // On the next turn, so the palette is on screen first.
             DispatchQueue.main.async { [weak self] in
-                guard let self, self.spare == nil, self.window?.isVisible == true else { return }
+                guard let self, self.spare == nil, self.window?.isVisible == true,
+                      self.paletteOpen, self.palette.mode == .newTab else { return }
                 self.spare = SillWebView(frame: .zero, configuration: Web.configuration(private: self.isPrivate))
+                self.palette.headStart()
             }
         }
+    }
+
+    func preparePaletteTarget(_ url: URL?, mode: Palette.Mode) -> SillWebView? {
+        if let view = spare, let preload = view.preload,
+           mode != .newTab || url.map({ preload.matches($0) }) != true {
+            view.stopLoading()
+            _ = view.takePreload()
+            spare = mode == .newTab ? SillWebView(frame: .zero, configuration: Web.configuration(private: isPrivate)) : nil
+        }
+        return mode == .newTab ? spare : mode == .address ? selected?.webView : nil
+    }
+
+    func preloadPalette(_ url: URL) {
+        guard paletteOpen, palette.mode == .newTab, History.key(url) != nil, let spare else { return }
+        spare.frame = pageHost.bounds
+        spare.beginPreload(url)
     }
 
     func paletteClosed() {
@@ -441,6 +465,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // Later in the turn, so the Return that closed the palette can claim it.
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.paletteOpen else { return }
+            self.spare?.stopLoading()
+            _ = self.spare?.takePreload()
             self.spare = nil
         }
     }
