@@ -23,8 +23,12 @@ struct Visit: Codable, Hashable {
 @MainActor
 final class History {
     static let shared = History()
-    private(set) var visits: [String: Visit] = [:] { didSet { knownHosts = nil; shelf = nil } }
+    private(set) var visits: [String: Visit] = [:] { didSet { knownHosts = nil; shelf = nil; latest = nil } }
     private var knownHosts: Set<String>?
+    /// The last answer to `recent`, kept until history changes: the empty
+    /// palette asks each time it is shown or its field is cleared, and each
+    /// answer is a sort of everything.
+    private var latest: (limit: Int, visits: [Visit])?
     /// Five seconds: a page changing its title or address in a burst is one write, not many.
     private let saver = Saver<[Visit]>(Places.support.appendingPathComponent("history.json"), delay: 5)
     private static let cap = 6000
@@ -213,7 +217,10 @@ final class History {
 
     /// Lately visited, one per address.
     func recent(limit: Int) -> [Visit] {
-        Array(visits.values.sorted { $0.last > $1.last }.prefix(limit))
+        if let latest, latest.limit == limit { return latest.visits }
+        let made = Array(visits.values.sorted { $0.last > $1.last }.prefix(limit))
+        latest = (limit, made)
+        return made
     }
 
     /// Most visited sites, one per host.

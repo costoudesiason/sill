@@ -21,6 +21,7 @@ final class Palette: NSObject {
         case header(String)
         case item(Item)
         var item: Item? { if case .item(let item) = self { return item }; return nil }
+        var isHeader: Bool { if case .header = self { return true }; return false }
     }
 
     private weak var browser: BrowserWindowController?
@@ -45,6 +46,8 @@ final class Palette: NSObject {
     private(set) var isOpen = false
     private(set) var mode: Mode = .newTab
     private var rows: [Row] = []
+    /// The text the rows were made for: what they set in semibold.
+    private var shownQuery = ""
     private var suggestions: [String] = []
     private var suggestionTask: URLSessionDataTask?
     private var suggestionTimer: Timer?
@@ -183,7 +186,8 @@ final class Palette: NSObject {
         completing = false
         suggestions = []
         layout(in: stage)
-        rebuild()
+        // From scratch: the rows on screen were drawn in the last opening's colours.
+        rebuild(fresh: true)
 
         let wasOpen = isOpen
         isOpen = true
@@ -284,7 +288,7 @@ final class Palette: NSObject {
 
     private var query: String { field.stringValue.trimmingCharacters(in: .whitespaces) }
 
-    private func rebuild(keepSelection: Bool = false) {
+    private func rebuild(keepSelection: Bool = false, fresh: Bool = false) {
         guard let browser else { return }
         let previous = keepSelection ? selectedItemKey : nil
         let text = query
@@ -348,8 +352,7 @@ final class Palette: NSObject {
                 rows += fresh.map { .item(.suggestion($0)) }
             }
         }
-        self.rows = rows
-        table.reloadData()
+        show(rows, for: text, fresh: fresh)
         // The top hit, if it's a site: loaded ahead so Return opens it at once.
         if mode == .newTab, let first = rows.first(where: { $0.item != nil })?.item {
             switch first {
@@ -364,6 +367,32 @@ final class Palette: NSObject {
         let index = previous.flatMap { key in rows.firstIndex { $0.item.map(Self.key) == key } }
             ?? current ?? rows.firstIndex { $0.item != nil }
         select(index)
+    }
+
+    /// Puts the new rows in the table. Typing mostly changes what rows say,
+    /// not how many there are or which are headers, so the rows on screen
+    /// are told their new contents and stay where they are; only from the
+    /// first row whose kind differs are rows taken out and put in. Reloading
+    /// the table instead builds every row's views again on every key.
+    private func show(_ new: [Row], for text: String, fresh: Bool) {
+        let old = rows
+        rows = new
+        shownQuery = text
+        guard !fresh, table.numberOfRows == old.count else { table.reloadData(); return }
+        var same = 0
+        while same < min(old.count, new.count), old[same].isHeader == new[same].isHeader { same += 1 }
+        for row in 0..<same {
+            switch (new[row], table.view(atColumn: 0, row: row, makeIfNecessary: false)) {
+            case (.header(let title), let view as PaletteHeaderCell): view.show(title)
+            case (.item(let item), let view as PaletteItemCell): view.show(item, query: text)
+            default: break
+            }
+        }
+        guard same < old.count || same < new.count else { return }
+        table.beginUpdates()
+        if same < old.count { table.removeRows(at: IndexSet(integersIn: same..<old.count), withAnimation: []) }
+        if same < new.count { table.insertRows(at: IndexSet(integersIn: same..<new.count), withAnimation: []) }
+        table.endUpdates()
     }
 
     private static func key(_ item: Item) -> String {
@@ -411,6 +440,7 @@ final class Palette: NSObject {
             default: break
             }
         }
+        guard pill.primaryTitle != text else { return }
         pill.primaryTitle = text
         layoutFooter()
     }
@@ -635,11 +665,10 @@ extension Palette: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if case .header = rows[row] { return Self.headerHeight }
-        return Self.rowHeight
+        row < rows.count && rows[row].isHeader ? Self.headerHeight : Self.rowHeight
     }
 
-    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { rows[row].item != nil }
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { row < rows.count && rows[row].item != nil }
 
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool { false }
 
@@ -651,11 +680,11 @@ extension Palette: NSTableViewDataSource, NSTableViewDelegate {
         switch rows[row] {
         case .header(let title):
             let view = tableView.makeView(withIdentifier: PaletteHeaderCell.id, owner: nil) as? PaletteHeaderCell ?? PaletteHeaderCell()
-            view.label.stringValue = title
+            view.show(title)
             return view
         case .item(let item):
             let view = tableView.makeView(withIdentifier: PaletteItemCell.id, owner: nil) as? PaletteItemCell ?? PaletteItemCell()
-            view.show(item, query: query)
+            view.show(item, query: shownQuery)
             return view
         }
     }
@@ -752,9 +781,16 @@ final class PaletteHeaderCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    func show(_ title: String) {
+        guard label.stringValue != title else { return }
+        label.stringValue = title
+        needsLayout = true
+    }
+
     override func layout() {
         super.layout()
-        label.textColor = Ink.current.secondary
+        let ink = Ink.current.secondary
+        if label.textColor != ink { label.textColor = ink }
         label.sizeToFit()
         label.frame.origin = NSPoint(x: 20, y: 4)
     }
@@ -765,6 +801,19 @@ final class PaletteItemCell: NSTableCellView {
     private let icon = NSImageView()
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
+    /// What the row last said, so a row told the same again does no work.
+    private var shown: (name: String, query: String, dark: Bool)?
+    private var detailWidth: CGFloat = 0
+    /// The rows' symbols, each made once rather than for every row on every key.
+    private static var symbols: [String: NSImage] = [:]
+
+    private static func symbolImage(_ name: String) -> NSImage? {
+        if let image = symbols[name] { return image }
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
+        symbols[name] = image
+        return image
+    }
 
     init() {
         super.init(frame: .zero)
@@ -813,18 +862,22 @@ final class PaletteItemCell: NSTableCellView {
             name = visit.title.isEmpty ? Address.display(visit.address) : visit.title
             right = Domains.bare(visit.address?.host())
         }
-        if let image {
-            icon.image = image
-            icon.contentTintColor = nil
-        } else {
-            icon.image = NSImage(systemSymbolName: symbol ?? "globe", accessibilityDescription: nil)?
-                .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
-            icon.contentTintColor = Ink.current.secondary
+        let ink = Ink.current
+        let picture = image ?? Self.symbolImage(symbol ?? "globe")
+        let tint = image == nil ? ink.secondary : nil
+        if icon.image !== picture { icon.image = picture }
+        if icon.contentTintColor != tint { icon.contentTintColor = tint }
+        if shown?.name != name || shown?.query != query || shown?.dark != ink.dark {
+            shown = (name, query, ink.dark)
+            title.attributedStringValue = Self.highlight(name, query)
+            needsLayout = true
         }
-        title.attributedStringValue = Self.highlight(name, query)
-        detail.stringValue = right
-        detail.textColor = Ink.current.secondary
-        needsLayout = true
+        if detail.stringValue != right || detailWidth == 0 {
+            detail.stringValue = right
+            detailWidth = min(220, ceil(detail.attributedStringValue.size().width) + 4)
+            needsLayout = true
+        }
+        if detail.textColor != ink.secondary { detail.textColor = ink.secondary }
     }
 
     /// The words typed, in semibold where they appear.
@@ -845,7 +898,6 @@ final class PaletteItemCell: NSTableCellView {
         super.layout()
         let h = bounds.height
         icon.frame = NSRect(x: 22, y: (h - 18) / 2, width: 18, height: 18)
-        let detailWidth = min(220, ceil(detail.attributedStringValue.size().width) + 4)
         detail.frame = NSRect(x: bounds.width - 24 - detailWidth, y: (h - 16) / 2, width: detailWidth, height: 16)
         let titleHeight = ceil(title.intrinsicContentSize.height)
         title.frame = NSRect(x: 52, y: (h - titleHeight) / 2, width: detail.frame.minX - 12 - 52, height: titleHeight)
