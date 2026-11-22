@@ -37,8 +37,10 @@ enum Web {
         configuration.preferences.isTextInteractionEnabled = true
         configuration.allowsAirPlayForMediaPlayback = true
         configuration.defaultWebpagePreferences.preferredContentMode = .desktop
-        // Pages out of sight keep running, with WebKit's timer throttling.
-        configuration.preferences.inactiveSchedulingPolicy = .throttle
+        // Pages out of sight are left to WebKit's default, which suspends a
+        // page once it is idle and in no window: a tab behind another costs
+        // nothing. A page playing sound or video, or still loading, isn't
+        // idle, so background audio and picture in picture carry on.
         PictureInPicture.allow(configuration.preferences)
         return configuration
     }
