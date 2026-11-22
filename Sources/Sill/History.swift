@@ -23,7 +23,7 @@ struct Visit: Codable, Hashable {
 @MainActor
 final class History {
     static let shared = History()
-    private(set) var visits: [String: Visit] = [:] { didSet { knownHosts = nil } }
+    private(set) var visits: [String: Visit] = [:] { didSet { knownHosts = nil; shelf = nil } }
     private var knownHosts: Set<String>?
     /// Five seconds: a page changing its title or address in a burst is one write, not many.
     private let saver = Saver<[Visit]>(Places.support.appendingPathComponent("history.json"), delay: 5)
@@ -112,8 +112,39 @@ final class History {
         let host: String
         let title: String
         let lowerTitle: String
+        /// The same text as bytes: looking for a word in six thousand
+        /// entries is a memory search, not six thousand string comparisons.
+        let pathBytes: ContiguousArray<UInt8>
+        let titleBytes: ContiguousArray<UInt8>
+        let hostBytes: ContiguousArray<UInt8>
+        let rawHostBytes: ContiguousArray<UInt8>
+        let bareBytes: ContiguousArray<UInt8>
     }
     private var readings: [String: Reading] = [:]
+    /// Every entry beside its reading, in a row: made once after history
+    /// changes, then walked on each keystroke without a lookup per entry.
+    private var shelf: [(Visit, Reading)]?
+
+    private var entries: [(Visit, Reading)] {
+        if let shelf { return shelf }
+        let made = visits.values.map { ($0, reading($0)) }
+        shelf = made
+        return made
+    }
+
+    private static func has(_ hay: ContiguousArray<UInt8>, _ needle: ContiguousArray<UInt8>) -> Bool {
+        guard needle.count <= hay.count else { return false }
+        return hay.withUnsafeBytes { h in
+            needle.withUnsafeBytes { n in memmem(h.baseAddress, h.count, n.baseAddress, n.count) != nil }
+        }
+    }
+
+    private static func starts(_ hay: ContiguousArray<UInt8>, _ prefix: ContiguousArray<UInt8>) -> Bool {
+        guard prefix.count <= hay.count else { return false }
+        return hay.withUnsafeBytes { h in
+            prefix.withUnsafeBytes { p in memcmp(h.baseAddress, p.baseAddress, p.count) == 0 }
+        }
+    }
 
     private func reading(_ visit: Visit) -> Reading {
         if let known = readings[visit.url], known.title == visit.title { return known }
@@ -121,13 +152,21 @@ final class History {
         let url = visit.address
         let bare = Address.display(url).lowercased()
         let rawHost = url?.host()?.lowercased()
-        let made = Reading(path: url.map { (($0.host() ?? "") + $0.path).lowercased() } ?? visit.url.lowercased(),
+        let path = url.map { (($0.host() ?? "") + $0.path).lowercased() } ?? visit.url.lowercased()
+        let host = Domains.bare(rawHost)
+        let lowerTitle = visit.title.lowercased()
+        let made = Reading(path: path,
                            bare: bare,
                            depth: Double(1 + bare.utf8.reduce(0) { $1 == 47 ? $0 + 1 : $0 }) * 0.5 + 0.5,
                            rawHost: rawHost,
-                           host: Domains.bare(rawHost),
+                           host: host,
                            title: visit.title,
-                           lowerTitle: visit.title.lowercased())
+                           lowerTitle: lowerTitle,
+                           pathBytes: ContiguousArray(path.utf8),
+                           titleBytes: ContiguousArray(lowerTitle.utf8),
+                           hostBytes: ContiguousArray(host.utf8),
+                           rawHostBytes: ContiguousArray((rawHost ?? "").utf8),
+                           bareBytes: ContiguousArray(bare.utf8))
         readings[visit.url] = made
         return made
     }
@@ -138,9 +177,9 @@ final class History {
         guard !words.isEmpty else { return [] }
         let now = Date()
         var scored: [(Visit, Reading, Double)] = []
-        for visit in visits.values {
-            let read = reading(visit)
-            guard words.allSatisfy({ read.path.contains($0) || read.lowerTitle.contains($0) }) else { continue }
+        let needles = words.map { ContiguousArray($0.utf8) }
+        for (visit, read) in entries {
+            guard needles.allSatisfy({ Self.has(read.pathBytes, $0) || Self.has(read.titleBytes, $0) }) else { continue }
             var score = visit.score(now: now)
             if read.bare.hasPrefix(words[0]) { score *= 4 }
             else if read.lowerTitle.hasPrefix(words[0]) { score *= 2 }
@@ -192,10 +231,13 @@ final class History {
         let now = Date()
         var best: (String, Double)?
         let deep = prefix.contains("/")
-        for visit in visits.values {
-            let read = reading(visit)
+        let start = ContiguousArray(prefix.utf8)
+        for (visit, read) in entries {
             guard let rawHost = read.rawHost else { continue }
             let host = read.host
+            // Bytes first: nearly every entry is turned away here.
+            guard Self.starts(read.hostBytes, start) || Self.starts(read.rawHostBytes, start)
+                    || (deep && Self.starts(read.bareBytes, start)) else { continue }
             for candidate in deep ? [host, rawHost, read.bare] : [host, rawHost]
             where candidate.hasPrefix(prefix) && candidate.count > prefix.count {
                 let score = visit.score(now: now) + (candidate == host ? 0.5 : 0)
