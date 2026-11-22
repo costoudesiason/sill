@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Pages may ask for the camera, the microphone and where you are; the hardened runtime refuses unless the app says so. -->
+  <key>com.apple.security.device.camera</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
+  <key>com.apple.security.personal-information.location</key><true/>
+  <!-- Asking Safari for its open tabs (Settings › Import). -->
+  <key>com.apple.security.automation.apple-events</key><true/>
+</dict>
+</plist>

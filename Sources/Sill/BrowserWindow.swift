@@ -1,0 +1,546 @@
+import AppKit
+import Combine
+import SwiftUI
+import WebKit
+
+/// The window's content, flipped, top-down: the glass ground, the bar, the page.
+final class StageView: NSView {
+    var onLayout: (() -> Void)?
+    override var isFlipped: Bool { true }
+    override func layout() {
+        super.layout()
+        onLayout?()
+    }
+}
+
+@MainActor
+final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
+    let isPrivate: Bool
+    /// A small window a page opened at a size of its own ("Sign in with…").
+    let isPopup: Bool
+    private(set) var tabs: [Tab] = []
+    private(set) var selected: Tab?
+
+    let strip = TabStripView()
+    private lazy var bar = TopBar(strip: strip)
+    private let stage = StageView()
+    private let pageHost = NSView()
+    private lazy var palette = Palette(browser: self)
+    private lazy var findBar = FindBar(browser: self)
+    private let status = StatusPill()
+    /// The bar's ground: the desktop behind the window, blended by the
+    /// window server as Finder's sidebar is (cheap, and steady while the page
+    /// redraws), under a wash you set in Settings.
+    /// behind the window, under a neutral wash so it stays calm. Larger than
+    /// the window so its rim never shows; the page covers it below the bar.
+    private let ground = NSVisualEffectView()
+    private let wash = NSView()
+    private let toastView = Toast()
+    private var downloadsPopover: NSPopover?
+    /// Recently closed in this window, newest last, for ⇧⌘T.
+    private var closed: [(url: URL, title: String, index: Int)] = []
+    var onChange: (() -> Void)?
+    private var napTimer: Timer?
+    private var watchingPrefs: AnyCancellable?
+
+    init(isPrivate: Bool, popup: Bool = false) {
+        self.isPrivate = isPrivate
+        self.isPopup = popup
+        let window = BrowserNSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
+                                     styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                                     backing: .buffered, defer: false)
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isReleasedWhenClosed = false
+        window.tabbingMode = .disallowed
+        window.minSize = NSSize(width: 420, height: 300)
+        window.collectionBehavior.insert(.fullScreenPrimary)
+        // See-through: the bar's glass shows the desktop behind the window.
+        // Opaque unless rounder corners are asked for (Settings › Appearance):
+        // a see-through window is composited whole on every frame.
+        window.isOpaque = true
+        window.backgroundColor = .windowBackgroundColor
+        if isPrivate { window.appearance = NSAppearance(named: .darkAqua) }
+        // No traffic lights: ⌘W, ⇧⌘W, ⌘M and full screen stay in the menus.
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(kind)?.isHidden = true
+        }
+        super.init(window: window)
+        window.delegate = self
+
+        strip.browser = self
+        stage.wantsLayer = true
+        // Rounder than the system's window corners; the shadow of a
+        // see-through window follows what it draws, so it follows these.
+        stage.layer?.cornerCurve = .continuous
+        window.contentView = stage
+        ground.material = .sidebar
+        ground.blendingMode = .behindWindow
+        ground.state = .followsWindowActiveState
+        stage.addSubview(ground)
+        wash.wantsLayer = true
+        stage.addSubview(wash)
+        stage.addSubview(bar)
+        stage.addSubview(pageHost)
+        stage.addSubview(status)
+        stage.addSubview(toastView)
+        stage.onLayout = { [weak self] in self?.stageLaidOut() }
+
+        bar.back.target = self
+        bar.back.action = #selector(goBack(_:))
+        bar.forward.target = self
+        bar.forward.action = #selector(goForward(_:))
+        bar.downloads.target = self
+        bar.downloads.action = #selector(showDownloads(_:))
+        bar.add.target = self
+        bar.add.action = #selector(newTab(_:))
+        bar.allTabs.target = self
+        bar.allTabs.action = #selector(showAllTabs(_:))
+        updateNavigation()
+        applyLooks()
+        // Settings apply as they change, to every window.
+        watchingPrefs = Preferences.shared.objectWillChange.sink { [weak self] in
+            DispatchQueue.main.async { self?.applyLooks() }
+        }
+
+        window.center()
+        // Tabs left alone for a while give their memory back; they reload from
+        // their address when shown. Not one playing sound or using the camera.
+        napTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.napIdleTabs() }
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    // MARK: - Looks
+
+    private func applyLooks() {
+        let prefs = Preferences.shared
+        if !isPrivate { window?.appearance = prefs.theme.appearance }
+        let amount = CGFloat(prefs.glassWash)
+        wash.effectiveAppearance.performAsCurrentDrawingAppearance {
+            wash.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(amount).cgColor
+        }
+        ground.isHidden = !prefs.glassBar
+        wash.isHidden = !prefs.glassBar
+        // Rounder corners need a see-through window, clipped to them; the
+        // system's own corners cost nothing.
+        let round = prefs.roundCorners
+        window?.isOpaque = !round
+        window?.backgroundColor = round ? .clear : .windowBackgroundColor
+        stage.layer?.cornerRadius = round ? prefs.cornerRadius : 0
+        stage.layer?.masksToBounds = round
+        stage.layer?.backgroundColor = round && !prefs.glassBar ? NSColor.windowBackgroundColor.cgColor : nil
+        window?.invalidateShadow()
+        strip.prefsChanged()
+    }
+
+    // MARK: - Bar
+
+    @objc func showDownloads(_ sender: Any?) {
+        if downloadsPopover?.isShown == true { downloadsPopover?.close(); return }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        // Measured before it shows: a popover that shrinks after appearing
+        // shrinks from the top, and lands far below its button.
+        let host = NSHostingController(rootView: DownloadsView())
+        host.sizingOptions = .preferredContentSize
+        popover.contentViewController = host
+        popover.contentSize = host.view.fittingSize
+        downloadsPopover = popover
+        popover.show(relativeTo: bar.downloadsRect, of: bar, preferredEdge: .maxY)
+    }
+
+    @objc func showAllTabs(_ sender: Any?) {
+        showPalette(.tabs)
+    }
+
+    private func updateNavigation() {
+        bar.back.isEnabled = selected?.canGoBack ?? false
+        bar.forward.isEnabled = selected?.canGoForward ?? false
+    }
+
+    // MARK: - Layout
+
+    var topInset: CGFloat { TopBar.height }
+
+    private func stageLaidOut() {
+        bar.frame = NSRect(x: 0, y: 0, width: stage.bounds.width, height: TopBar.height)
+        // The page starts below the bar: nothing goes behind the glass.
+        pageHost.frame = NSRect(x: 0, y: topInset, width: stage.bounds.width, height: max(0, stage.bounds.height - topInset))
+        // Only as tall as the bar plus a margin the page covers: its rim stays
+        // hidden under the page, and no glass is drawn where none is seen.
+        ground.frame = NSRect(x: 0, y: 0, width: stage.bounds.width, height: TopBar.height)
+        wash.frame = ground.frame
+        palette.stageResized(stage)
+        findBar.place(in: stage, top: topInset)
+        status.place(in: stage)
+        toastView.place(in: stage)
+    }
+
+    func windowDidResize(_ notification: Notification) { stage.needsLayout = true }
+    func windowDidEnterFullScreen(_ notification: Notification) { stage.needsLayout = true }
+    func windowDidExitFullScreen(_ notification: Notification) { stage.needsLayout = true }
+
+    // MARK: - Tabs
+
+    func restore(_ states: [SessionTab], selectedIndex: Int) {
+        tabs = states.compactMap { state in
+            guard let url = URL(string: state.url) else { return nil }
+            let tab = Tab(url: url, title: state.title, isPrivate: isPrivate)
+            tab.host = self
+            return tab
+        }
+        strip.sync(animated: false)
+        if tabs.indices.contains(selectedIndex) { select(tabs[selectedIndex]) } else if let first = tabs.first { select(first) }
+    }
+
+    @discardableResult
+    func addTab(url: URL?, configuration: WKWebViewConfiguration? = nil, at index: Int? = nil,
+                select shouldSelect: Bool = true, opener: Tab? = nil, typed: Bool = false) -> Tab {
+        let tab = Tab(url: nil, isPrivate: isPrivate)
+        tab.host = self
+        tab.opener = opener
+        tabs.insert(tab, at: min(index ?? tabs.count, tabs.count))
+        if let configuration {
+            tab.materialize(with: configuration)
+        } else if let url {
+            tab.load(url, typed: typed)
+            if !shouldSelect { tab.materialize() }
+        }
+        if shouldSelect { select(tab, animated: true) } else { strip.sync(animated: true) }
+        changed()
+        return tab
+    }
+
+    func select(_ tab: Tab, animated: Bool = false) {
+        guard tabs.contains(where: { $0 === tab }) else { return }
+        if palette.isOpen && selected !== tab { palette.close(animated: false) }
+        findBar.close()
+        let previous = selected
+        if previous !== tab, let previous, Preferences.shared.autoPictureInPicture {
+            PictureInPicture.leave(previous)
+        }
+        if previous !== tab { PictureInPicture.return(to: tab) }
+        selected = tab
+        tab.lastShown = Date()
+        let webView = tab.materialize()
+        if previous !== tab || webView.superview !== pageHost {
+            pageHost.subviews.forEach { $0.removeFromSuperview() }
+            webView.frame = pageHost.bounds
+            webView.autoresizingMask = [.width, .height]
+            pageHost.addSubview(webView)
+        }
+        strip.sync(animated: animated)
+        window?.title = tab.displayTitle
+        updateNavigation()
+        status.show(nil)
+        if !palette.isOpen { window?.makeFirstResponder(webView) }
+        changed()
+    }
+
+    func close(_ tab: Tab) {
+        guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
+        if let url = tab.webView?.url ?? tab.url, !isPrivate {
+            closed.append((url, tab.displayTitle, index))
+            if closed.count > 30 { closed.removeFirst() }
+        }
+        tabs.remove(at: index)
+        tab.webView?.removeFromSuperview()
+        if tabs.isEmpty {
+            selected = nil
+            window?.close()
+            return
+        }
+        if selected === tab {
+            // Back to the tab that opened it if it's still alongside; else the one that slid into its place.
+            if let opener = tab.opener, tabs.contains(where: { $0 === opener }), index == tabs.count || tabs[index].opener !== tab.opener {
+                select(opener, animated: true)
+            } else {
+                select(tabs[min(index, tabs.count - 1)], animated: true)
+            }
+        } else {
+            strip.sync(animated: true)
+        }
+        changed()
+    }
+
+    /// A tab that loads only when first shown, at the end of the row.
+    func appendSleeping(_ url: URL) {
+        let tab = Tab(url: url, isPrivate: isPrivate)
+        tab.host = self
+        tabs.append(tab)
+        strip.sync(animated: false)
+        if selected == nil { select(tab) }
+        changed()
+    }
+
+    func move(_ tab: Tab, to index: Int) {
+        guard let from = tabs.firstIndex(where: { $0 === tab }) else { return }
+        tabs.remove(at: from)
+        tabs.insert(tab, at: min(index, tabs.count))
+        changed()
+    }
+
+    func navigate(to url: URL, newTab: Bool, typed: Bool) {
+        if newTab || selected == nil {
+            addTab(url: url, typed: typed)
+        } else {
+            selected?.load(url, typed: typed)
+            if let webView = selected?.webView { window?.makeFirstResponder(webView) }
+        }
+    }
+
+    private func changed() { onChange?() }
+
+    // MARK: - Palette
+
+    func showPalette(_ mode: Palette.Mode) {
+        if palette.isOpen && palette.mode == mode && mode == .newTab { palette.close(); return }
+        status.show(nil)
+        palette.open(mode, in: stage)
+    }
+
+    func paletteClosed() {
+        if let webView = selected?.webView { window?.makeFirstResponder(webView) }
+    }
+
+    var paletteIsOpen: Bool { palette.isOpen }
+
+    // MARK: - Window
+
+    /// WebKit knows whether a page is making sound; it just doesn't say so publicly.
+    private static func isPlayingAudio(_ webView: WKWebView) -> Bool {
+        let key = "_isPlayingAudio"
+        guard webView.responds(to: NSSelectorFromString(key)) else { return true }
+        return (webView.value(forKey: key) as? Bool) ?? true
+    }
+
+    private func napIdleTabs() {
+        guard Preferences.shared.sleepsTabs else { return }
+        let after = TimeInterval(max(5, Preferences.shared.sleepAfterMinutes) * 60)
+        let now = Date()
+        for tab in tabs where tab !== selected {
+            guard let webView = tab.webView, now.timeIntervalSince(tab.lastShown) > after,
+                  webView.cameraCaptureState == .none, webView.microphoneCaptureState == .none,
+                  !Self.isPlayingAudio(webView)
+            else { continue }
+            tab.sleep()
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        napTimer?.invalidate()
+        for tab in tabs { tab.webView?.removeFromSuperview() }
+        AppDelegate.shared.windowClosed(self)
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) { AppDelegate.shared.lastBrowser = self }
+
+    // MARK: - Context menu for a tab
+
+    func menu(for tab: Tab) -> NSMenu {
+        let menu = NSMenu()
+        func add(_ title: String, _ handler: @escaping () -> Void, enabled: Bool = true) {
+            let item = ClosureMenuItem(title: title, handler: handler)
+            item.isEnabled = enabled
+            menu.addItem(item)
+        }
+        add("New Tab") { [weak self] in self?.showPalette(.newTab) }
+        menu.addItem(.separator())
+        add("Reload") { tab.reload() }
+        add("Duplicate") { [weak self] in
+            guard let self, let url = tab.webView?.url ?? tab.url,
+                  let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
+            self.addTab(url: url, at: index + 1)
+        }
+        add("Copy Link", { if let url = tab.webView?.url ?? tab.url { Pasteboard.copy(url) } }, enabled: tab.url != nil)
+        menu.addItem(.separator())
+        add("Close Tab") { [weak self] in self?.close(tab) }
+        add("Close Other Tabs", { [weak self] in
+            guard let self else { return }
+            for other in self.tabs where other !== tab { self.close(other) }
+        }, enabled: tabs.count > 1)
+        add("Close Tabs to the Right", { [weak self] in
+            guard let self, let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
+            for other in self.tabs[(index + 1)...] { self.close(other) }
+        }, enabled: tabs.last !== tab)
+        return menu
+    }
+
+    // MARK: - Status, toast
+
+    func toast(_ text: String, action: (String, () -> Void)? = nil) {
+        toastView.show(text, action: action, in: stage)
+    }
+
+    // MARK: - Menu actions
+
+    @objc func newTab(_ sender: Any?) { showPalette(.newTab) }
+    @objc func openLocation(_ sender: Any?) { showPalette(selected == nil ? .newTab : .address) }
+
+    @objc func closeTab(_ sender: Any?) {
+        if palette.isOpen { palette.close(); return }
+        if let selected { close(selected) } else { window?.close() }
+    }
+
+    @objc func reopenClosedTab(_ sender: Any?) {
+        guard let last = closed.popLast() else { return }
+        addTab(url: last.url, at: min(last.index, tabs.count))
+    }
+
+    @objc func goBack(_ sender: Any?) { selected?.goBack() }
+    @objc func goForward(_ sender: Any?) { selected?.goForward() }
+    @objc func reloadPage(_ sender: Any?) { selected?.reload() }
+    @objc func reloadFromOrigin(_ sender: Any?) { selected?.reload(fromOrigin: true) }
+    @objc func stopLoading(_ sender: Any?) { selected?.stop() }
+
+    @objc func nextTab(_ sender: Any?) { step(1) }
+    @objc func previousTab(_ sender: Any?) { step(-1) }
+    private func step(_ delta: Int) {
+        guard let selected, let index = tabs.firstIndex(where: { $0 === selected }), tabs.count > 1 else { return }
+        select(tabs[(index + delta + tabs.count) % tabs.count])
+    }
+
+    @objc func selectTabByNumber(_ sender: NSMenuItem) {
+        guard !tabs.isEmpty else { return }
+        let n = sender.tag
+        select(n >= 9 ? tabs[tabs.count - 1] : tabs[min(n - 1, tabs.count - 1)])
+    }
+
+    @objc func zoomIn(_ sender: Any?) { zoom(by: 1.1) }
+    @objc func zoomOut(_ sender: Any?) { zoom(by: 1 / 1.1) }
+    @objc func actualSize(_ sender: Any?) { selected?.webView?.pageZoom = 1 }
+    private func zoom(by factor: CGFloat) {
+        guard let webView = selected?.webView else { return }
+        webView.pageZoom = max(0.3, min(3, (webView.pageZoom * factor * 100).rounded() / 100))
+    }
+
+    @objc func copyPageLink(_ sender: Any?) {
+        guard let url = selected?.webView?.url ?? selected?.url else { return }
+        Pasteboard.copy(url)
+        toast("Link copied")
+    }
+
+    @objc func showFind(_ sender: Any?) {
+        guard selected?.webView != nil else { return }
+        findBar.open(in: stage, top: topInset)
+    }
+    @objc func findNext(_ sender: Any?) { findBar.find(backwards: false) }
+    @objc func findPrevious(_ sender: Any?) { findBar.find(backwards: true) }
+
+    @objc func showInspector(_ sender: Any?) {
+        // Web Inspector is a right-click away (Inspect Element); this opens it directly.
+        guard let webView = selected?.webView else { return }
+        let selector = NSSelectorFromString("_showWebInspector")
+        if let inspector = webView.value(forKey: "_inspector") as? NSObject, inspector.responds(to: NSSelectorFromString("show")) {
+            inspector.perform(NSSelectorFromString("show"))
+        } else if webView.responds(to: selector) {
+            webView.perform(selector)
+        }
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(goBack(_:)): return selected?.canGoBack ?? false
+        case #selector(goForward(_:)): return selected?.canGoForward ?? false
+        case #selector(reopenClosedTab(_:)): return !closed.isEmpty
+        case #selector(reloadPage(_:)), #selector(reloadFromOrigin(_:)), #selector(copyPageLink(_:)),
+             #selector(showFind(_:)), #selector(zoomIn(_:)), #selector(zoomOut(_:)), #selector(actualSize(_:)),
+             #selector(showInspector(_:)):
+            return selected != nil
+        case #selector(stopLoading(_:)): return selected?.isLoading ?? false
+        case #selector(findNext(_:)), #selector(findPrevious(_:)): return findBar.hasQuery
+        case #selector(nextTab(_:)), #selector(previousTab(_:)): return tabs.count > 1
+        case #selector(selectTabByNumber(_:)): return item.tag <= tabs.count || item.tag == 9
+        default: return true
+        }
+    }
+}
+
+// MARK: - TabHost
+
+extension BrowserWindowController: TabHost {
+    func tabChanged(_ tab: Tab, _ what: Tab.Change) {
+        switch what {
+        case .title, .icon, .loading:
+            strip.refresh(tab)
+            if tab === selected, what == .title { window?.title = tab.displayTitle }
+            if what == .title { changed() }
+        case .url:
+            strip.refresh(tab)
+            changed()
+        case .navigation:
+            if tab === selected { updateNavigation() }
+        case .scroll:
+            break
+        }
+    }
+
+    func open(from tab: Tab, url: URL?, configuration: WKWebViewConfiguration?, background: Bool) -> Tab {
+        // Links open beside the page they came from, after any it opened before.
+        var index = (tabs.firstIndex { $0 === tab } ?? tabs.count - 1) + 1
+        while index < tabs.count, tabs[index].opener === tab { index += 1 }
+        return addTab(url: url, configuration: configuration, at: index, select: !background, opener: tab)
+    }
+
+    func openPopup(from tab: Tab, configuration: WKWebViewConfiguration, size: NSSize) -> Tab? {
+        let popup = AppDelegate.shared.makeBrowser(isPrivate: isPrivate, popup: true)
+        guard let window = popup.window, let parent = self.window else { return nil }
+        let content = NSSize(width: max(360, min(size.width, 1000)), height: max(320, min(size.height, 900)) + TopBar.height)
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: content))
+        frame.origin = NSPoint(x: parent.frame.midX - frame.width / 2, y: parent.frame.midY - frame.height / 2)
+        window.setFrame(frame, display: false)
+        let made = popup.addTab(url: nil, configuration: configuration, opener: tab)
+        popup.showWindow(nil)
+        return made
+    }
+
+    func closeRequested(_ tab: Tab) { close(tab) }
+
+    func hovered(_ tab: Tab, link: String?) {
+        guard tab === selected, !palette.isOpen, Preferences.shared.showsLinkPreview else { return }
+        status.show(link.flatMap(URL.init(string:)).map { Address.display($0) })
+    }
+
+    func focused(_ tab: Tab, field: LoginField) {
+        guard tab === selected, let webView = tab.webView else { return }
+        Autofill.offer(for: field, in: tab, webView: webView, top: topInset)
+    }
+}
+
+// MARK: - Bits
+
+final class BrowserNSWindow: NSWindow {
+    /// Esc anywhere puts the palette or the find bar away.
+    override func cancelOperation(_ sender: Any?) {
+        (windowController as? BrowserWindowController)?.escape()
+    }
+}
+
+extension BrowserWindowController {
+    func escape() {
+        if palette.isOpen { palette.close() } else if findBar.isOpen { findBar.close() }
+    }
+}
+
+final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+    init(title: String, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(run), keyEquivalent: "")
+        target = self
+    }
+    required init(coder: NSCoder) { fatalError() }
+    @objc private func run() { handler() }
+}
+
+enum Pasteboard {
+    static func copy(_ url: URL) {
+        let board = NSPasteboard.general
+        board.clearContents()
+        board.writeObjects([url as NSURL])
+        board.setString(url.absoluteString, forType: .string)
+    }
+}
