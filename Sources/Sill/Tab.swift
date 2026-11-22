@@ -74,6 +74,16 @@ final class Tab: NSObject {
     func materialize(with configuration: WKWebViewConfiguration? = nil) -> SillWebView {
         if let webView { return webView }
         let view = SillWebView(frame: .zero, configuration: configuration ?? Web.configuration(private: isPrivate))
+        adopt(view, popup: configuration != nil)
+        return view
+    }
+
+    /// Takes `view` as this tab's page, made just now or ahead of time (the
+    /// window keeps one ready while ⌘T is open), and loads what's waiting.
+    /// `popup`: WebKit made its configuration for a window a page opened,
+    /// and loads it itself.
+    func adopt(_ view: SillWebView, popup: Bool = false) {
+        guard webView == nil else { return }
         // A configuration WebKit hands over for a new window is a copy made
         // inside WebKit: picture in picture is allowed again to be sure.
         PictureInPicture.allow(view.configuration.preferences)
@@ -88,22 +98,21 @@ final class Tab: NSObject {
         watch(view)
         // Unseen until it draws, when there's a page coming; a popup's view
         // is already drawing what its opener put there.
-        if configuration == nil, savedState != nil || pending != nil { view.holdForFirstFrame() }
-        if configuration == nil, let state = savedState {
+        if !popup, savedState != nil || pending != nil { view.holdForFirstFrame() }
+        if !popup, let state = savedState {
             savedState = nil
             pending = nil
             Shield.shared.whenReady { [weak self, weak view] in
                 guard let view, self?.webView === view else { return }
                 view.interactionState = state
             }
-        } else if let pending, configuration == nil {
+        } else if let pending, !popup {
             self.pending = nil
             Shield.shared.whenReady { [weak self, weak view] in
                 guard let view, self?.webView === view else { return }
                 view.load(URLRequest(url: pending))
             }
         }
-        return view
     }
 
     private func watch(_ view: SillWebView) {

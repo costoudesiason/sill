@@ -59,6 +59,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private var watchingPrefs: AnyCancellable?
     /// The tab whose video Sill sent to picture in picture, to bring back when it's shown again.
     private weak var pictured: Tab?
+    /// A web view made while ⌘T is open, so Return doesn't wait for one to
+    /// be built before the page can start loading.
+    private var spare: SillWebView?
 
     init(isPrivate: Bool, popup: Bool = false) {
         self.isPrivate = isPrivate
@@ -225,7 +228,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         } else if let url {
             tab.load(url, typed: typed)
             tab.restore(state)
-            if !shouldSelect { tab.materialize() }
+            if !shouldSelect {
+                tab.materialize()
+            } else if let view = spare {
+                spare = nil
+                tab.adopt(view)
+            }
         }
         if shouldSelect { select(tab, animated: true) } else { strip.sync(animated: true) }
         changed()
@@ -343,6 +351,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if palette.isOpen && palette.mode == mode && mode == .newTab { palette.close(); return }
         status.show(nil)
         palette.open(mode, in: stage)
+        if mode != .tabs, spare == nil {
+            // On the next turn, so the palette is on screen first.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.spare == nil, self.window?.isVisible == true else { return }
+                self.spare = SillWebView(frame: .zero, configuration: Web.configuration(private: self.isPrivate))
+            }
+        }
     }
 
     func paletteClosed() {
@@ -379,6 +394,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     func windowWillClose(_ notification: Notification) {
         napTimer?.invalidate()
+        spare = nil
         for tab in tabs { tab.webView?.removeFromSuperview() }
         AppDelegate.shared.windowClosed(self)
     }
