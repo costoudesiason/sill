@@ -45,7 +45,7 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private static let titleHeight: CGFloat = 30
     private static let ruleHeight: CGFloat = 11
     private static let searchHeight: CGFloat = 44
-    private static let inset: CGFloat = 8
+    private static let inset: CGFloat = 9
 
     init(title: String?, entries: [Entry]) {
         self.title = title
@@ -60,7 +60,7 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         panel.isReleasedWhenClosed = false
         panel.onKey = { [weak self] event in self?.key(event) ?? false }
 
-        glass.cornerRadius = 16
+        glass.cornerRadius = 22
         glass.style = .regular
         glass.contentView = body
         panel.contentView = glass
@@ -211,7 +211,8 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         let w = panel.frame.width
         var y = Self.inset
         if !titleLabel.isHidden {
-            titleLabel.frame = NSRect(x: 20, y: y + 8, width: w - 40, height: 16)
+            // In line with the rows' icons below it.
+            titleLabel.frame = NSRect(x: Self.inset + 12, y: y + 8, width: w - 40, height: 16)
             y += Self.titleHeight
         }
         // Rows and rules in their original order.
@@ -222,7 +223,7 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             switch entry {
             case .separator:
                 guard query.isEmpty, ruleIndex < rules.count, rowIndex > 0 else { continue }
-                rules[ruleIndex].frame = NSRect(x: 18, y: y + 5, width: w - 36, height: 1)
+                rules[ruleIndex].frame = NSRect(x: Self.inset + 10, y: y + 5, width: w - (Self.inset + 10) * 2, height: 1)
                 ruleIndex += 1
                 y += Self.ruleHeight
             case .item(let item):
@@ -234,7 +235,7 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
         y += Self.inset
         searchRule.frame = NSRect(x: 0, y: y, width: w, height: 1)
-        search.frame = NSRect(x: 20, y: y + (Self.searchHeight - 20) / 2, width: w - 40, height: 20)
+        search.frame = NSRect(x: Self.inset + 12, y: y + (Self.searchHeight - 20) / 2, width: w - 40, height: 20)
     }
 
     private func refit() {
@@ -329,7 +330,7 @@ final class GlassMenuRow: NSView {
         self.item = item
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 10
+        layer?.cornerRadius = 13
         layer?.cornerCurve = .continuous
         if let symbol = item.symbol {
             icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
@@ -377,7 +378,7 @@ final class GlassMenuRow: NSView {
     override func layout() {
         super.layout()
         let h = bounds.height
-        var x: CGFloat = 12
+        var x: CGFloat = 10
         if item.symbol != nil {
             icon.frame = NSRect(x: x, y: (h - 18) / 2, width: 18, height: 18)
             x += 30
