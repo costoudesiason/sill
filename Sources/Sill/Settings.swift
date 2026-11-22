@@ -290,10 +290,27 @@ private struct ImportPane: View {
 // MARK: - Privacy
 
 private struct PrivacyPane: View {
+    @ObservedObject private var prefs = Preferences.shared
+    @ObservedObject private var shield = Shield.shared
     @State private var cleared: String?
 
     var body: some View {
         Form {
+            Section {
+                Toggle("Block ads and trackers", isOn: $prefs.blocksAds)
+                if prefs.blocksAds, let trouble = shield.trouble {
+                    LabeledContent {
+                        Button("Try Again") { shield.tryAgain() }
+                    } label: {
+                        Text("Nothing is blocked: \(trouble)").foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Ads")
+            } footer: {
+                Text("Sill blocks a short list of advertising and tracking companies when another site loads them, and hides the empty boxes left behind. YouTube is left alone. Right-click a tab to turn it off for one site.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             Section {
                 LabeledContent("History") {
                     Button("Clear History…") { AppDelegate.shared.clearHistory(nil) }

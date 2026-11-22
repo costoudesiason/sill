@@ -380,6 +380,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             self.addTab(url: url, at: index + 1)
         }
         add("Copy Link", { if let url = tab.webView?.url ?? tab.url { Pasteboard.copy(url) } }, enabled: tab.url != nil)
+        // Off for the one site it broke, rather than everywhere.
+        if Preferences.shared.blocksAds, let host = (tab.webView?.url ?? tab.url)?.host(), !host.isEmpty {
+            let paused = Shield.shared.isPaused(on: host)
+            let item = ClosureMenuItem(title: "Block Ads on \(Domains.bare(host))") { [weak tab] in
+                Shield.shared.pause(host, !paused) { tab?.reload() }
+            }
+            item.state = paused ? .off : .on
+            menu.addItem(item)
+        }
         menu.addItem(.separator())
         add("Close Tab") { [weak self] in self?.close(tab) }
         add("Close Other Tabs", { [weak self] in

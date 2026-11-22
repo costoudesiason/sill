@@ -35,6 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = MainMenu.build()
+        // Before any tab loads: the first loads wait for it (at most a second).
+        if Preferences.shared.blocksAds { Shield.shared.compile() }
         NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(handleURLEvent(_:reply:)),
                                                      forEventClass: AEEventClass(kInternetEventClass),
                                                      andEventID: AEEventID(kAEGetURL))

@@ -82,7 +82,10 @@ final class Tab: NSObject {
         watch(view)
         if let pending, configuration == nil {
             self.pending = nil
-            view.load(URLRequest(url: pending))
+            Shield.shared.whenReady { [weak self, weak view] in
+                guard let view, self?.webView === view else { return }
+                view.load(URLRequest(url: pending))
+            }
         }
         return view
     }
@@ -148,7 +151,10 @@ final class Tab: NSObject {
         typedNavigation = typed
         self.url = url
         if let webView {
-            webView.load(URLRequest(url: url))
+            Shield.shared.whenReady { [weak self, weak webView] in
+                guard let webView, self?.webView === webView else { return }
+                webView.load(URLRequest(url: url))
+            }
         } else {
             pending = url
         }
