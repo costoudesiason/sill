@@ -572,8 +572,9 @@ extension BrowserWindowController: TabHost {
         switch what {
         case .title, .icon, .loading:
             strip.refresh(tab)
+            // Not a session save: titles are read when it's written, and a
+            // page ticking its title would put the save off forever.
             if tab === selected, what == .title { window?.title = tab.displayTitle }
-            if what == .title { changed() }
         case .url:
             strip.refresh(tab)
             changed()

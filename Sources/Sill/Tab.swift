@@ -33,7 +33,6 @@ final class Tab: NSObject {
     private(set) var title: String
     private(set) var favicon: NSImage?
     private(set) var isLoading = false
-    private(set) var progress: Double = 0
     private(set) var canGoBack = false
     private(set) var canGoForward = false
     /// Whether the page is scrolled away from its top.
@@ -48,6 +47,9 @@ final class Tab: NSObject {
     /// WebKit's caches rather than as a fresh load of its address.
     private var savedState: Any?
     private var watching: [NSKeyValueObservation] = []
+    /// The title last given to history, for which page: a page that keeps
+    /// setting the same title doesn't touch history again.
+    private var lastRetitled: (url: URL, title: String)?
     /// Typed or picked in the palette: counts for more in history.
     private var typedNavigation = false
 
@@ -121,7 +123,10 @@ final class Tab: NSObject {
                 MainActor.assumeIsolated {
                     guard let self, let title = view.title, !title.isEmpty || view.url != nil else { return }
                     self.title = title
-                    if !self.isPrivate, let url = view.url { History.shared.retitle(url, title) }
+                    if !self.isPrivate, let url = view.url, self.lastRetitled?.url != url || self.lastRetitled?.title != title {
+                        self.lastRetitled = (url, title)
+                        History.shared.retitle(url, title)
+                    }
                     self.host?.tabChanged(self, .title)
                 }
             },
@@ -140,9 +145,6 @@ final class Tab: NSObject {
                     self.isLoading = view.isLoading
                     self.host?.tabChanged(self, .loading)
                 }
-            },
-            view.observe(\.estimatedProgress, options: [.new]) { [weak self] view, _ in
-                MainActor.assumeIsolated { self?.progress = view.estimatedProgress }
             },
             view.observe(\.canGoBack, options: [.new]) { [weak self] view, _ in
                 MainActor.assumeIsolated {

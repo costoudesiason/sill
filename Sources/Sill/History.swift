@@ -24,7 +24,8 @@ struct Visit: Codable, Hashable {
 final class History {
     static let shared = History()
     private(set) var visits: [String: Visit] = [:]
-    private let saver = Saver<[Visit]>(Places.support.appendingPathComponent("history.json"), delay: 2)
+    /// Five seconds: a page changing its title or address in a burst is one write, not many.
+    private let saver = Saver<[Visit]>(Places.support.appendingPathComponent("history.json"), delay: 5)
     private static let cap = 6000
 
     private init() {
