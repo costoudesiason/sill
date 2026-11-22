@@ -25,7 +25,9 @@ cp "$(dirname "$BIN")/sill-mcp" "$APP/Contents/Helpers/sill-mcp"
 strip -rSTx "$APP/Contents/Helpers/sill-mcp"
 # The icon: an Icon Composer file, compiled the way Xcode would, so macOS
 # renders its glass layers (Assets.car) with a flat fallback (AppIcon.icns).
-xcrun actool --compile "$APP/Contents/Resources" --app-icon AppIcon --platform macosx \
+# An absolute path: actool's helper keeps running between builds and reads a
+# relative one from the folder of whichever checkout started it.
+xcrun actool --compile "$PWD/$APP/Contents/Resources" --app-icon AppIcon --platform macosx \
   --minimum-deployment-target 26.0 --output-partial-info-plist "$(mktemp)" Resources/AppIcon.icon >/dev/null
 
 VERSION="$(cat VERSION 2>/dev/null || echo 0.1)"
