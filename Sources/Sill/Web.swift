@@ -9,6 +9,49 @@ enum Web {
     static let world = WKContentWorld.world(name: "sill")
     static let router = MessageRouter()
 
+    /// One pool for every tab, with the next page's process ready to go.
+    static let processPool: WKProcessPool = {
+        let make = NSSelectorFromString("new")
+        let create = NSSelectorFromString("_processPoolWithConfiguration:")
+        guard let type = NSClassFromString("_WKProcessPoolConfiguration") as? NSObject.Type,
+              type.responds(to: make), WKProcessPool.responds(to: create),
+              let settings = type.perform(make)?.takeRetainedValue() as? NSObject
+        else { return WKProcessPool() }
+        let set = NSSelectorFromString("setPrewarmsProcessesAutomatically:")
+        if settings.responds(to: set) { settings.setValue(true, forKey: "prewarmsProcessesAutomatically") }
+        return WKProcessPool.perform(create, with: settings)?.takeUnretainedValue() as? WKProcessPool ?? WKProcessPool()
+    }()
+
+    static func prewarm() {
+        let has = NSSelectorFromString("_hasPrewarmedWebProcess")
+        let warm = NSSelectorFromString("_warmInitialProcess")
+        guard processPool.responds(to: has), processPool.responds(to: warm) else { return }
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Bool
+        guard !unsafeBitCast(processPool.method(for: has), to: Getter.self)(processPool, has) else { return }
+        processPool.perform(warm)
+    }
+
+    private static var preconnected: [String: TimeInterval] = [:]
+
+    /// A head start on a link, at most once per origin every ten seconds.
+    static func preconnect(_ url: URL, in webView: WKWebView) {
+        guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = url.host?.lowercased(), !host.isEmpty else { return }
+        let connect = NSSelectorFromString("_preconnectToServer:")
+        guard webView.responds(to: connect) else { return }
+        let origin = "\(scheme)://\(host):\(url.port ?? (scheme == "https" ? 443 : 80))"
+        let now = ProcessInfo.processInfo.systemUptime
+        if let last = preconnected[origin], now - last < 10 { return }
+        preconnected[origin] = now
+        if preconnected.count > 64 {
+            preconnected = preconnected.filter { now - $0.value < 10 }
+            if preconnected.count > 64, let oldest = preconnected.min(by: { $0.value < $1.value })?.key {
+                preconnected.removeValue(forKey: oldest)
+            }
+        }
+        webView.perform(connect, with: url as NSURL)
+    }
+
     static let controller: WKUserContentController = {
         let controller = WKUserContentController()
         controller.addUserScript(WKUserScript(source: PageScripts.main, injectionTime: .atDocumentEnd,
@@ -38,6 +81,7 @@ enum Web {
 
     static func configuration(private isPrivate: Bool) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
+        configuration.processPool = processPool
         configuration.userContentController = controller
         configuration.websiteDataStore = isPrivate ? privateStore : .default()
         configuration.applicationNameForUserAgent = applicationName
@@ -143,6 +187,13 @@ final class MessageRouter: NSObject, WKScriptMessageHandler {
         switch type {
         case "hover":
             tab.hovered(link: body["href"] as? String)
+            if let href = body["href"] as? String, let url = URL(string: href), let webView = message.webView {
+                Web.preconnect(url, in: webView)
+            }
+        case "press":
+            if let href = body["href"] as? String, let url = URL(string: href), let webView = message.webView {
+                Web.preconnect(url, in: webView)
+            }
         case "open":
             if let href = body["href"] as? String, let url = URL(string: href),
                ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
@@ -188,7 +239,12 @@ enum PageScripts {
       // The middle button on a link: WebKit tells the browser nothing, so
       // the link is handed over here and opened in a tab of its own.
       const linkAt = (e) => (e.target && e.target.closest ? e.target.closest('a[href]') : null);
-      document.addEventListener('mousedown', (e) => { if (e.button === 1 && linkAt(e)) e.preventDefault(); }, true);
+      document.addEventListener('mousedown', (e) => {
+        const a = linkAt(e);
+        if (!a) return;
+        if (e.button === 1) e.preventDefault();
+        if (e.button === 0 && a.href) post({ t: 'press', href: a.href });
+      }, true);
       document.addEventListener('auxclick', (e) => {
         const a = linkAt(e);
         if (e.button !== 1 || !a || !a.href || a.href.startsWith('javascript:')) return;
