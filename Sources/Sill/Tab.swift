@@ -244,7 +244,8 @@ final class Tab: NSObject {
     func found(icon: URL) {
         guard let page = webView?.url else { return }
         Favicons.shared.fetch(page: page, icon: icon) { [weak self] image in
-            guard let self, let image, self.webView?.url?.host() == page.host() else { return }
+            // The icon it already shows: nothing to redraw.
+            guard let self, let image, image !== self.favicon, self.webView?.url?.host() == page.host() else { return }
             self.favicon = image
             self.host?.tabChanged(self, .icon)
         }

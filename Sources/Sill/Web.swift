@@ -281,13 +281,19 @@ enum PageScripts {
 
 // MARK: - Favicons
 
-/// Site icons, by host: in memory, on disk in Caches, fetched once.
+/// Site icons, by host: in memory, on disk in Caches, fetched once per icon
+/// address. Decoding and writing happen off the main thread; the main
+/// thread only files the finished image.
 @MainActor
 final class Favicons {
     static let shared = Favicons()
     private var memory: [String: NSImage] = [:]
+    /// Where each host's icon in memory came from: the same address again needs no fetch.
+    private var source: [String: URL] = [:]
     private var misses: Set<String> = []
     private var inflight: [String: [(NSImage?) -> Void]] = [:]
+    /// Once every icon on disk is in memory, nothing is read from disk again.
+    private var preloaded = false
     private let folder = Places.caches.appendingPathComponent("Icons", isDirectory: true)
     private let session: URLSession = {
         let configuration = URLSessionConfiguration.default
@@ -309,11 +315,32 @@ final class Favicons {
         folder.appendingPathComponent(key.replacingOccurrences(of: "/", with: "_"))
     }
 
+    /// Every icon on disk, decoded in the background, into memory: tabs and
+    /// palette rows then never read or decode one on the main thread.
+    func preload() {
+        let folder = folder
+        DispatchQueue.global(qos: .utility).async {
+            let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+            var found: [(String, NSImage)] = []
+            for url in files {
+                guard let data = try? Data(contentsOf: url), let (image, _) = Self.decode(data) else { continue }
+                found.append((url.lastPathComponent, image))
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    for (key, image) in found where self.memory[key] == nil { self.memory[key] = image }
+                    self.preloaded = true
+                }
+            }
+        }
+    }
+
     func cached(for page: URL?) -> NSImage? {
         guard let key = key(page) else { return nil }
         if let image = memory[key] { return image }
-        if misses.contains(key) { return nil }
-        if let data = try? Data(contentsOf: file(key)), let image = Self.image(from: data) {
+        if preloaded || misses.contains(key) { return nil }
+        // Asked before the preload has finished: from disk, this once.
+        if let data = try? Data(contentsOf: file(key)), let (image, _) = Self.decode(data) {
             memory[key] = image
             return image
         }
@@ -323,29 +350,54 @@ final class Favicons {
 
     func fetch(page: URL, icon: URL, done: @escaping (NSImage?) -> Void) {
         guard let key = key(page) else { return done(nil) }
+        if let image = memory[key], source[key] == icon { return done(image) }
         if inflight[key] != nil { inflight[key]?.append(done); return }
         inflight[key] = [done]
         var request = URLRequest(url: icon)
         request.cachePolicy = .returnCacheDataElseLoad
+        let file = file(key)
         session.dataTask(with: request) { [weak self] data, response, _ in
+            // On the session's own queue: decode, shrink and write here.
+            var made: NSImage?
+            if let data, (response as? HTTPURLResponse)?.statusCode ?? 200 < 400, let (image, stored) = Self.decode(data) {
+                made = image
+                try? stored.write(to: file, options: .atomic)
+            }
             DispatchQueue.main.async {
-                guard let self else { return }
-                var image: NSImage?
-                if let data, (response as? HTTPURLResponse)?.statusCode ?? 200 < 400, let made = Self.image(from: data) {
-                    image = made
-                    self.memory[key] = made
-                    self.misses.remove(key)
-                    try? data.write(to: self.file(key), options: .atomic)
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if let made {
+                        self.memory[key] = made
+                        self.source[key] = icon
+                        self.misses.remove(key)
+                    }
+                    let waiting = self.inflight.removeValue(forKey: key) ?? []
+                    waiting.forEach { $0(made ?? self.memory[key]) }
                 }
-                let waiting = self.inflight.removeValue(forKey: key) ?? []
-                waiting.forEach { $0(image ?? self.memory[key]) }
             }
         }.resume()
     }
 
-    private static func image(from data: Data) -> NSImage? {
+    /// An icon from whatever a site serves, at no more than 64 px, and what
+    /// to keep on disk: a small PNG, or the file itself for what ImageIO
+    /// can't read (SVG).
+    nonisolated private static func decode(_ data: Data) -> (NSImage, Data)? {
+        let options = [kCGImageSourceThumbnailMaxPixelSize: 64,
+                       kCGImageSourceCreateThumbnailFromImageAlways: true,
+                       kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary
+        if let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0,
+           let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options) {
+            guard thumbnail.width >= 8 else { return nil }
+            let png = NSMutableData()
+            if let destination = CGImageDestinationCreateWithData(png, "public.png" as CFString, 1, nil) {
+                CGImageDestinationAddImage(destination, thumbnail, nil)
+                CGImageDestinationFinalize(destination)
+            }
+            let image = NSImage(cgImage: thumbnail, size: NSSize(width: thumbnail.width, height: thumbnail.height))
+            return (image, png.length > 0 ? png as Data : data)
+        }
         guard let image = NSImage(data: data), image.size.width >= 8 else { return nil }
-        return image
+        return (image, data)
     }
 }
 
