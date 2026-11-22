@@ -329,6 +329,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             keep = old
             PictureInPicture.leave(previous) { [weak self, weak old, weak previous] floated in
                 guard let self else { return }
+                if self.leaving === old { self.leaving = nil }
                 if floated, let previous {
                     // Back on it before the video landed: it comes straight back.
                     if previous === self.selected { PictureInPicture.return(to: previous) } else { self.pictured = previous }
@@ -767,6 +768,7 @@ extension BrowserWindowController {
     /// The page area: the one tab in front, or both halves of its split.
     fileprivate func placePages(keep: WKWebView?) {
         guard let selected else { return }
+        if let keep { leaving = keep }
         if let split, split.contains(selected) {
             // As for one page below: the pair comes back under the page being left.
             let shown = selected.webView as? SillWebView
@@ -804,7 +806,6 @@ extension BrowserWindowController {
             // A page that has been shown before comes back under the one
             // being left, which goes once the new one has drawn: nothing
             // waits, and the window never shows through between the two.
-            if let keep { leaving = keep }
             let under = keep == nil && webView.shownBefore && webView.superview !== pageHost
                 && !webView.isDescendant(of: splitView)
                 && pageHost.subviews.contains { $0 is WKWebView || $0 === splitView }
