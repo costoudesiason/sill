@@ -418,6 +418,9 @@ private struct MemoryPane: View {
     @ObservedObject private var prefs = Preferences.shared
 
     var body: some View {
+        Group(title: "Claude", footer: "claude.ai stays loaded out of sight, so any Claude link opens at once. Uses about as much memory as one open tab.") {
+            SwitchRow(label: "Keep Claude ready", isOn: $prefs.keepsClaudeReady)
+        }
         Group(title: "Sleeping Tabs", footer: "A sleeping tab gives its memory back and wakes with its place and history when you click it, or as soon as you point at it. Tabs playing sound or using the camera never sleep.") {
             SwitchRow(label: "Put idle tabs to sleep", isOn: $prefs.sleepsTabs)
             if prefs.sleepsTabs {

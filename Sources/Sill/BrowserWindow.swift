@@ -291,6 +291,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         tabs.insert(tab, at: min(index ?? tabs.count, tabs.count))
         if let configuration {
             tab.materialize(with: configuration)
+        } else if let url, state == nil, !isPrivate, let view = WarmSite.shared.claim(url) {
+            // claude.ai, already running out of sight: it only changes route.
+            tab.adopt(view, loaded: true, showing: url)
         } else if let url {
             tab.load(url, typed: typed)
             tab.restore(state)
@@ -436,7 +439,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// is already there. A short pause first, so passing letters don't load.
     func prerenderSoon(_ url: URL?) {
         prerenderTimer?.invalidate()
-        guard let url, paletteOpen, palette.mode == .newTab, !isPrivate,
+        guard let url, paletteOpen, palette.mode == .newTab, !isPrivate, !WarmSite.handles(url) || !Preferences.shared.keepsClaudeReady,
               let host = url.host(), History.shared.knows(host: host) else { return }
         if let prerendered, Self.samePage(prerendered, url) { return }
         prerenderTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in

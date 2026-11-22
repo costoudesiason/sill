@@ -145,6 +145,15 @@ final class Preferences: ObservableObject {
     // Tabs and media
     @Published var autoPictureInPicture: Bool { didSet { store.set(autoPictureInPicture, forKey: "autoPiP") } }
     @Published var sleepsTabs: Bool { didSet { store.set(sleepsTabs, forKey: "sleepsTabs") } }
+    /// claude.ai kept loaded out of sight so its links open at once (Warm.swift).
+    @Published var keepsClaudeReady: Bool {
+        didSet {
+            store.set(keepsClaudeReady, forKey: "warmClaude")
+            MainActor.assumeIsolated {
+                if keepsClaudeReady { WarmSite.shared.warm(after: 0) } else { WarmSite.shared.drop() }
+            }
+        }
+    }
     /// Agents on this Mac may drive Sill over its local socket (sill-mcp).
     @Published var agentControl: Bool { didSet { store.set(agentControl, forKey: "agentControl") } }
     @Published var sleepAfterMinutes: Int { didSet { store.set(sleepAfterMinutes, forKey: "sleepAfterMinutes") } }
@@ -166,7 +175,7 @@ final class Preferences: ObservableObject {
     private init() {
         store.register(defaults: ["suggestions": true, "restoresTabs": true, "applePasswords": true,
                                   "glassBar": true, "glassWash": 0.25, "cornerRadius": 26.0, "showsLinkPreview": true,
-                                  "autoPiP": true, "sleepsTabs": true, "sleepAfterMinutes": 120, "blocksAds": true])
+                                  "autoPiP": true, "sleepsTabs": true, "warmClaude": true, "sleepAfterMinutes": 120, "blocksAds": true])
         theme = Theme(rawValue: store.string(forKey: "theme") ?? "") ?? .system
         glassBar = store.bool(forKey: "glassBar")
         glassWash = store.double(forKey: "glassWash")
@@ -177,6 +186,7 @@ final class Preferences: ObservableObject {
         showsLinkPreview = store.bool(forKey: "showsLinkPreview")
         autoPictureInPicture = store.bool(forKey: "autoPiP")
         sleepsTabs = store.bool(forKey: "sleepsTabs")
+        keepsClaudeReady = store.bool(forKey: "warmClaude")
         sleepAfterMinutes = store.integer(forKey: "sleepAfterMinutes")
         agentControl = store.bool(forKey: "agentControl")
         blocksAds = store.bool(forKey: "blocksAds")

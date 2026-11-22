@@ -94,7 +94,7 @@ final class Tab: NSObject {
     /// window keeps one ready while ⌘T is open), and loads what's waiting.
     /// `popup`: WebKit made its configuration for a window a page opened,
     /// and loads it itself.
-    func adopt(_ view: SillWebView, popup: Bool = false, loaded: Bool = false) {
+    func adopt(_ view: SillWebView, popup: Bool = false, loaded: Bool = false, showing shown: URL? = nil) {
         guard webView == nil else { return }
         // A configuration WebKit hands over for a new window is a copy made
         // inside WebKit: picture in picture is allowed again to be sure.
@@ -113,9 +113,9 @@ final class Tab: NSObject {
         if loaded {
             pending = nil
             savedState = nil
-            if let url = view.url { self.url = url }
+            if let url = shown ?? view.url { self.url = url }
             if let title = view.title, !title.isEmpty { self.title = title }
-            if !isPrivate, let url = view.url { History.shared.record(url, title: view.title, typed: true) }
+            if !isPrivate, let url = shown ?? view.url { History.shared.record(url, title: shown == nil ? view.title : nil, typed: true) }
             favicon = Favicons.shared.cached(for: view.url ?? url)
             isLoading = view.isLoading
             host?.tabChanged(self, .url)
@@ -434,6 +434,13 @@ extension Tab: WKUIDelegate {
             return host?.openPopup(from: self, configuration: configuration, size: size)?.webView
         }
         let background = action.modifierFlags.contains(.command) && !action.modifierFlags.contains(.shift)
+        // A claude.ai link opens in the page kept ready for it; the link
+        // doesn't need a handle on the new tab.
+        if !isPrivate, action.navigationType == .linkActivated, let url = action.request.url,
+           WarmSite.handles(url), Preferences.shared.keepsClaudeReady {
+            _ = host?.open(from: self, url: url, configuration: nil, background: background)
+            return nil
+        }
         guard let tab = host?.open(from: self, url: nil, configuration: configuration, background: background) else { return nil }
         return tab.webView
     }
