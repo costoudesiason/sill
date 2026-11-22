@@ -335,7 +335,16 @@ extension Tab: WKNavigationDelegate {
            let disposition = http.value(forHTTPHeaderField: "Content-Disposition"), disposition.lowercased().hasPrefix("attachment") {
             return decisionHandler(.download)
         }
-        decisionHandler(response.canShowMIMEType ? .allow : .download)
+        if response.canShowMIMEType { return decisionHandler(.allow) }
+        // A page is never a download: HTML, text or no type at all (a
+        // service worker's answer may come without one) is left to WebKit.
+        let type = response.response.mimeType?.lowercased() ?? ""
+        if type.isEmpty || type.hasPrefix("text/") || type.contains("html") || type.contains("xml") || type.contains("json") {
+            return decisionHandler(.allow)
+        }
+        // Frames inside a page don't save files behind your back; only the
+        // page you're looking at downloads what it can't show.
+        decisionHandler(response.isForMainFrame ? .download : .cancel)
     }
 
     func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
