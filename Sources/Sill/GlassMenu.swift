@@ -110,7 +110,7 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         let appearance = window.effectiveAppearance
         let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         panel.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-        glass.tintColor = nil
+        glass.tintColor = dark ? NSColor(white: 0.16, alpha: 0.3) : nil
         Ink.current = Ink(dark: dark)
         titleLabel.textColor = Ink.current.secondary
         search.textColor = Ink.current.primary

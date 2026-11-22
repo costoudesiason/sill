@@ -154,9 +154,11 @@ final class Palette: NSObject {
         card.appearance = named
         content.appearance = named
         Ink.current = Ink(dark: named?.name == .darkAqua)
-        // Plain Liquid Glass, as the system draws it: no tint of our own.
+        // Liquid Glass with a light dark tint in dark mode, as Raycast's: dark
+        // enough that a white page behind doesn't turn it pale, light enough
+        // to stay glass.
         glass.style = .regular
-        glass.tintColor = nil
+        glass.tintColor = Ink.current.dark ? NSColor(white: 0.16, alpha: 0.3) : nil
         field.textColor = Ink.current.primary
         searchIcon.contentTintColor = Ink.current.secondary
         pill.needsLayout = true
