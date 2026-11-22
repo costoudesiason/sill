@@ -193,7 +193,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// view's own layer is), and then its min-Y corners are the top ones.
     private static func clip(_ view: NSView, radius: CGFloat, corners edge: Edge) {
         guard let layer = view.layer else { return }
-        let down = layer.contentsAreFlipped()
+        // The view's own orientation: a layer asked before the window has
+        // drawn answers the opposite way, and the corners came out upside down.
+        let down = view.isFlipped
         let upper: CACornerMask = down ? [.layerMinXMinYCorner, .layerMaxXMinYCorner] : [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
         let lower: CACornerMask = down ? [.layerMinXMaxYCorner, .layerMaxXMaxYCorner] : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         layer.cornerCurve = .continuous
@@ -399,7 +401,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if paletteOpen && palette.mode == mode && mode == .newTab { palette.close(); return }
         status.show(nil)
         palette.open(mode, in: stage)
-        if mode != .tabs, spare == nil {
+        if mode == .newTab, spare == nil {
             // On the next turn, so the palette is on screen first.
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.spare == nil, self.window?.isVisible == true else { return }
@@ -410,6 +412,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     func paletteClosed() {
         if let webView = selected?.webView { window?.makeFirstResponder(webView) }
+        // A spare nobody took (the palette was cancelled) gives its memory back.
+        // Later in the turn, so the Return that closed the palette can claim it.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.paletteOpen else { return }
+            self.spare = nil
+        }
     }
 
     var paletteIsOpen: Bool { paletteOpen }

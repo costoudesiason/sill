@@ -191,10 +191,14 @@ enum PageScripts {
       // have one to float it. Media events don't bubble; capture sees them.
       let playing = false;
       const media = () => {
-        const now = [...document.querySelectorAll('video')].some(v => !v.paused && !v.ended && v.readyState > 1);
+        const now = [...document.querySelectorAll('video')].some(v => {
+          if (v.paused || v.ended || v.readyState < 2 || v.muted || v.volume === 0) return false;
+          const box = v.getBoundingClientRect();
+          return box.width >= 200 && box.height >= 112;
+        });
         if (now !== playing) { playing = now; post({ t: 'media', playing: now }); }
       };
-      ['playing', 'pause', 'ended', 'emptied'].forEach(e => document.addEventListener(e, media, true));
+      ['playing', 'pause', 'ended', 'emptied', 'volumechange'].forEach(e => document.addEventListener(e, media, true));
       media();
 
       // The page's icon: the one nearest 64 px, an SVG, or /favicon.ico.
@@ -439,8 +443,10 @@ enum PictureInPicture {
       for (var i = 0; i < videos.length; i++) {
         var v = videos[i];
         if (v.webkitPresentationMode === 'picture-in-picture') return 'in';
-        if (v.paused || v.ended || v.readyState < 2) continue;
+        if (v.paused || v.ended || v.readyState < 2 || v.muted || v.volume === 0) continue;
         var box = v.getBoundingClientRect();
+        // A real video, not a muted preview or a background loop.
+        if (box.width < 200 || box.height < 112) continue;
         if (box.width * box.height >= area) { area = box.width * box.height; best = v; }
       }
       if (!best) return 'none';

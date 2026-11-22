@@ -171,6 +171,8 @@ final class Tab: NSObject {
     /// place, when shown.
     func sleep() {
         guard let webView, !webView.isLoading else { return }
+        // Waking reloads it anyway: a crash noted before sleeping mustn't reload it twice.
+        needsReload = false
         pending = webView.url ?? url
         savedState = webView.interactionState
         playingVideo = false
@@ -411,16 +413,17 @@ extension Tab: WKUIDelegate {
         host?.closeRequested(self)
     }
 
-    /// The button on macOS's picture in picture window that puts the video
-    /// back. WebKit puts it back into its page only once that page is seen,
-    /// and the page is a tab behind another: it comes to the front first.
     /// The page has drawn something: a view kept unseen so far comes in.
-    /// WebKit calls this only on a view that asked (holdForFirstFrame).
+    /// WebKit calls this only on a view that asked (holdForFirstFrame); it is
+    /// a navigation-delegate call, answered here because Tab is both delegates.
     @objc(_webView:renderingProgressDidChange:)
     func webView(_ webView: WKWebView, renderingProgressDidChange events: UInt) {
         if events & SillWebView.firstFrame != 0 { (webView as? SillWebView)?.showFirstFrame() }
     }
 
+    /// The button on macOS's picture in picture window that puts the video
+    /// back. WebKit puts it back into its page only once that page is seen,
+    /// and the page is a tab behind another: it comes to the front first.
     @objc(_webViewFullscreenMayReturnToInline:)
     func webViewFullscreenMayReturnToInline(_ webView: WKWebView) {
         host?.bringBack(self)
