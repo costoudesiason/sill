@@ -154,16 +154,9 @@ final class Palette: NSObject {
         card.appearance = named
         content.appearance = named
         Ink.current = Ink(dark: named?.name == .darkAqua)
-        // Frosted, as Raycast's: regular glass blurs what's behind so rows
-        // stay readable over busy pages, under a soft mid-grey tint so a
-        // white page can't wash it out to white, nor a dark one to black.
-        if Ink.current.dark {
-            glass.style = .regular
-            glass.tintColor = NSColor(white: 0.32, alpha: 0.42)
-        } else {
-            glass.style = .regular
-            glass.tintColor = nil
-        }
+        // Plain Liquid Glass, as the system draws it: no tint of our own.
+        glass.style = .regular
+        glass.tintColor = nil
         field.textColor = Ink.current.primary
         searchIcon.contentTintColor = Ink.current.secondary
         pill.needsLayout = true
@@ -511,8 +504,23 @@ final class Palette: NSObject {
                 self?.rebuild()
             })
         }
-        let anchor = pill.actionsAnchor
-        menu.popUp(positioning: nil, at: NSPoint(x: anchor.minX, y: anchor.minY - 6), in: pill)
+        // Raycast's way: a glass menu rising from the Actions pill, right-aligned.
+        guard let window = pill.window else { return }
+        let anchor = pill.convert(pill.actionsAnchor, to: nil)
+        let entries = GlassMenu.entries(from: menu, symbols: [
+            "Switch to Tab": "arrow.right.square", "Close Tab": "xmark.square",
+            "Open in New Tab": "plus.square.on.square", "Open in Background Tab": "square.stack",
+            "Open Here": "arrow.turn.down.right", "Copy Link": "link", "Remove from History": "trash",
+        ], keys: ["Open in New Tab": ["↩"], "Switch to Tab": ["↩"], "Copy Link": ["⇧", "⌘", "C"]])
+        let title: String
+        switch item {
+        case .tab(let tab): title = tab.displayTitle
+        case .visit(let visit): title = visit.title.isEmpty ? Address.display(visit.address) : visit.title
+        case .go(let url): title = Address.display(url)
+        case .search(let q), .suggestion(let q): title = q
+        }
+        GlassMenu(title: title, entries: entries)
+            .show(in: window, at: NSPoint(x: anchor.maxX, y: anchor.maxY + 8), above: true, alignRight: true)
     }
 
     @objc private func clicked() {
