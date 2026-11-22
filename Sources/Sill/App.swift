@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var openedURLsAtLaunch = false
     private var launched = false
     private var themeWatch: Any?
+    /// The Mac running short of memory: idle tabs sleep sooner (Settings › Tabs).
+    private let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
 
     var current: BrowserWindowController? {
         (NSApp.keyWindow?.windowController as? BrowserWindowController)
@@ -47,6 +49,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = ApplePasswords.shared
         NSApp.appearance = Preferences.shared.theme.appearance
         themeWatch = Preferences.shared.$theme.sink { NSApp.appearance = $0.appearance }
+        pressure.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // A warning sleeps tabs left for five minutes; critical, every one not in front.
+                let critical = self.pressure.data.contains(.critical)
+                for browser in self.browsers { browser.napIdleTabs(olderThan: critical ? 0 : 300) }
+            }
+        }
+        pressure.activate()
         if Preferences.shared.restoresTabs, restoreSession() {
             return
         }

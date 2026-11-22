@@ -38,7 +38,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private let toastView = Toast()
     private var downloadsPopover: NSPopover?
     /// Recently closed in this window, newest last, for ⇧⌘T.
-    private var closed: [(url: URL, title: String, index: Int)] = []
+    private var closed: [(url: URL, title: String, index: Int, state: Any?)] = []
     var onChange: (() -> Void)?
     private var napTimer: Timer?
     private var watchingPrefs: AnyCancellable?
@@ -200,7 +200,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     @discardableResult
     func addTab(url: URL?, configuration: WKWebViewConfiguration? = nil, at index: Int? = nil,
-                select shouldSelect: Bool = true, opener: Tab? = nil, typed: Bool = false) -> Tab {
+                select shouldSelect: Bool = true, opener: Tab? = nil, typed: Bool = false, state: Any? = nil) -> Tab {
         let tab = Tab(url: nil, isPrivate: isPrivate)
         tab.host = self
         tab.opener = opener
@@ -209,6 +209,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             tab.materialize(with: configuration)
         } else if let url {
             tab.load(url, typed: typed)
+            tab.restore(state)
             if !shouldSelect { tab.materialize() }
         }
         if shouldSelect { select(tab, animated: true) } else { strip.sync(animated: true) }
@@ -267,7 +268,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     func close(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
         if let url = tab.webView?.url ?? tab.url, !isPrivate {
-            closed.append((url, tab.displayTitle, index))
+            closed.append((url, tab.displayTitle, index, tab.interactionState))
             if closed.count > 30 { closed.removeFirst() }
         }
         tabs.remove(at: index)
@@ -344,9 +345,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         return (webView.value(forKey: key) as? Bool) ?? true
     }
 
-    private func napIdleTabs() {
+    /// Puts tabs idle for `olderThan` seconds (the setting, unless the Mac is
+    /// short of memory and asks sooner) to sleep. Never the one in front, one
+    /// whose video floats, or one playing sound or using the camera.
+    func napIdleTabs(olderThan: TimeInterval? = nil) {
         guard Preferences.shared.sleepsTabs else { return }
-        let after = TimeInterval(max(5, Preferences.shared.sleepAfterMinutes) * 60)
+        let after = olderThan ?? TimeInterval(max(5, Preferences.shared.sleepAfterMinutes) * 60)
         let now = Date()
         for tab in tabs where tab !== selected && tab !== pictured {
             // A floating video may be muted, so not "playing audio": it counts anyway.
@@ -354,7 +358,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
                   webView.cameraCaptureState == .none, webView.microphoneCaptureState == .none,
                   webView.fullscreenState == .notInFullscreen, !Self.isPlayingAudio(webView)
             else { continue }
-            tab.sleep()
+            tab.sleepUnlessTyping()
         }
     }
 
@@ -424,7 +428,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     @objc func reopenClosedTab(_ sender: Any?) {
         guard let last = closed.popLast() else { return }
-        addTab(url: last.url, at: min(last.index, tabs.count))
+        // With its back and forward history, as it was.
+        addTab(url: last.url, at: min(last.index, tabs.count), state: last.state)
     }
 
     @objc func goBack(_ sender: Any?) { selected?.goBack() }

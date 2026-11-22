@@ -43,6 +43,10 @@ final class Tab: NSObject {
     var lastShown = Date()
 
     private var pending: URL?
+    /// The page's back/forward list and place in it, kept while the tab
+    /// sleeps (or after it closed), so it comes back as it was and from
+    /// WebKit's caches rather than as a fresh load of its address.
+    private var savedState: Any?
     private var watching: [NSKeyValueObservation] = []
     /// Typed or picked in the palette: counts for more in history.
     private var typedNavigation = false
@@ -82,7 +86,14 @@ final class Tab: NSObject {
         view.isInspectable = true
         webView = view
         watch(view)
-        if let pending, configuration == nil {
+        if configuration == nil, let state = savedState {
+            savedState = nil
+            pending = nil
+            Shield.shared.whenReady { [weak self, weak view] in
+                guard let view, self?.webView === view else { return }
+                view.interactionState = state
+            }
+        } else if let pending, configuration == nil {
             self.pending = nil
             Shield.shared.whenReady { [weak self, weak view] in
                 guard let view, self?.webView === view else { return }
@@ -138,15 +149,42 @@ final class Tab: NSObject {
         ]
     }
 
-    /// Lets the page go to save memory; it comes back from its address when shown.
+    /// Lets the page go to save memory; it comes back, with its history and
+    /// place, when shown.
     func sleep() {
         guard let webView, !webView.isLoading else { return }
         pending = webView.url ?? url
+        savedState = webView.interactionState
         playingVideo = false
         watching = []
         webView.removeFromSuperview()
         self.webView = nil
     }
+
+    /// Sleeps, unless something has been typed into the page and not sent:
+    /// a sleeping page would lose it.
+    func sleepUnlessTyping() {
+        guard let webView else { return }
+        let typing = """
+        (function () {
+          var e = document.activeElement;
+          return !!(e && (e.isContentEditable || ((e.tagName === 'INPUT' || e.tagName === 'TEXTAREA') && e.value)));
+        })();
+        """
+        webView.evaluateJavaScript(typing, in: nil, in: Web.world) { [weak self, weak webView] result in
+            // A page that can't be asked (a PDF, say) has nothing typed in it.
+            guard let self, let webView, self.webView === webView, (try? result.get()) as? Bool != true else { return }
+            self.sleep()
+        }
+    }
+
+    /// The history of a tab that was closed, for ⇧⌘T: used the first time it's shown.
+    func restore(_ state: Any?) {
+        guard webView == nil, let state else { return }
+        savedState = state
+    }
+
+    var interactionState: Any? { webView?.interactionState }
 
     // MARK: - going places
 
@@ -160,6 +198,7 @@ final class Tab: NSObject {
             }
         } else {
             pending = url
+            savedState = nil
         }
         host?.tabChanged(self, .url)
     }
