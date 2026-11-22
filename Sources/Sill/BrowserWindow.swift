@@ -97,6 +97,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// A web view made while ⌘T is open, so Return doesn't wait for one to
     /// be built before the page can start loading.
     private var spare: SillWebView?
+    /// The page whose video is still on its way out to Picture in Picture.
+    private weak var leaving: WKWebView?
     private var expected = Set<String>()
 
     init(isPrivate: Bool, popup: Bool = false) {
@@ -729,15 +731,30 @@ extension BrowserWindowController {
     fileprivate func placePages(keep: WKWebView?) {
         guard let selected else { return }
         if let split, split.contains(selected) {
-            for view in pageHost.subviews where view !== keep && view !== splitView { view.removeFromSuperview() }
+            // As for one page below: the pair comes back under the page being left.
+            let shown = selected.webView as? SillWebView
+            let under = keep == nil && shown?.shownBefore == true && splitView.superview !== pageHost
+                && pageHost.subviews.contains { $0 is WKWebView }
+            if !under {
+                for view in pageHost.subviews where view !== keep && view !== splitView { view.removeFromSuperview() }
+            }
             if splitView.superview !== pageHost {
                 splitView.frame = pageHost.bounds
                 splitView.autoresizingMask = [.width, .height]
-                pageHost.addSubview(splitView)
+                pageHost.addSubview(splitView, positioned: under ? .below : .above, relativeTo: nil)
+            }
+            if under, let shown {
+                shown.afterNextFrame { [weak self, weak shown] in
+                    guard let self, let shown, self.selected?.webView === shown,
+                          self.splitView.superview === self.pageHost else { return }
+                    for view in self.pageHost.subviews where view !== self.splitView && view !== self.leaving { view.removeFromSuperview() }
+                }
             }
             for (pane, tab) in [(splitView.leftPane, split.left), (splitView.rightPane, split.right)] {
                 if let tab {
-                    pane.show(tab.materialize())
+                    let view = tab.materialize()
+                    pane.show(view)
+                    view.shownBefore = true
                 } else {
                     chooser.offer(tabs.filter { !split.contains($0) })
                     pane.show(chooser)
@@ -747,11 +764,28 @@ extension BrowserWindowController {
             splitView.apply(fraction: split.fraction)
         } else {
             let webView = selected.materialize()
-            for view in pageHost.subviews where view !== keep && view !== webView { view.removeFromSuperview() }
+            // A page that has been shown before comes back under the one
+            // being left, which goes once the new one has drawn: nothing
+            // waits, and the window never shows through between the two.
+            if let keep { leaving = keep }
+            let under = keep == nil && webView.shownBefore && webView.superview !== pageHost
+                && !webView.isDescendant(of: splitView)
+                && pageHost.subviews.contains { $0 is WKWebView || $0 === splitView }
+            if !under {
+                for view in pageHost.subviews where view !== keep && view !== webView { view.removeFromSuperview() }
+            }
             if webView.superview !== pageHost {
                 webView.frame = pageHost.bounds
                 webView.autoresizingMask = [.width, .height]
-                pageHost.addSubview(webView)
+                pageHost.addSubview(webView, positioned: under ? .below : .above, relativeTo: nil)
+            }
+            webView.shownBefore = true
+            if under {
+                webView.afterNextFrame { [weak self, weak webView] in
+                    guard let self, let webView, self.selected?.webView === webView,
+                          webView.superview === self.pageHost else { return }
+                    for view in self.pageHost.subviews where view !== webView && view !== self.leaving { view.removeFromSuperview() }
+                }
             }
         }
     }

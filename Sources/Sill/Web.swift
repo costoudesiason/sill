@@ -91,6 +91,13 @@ enum Web {
         // idle, so background audio and picture in picture carry on.
         PictureInPicture.allow(configuration.preferences)
         backspaceStays(configuration.preferences)
+        // A page put back in the window doesn't hold the app still until it
+        // has drawn; the page it replaces stays under it until then instead.
+        let waits = NSSelectorFromString("_setWaitsForPaintAfterViewDidMoveToWindow:")
+        if configuration.responds(to: waits) {
+            typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
+            unsafeBitCast(configuration.method(for: waits), to: Setter.self)(configuration, waits, false)
+        }
         return configuration
     }
 }
@@ -122,6 +129,20 @@ final class SillWebView: WKWebView {
     /// view starts unseen, over the window's own colour, and comes in once
     /// WebKit says there is something on it worth seeing.
     private var held = false
+    /// Has been in a window before, so it has a page to draw the moment it's back.
+    var shownBefore = false
+
+    /// Runs once the view's next frame is in the window, or shortly after
+    /// if WebKit never says.
+    func afterNextFrame(_ run: @escaping () -> Void) {
+        let presented = NSSelectorFromString("_doAfterNextPresentationUpdate:")
+        guard responds(to: presented) else { return run() }
+        var done = false
+        let once = { if !done { done = true; run() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { once() }
+        typealias After = @convention(c) (AnyObject, Selector, @escaping @convention(block) () -> Void) -> Void
+        unsafeBitCast(method(for: presented), to: After.self)(self, presented) { DispatchQueue.main.async { once() } }
+    }
     private var presenting = false
 
     /// _WKRenderingProgressEventFirstVisuallyNonEmptyLayout, the moment
