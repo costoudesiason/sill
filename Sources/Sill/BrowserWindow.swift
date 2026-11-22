@@ -299,6 +299,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         tabs.insert(tab, at: min(index ?? tabs.count, tabs.count))
         if let configuration {
             tab.materialize(with: configuration)
+        } else if let url, state == nil, !isPrivate, let view = WarmSite.shared.claim(url) {
+            // claude.ai, already running out of sight: it only changes route.
+            tab.adopt(view, loaded: true, showing: url)
         } else if let url {
             tab.load(url, typed: typed)
             tab.restore(state)
@@ -377,10 +380,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         tabs.remove(at: index)
         // A split loses one side: the page left over has the window to itself.
         if let split, split.contains(tab) { self.split = nil; strip.markPaired(nil) }
-        // Its video goes with it, not left floating with nothing to return to.
-        tab.webView?.closeAllMediaPresentations { }
+        // Its sound and video go with it, floating or not: nothing keeps
+        // playing from a tab that's gone.
         if pictured === tab { pictured = nil }
-        tab.webView?.removeFromSuperview()
+        Self.silence(tab)
         Web.releaseIdleProcesses()
         if tabs.isEmpty {
             selected = nil
@@ -467,7 +470,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// is already there. A short pause first, so passing letters don't load.
     func prerenderSoon(_ url: URL?) {
         prerenderTimer?.invalidate()
-        guard let url, paletteOpen, palette.mode == .newTab, !isPrivate,
+        guard let url, paletteOpen, palette.mode == .newTab, !isPrivate, !WarmSite.handles(url) || !Preferences.shared.keepsClaudeReady,
               let host = url.host(), History.shared.knows(host: host) else { return }
         if let prerendered, Self.samePage(prerendered, url) { return }
         prerenderTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in
@@ -532,7 +535,25 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
     }
 
+    /// Stops everything a page is playing, ends its picture in picture, and
+    /// unloads it, for a tab or window being closed.
+    static func silence(_ tab: Tab) {
+        guard let view = tab.webView else { return }
+        let stop = "document.querySelectorAll('video, audio').forEach(m => { try { m.pause(); } catch (_) {} });"
+            + " if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});"
+        view.evaluateJavaScript(stop, in: nil, in: .page) { _ in }
+        view.pauseAllMediaPlayback { }
+        view.closeAllMediaPresentations { }
+        view.removeFromSuperview()
+        // Unloaded a moment later, once the pause has landed.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak view] in
+            view?.stopLoading()
+            view?.loadHTMLString("", baseURL: nil)
+        }
+    }
+
     func windowWillClose(_ notification: Notification) {
+        for tab in tabs { Self.silence(tab) }
         napTimer?.invalidate()
         spare = nil
         if let peekWatch { NSEvent.removeMonitor(peekWatch) }

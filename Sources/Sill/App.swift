@@ -57,9 +57,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // A warning sleeps tabs left for five minutes; critical, every one not in front.
                 let critical = self.pressure.data.contains(.critical)
                 for browser in self.browsers { browser.napIdleTabs(olderThan: critical ? 0 : 300) }
+                WarmSite.shared.drop()
             }
         }
         pressure.activate()
+        WarmSite.shared.warm(after: 4)
         if Preferences.shared.restoresTabs, restoreSession() {
             return
         }
