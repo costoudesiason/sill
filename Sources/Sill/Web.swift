@@ -156,6 +156,9 @@ final class MessageRouter: NSObject, WKScriptMessageHandler {
             tab.scrolled((body["v"] as? Bool) ?? false)
         case "media":
             tab.mediaChanged((body["playing"] as? Bool) ?? false)
+        case "pipReturn":
+            // Back from the floating window: to its tab, its window, to the front.
+            tab.host?.bringBack(tab)
         case "icon":
             if let href = body["href"] as? String, let url = URL(string: href) { tab.found(icon: url) }
         case "field":
@@ -221,6 +224,21 @@ enum PageScripts {
       };
       ['playing', 'pause', 'ended', 'emptied', 'volumechange'].forEach(e => document.addEventListener(e, media, true));
       media();
+
+      // The float's return button: the video leaves picture in picture still
+      // playing (its close button pauses it). Sill brings this tab back.
+      const left = (e) => {
+        const v = e.target;
+        if (!(v instanceof HTMLVideoElement)) return;
+        setTimeout(() => {
+          const floating = document.pictureInPictureElement === v || v.webkitPresentationMode === 'picture-in-picture';
+          if (!floating && !v.paused && !v.ended) post({ t: 'pipReturn' });
+        }, 60);
+      };
+      document.addEventListener('leavepictureinpicture', left, true);
+      document.addEventListener('webkitpresentationmodechanged', (e) => {
+        if (e.target instanceof HTMLVideoElement && e.target.webkitPresentationMode !== 'picture-in-picture') left(e);
+      }, true);
 
       // The page's icon: the one nearest 64 px, an SVG, or /favicon.ico.
       const icon = () => {

@@ -366,10 +366,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         tabs.remove(at: index)
         // A split loses one side: the page left over has the window to itself.
         if let split, split.contains(tab) { self.split = nil; strip.markPaired(nil) }
-        // Its video goes with it, not left floating with nothing to return to.
-        tab.webView?.closeAllMediaPresentations { }
+        // Its sound and video go with it, floating or not: nothing keeps
+        // playing from a tab that's gone.
         if pictured === tab { pictured = nil }
-        tab.webView?.removeFromSuperview()
+        Self.silence(tab)
         if tabs.isEmpty {
             selected = nil
             window?.close()
@@ -499,7 +499,25 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
     }
 
+    /// Stops everything a page is playing, ends its picture in picture, and
+    /// unloads it, for a tab or window being closed.
+    static func silence(_ tab: Tab) {
+        guard let view = tab.webView else { return }
+        let stop = "document.querySelectorAll('video, audio').forEach(m => { try { m.pause(); } catch (_) {} });"
+            + " if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});"
+        view.evaluateJavaScript(stop, in: nil, in: .page) { _ in }
+        view.pauseAllMediaPlayback { }
+        view.closeAllMediaPresentations { }
+        view.removeFromSuperview()
+        // Unloaded a moment later, once the pause has landed.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak view] in
+            view?.stopLoading()
+            view?.loadHTMLString("", baseURL: nil)
+        }
+    }
+
     func windowWillClose(_ notification: Notification) {
+        for tab in tabs { Self.silence(tab) }
         napTimer?.invalidate()
         spare = nil
         for tab in tabs { tab.webView?.removeFromSuperview() }
