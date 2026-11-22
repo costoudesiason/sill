@@ -433,11 +433,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// finishing), so the lookup and handshake are done by the time Return
     /// is pressed. Once per site for each time the palette is open.
     func expect(_ url: URL?) {
-        guard let url, url.scheme == "https", let host = url.host(),
-              let view = spare ?? selected?.webView, expected.insert(host).inserted
-        else { return }
+        guard let url, url.scheme == "https", let host = url.host() else { return }
+        let site = url.port.map { "\(host):\($0)" } ?? host
+        guard let view = spare ?? selected?.webView, expected.insert(site).inserted else { return }
         let connect = NSSelectorFromString("_preconnectToServer:")
-        guard view.responds(to: connect), let root = URL(string: "https://\(host)/") else { return }
+        guard view.responds(to: connect), let root = URL(string: "https://\(site)/") else { return }
         view.perform(connect, with: root)
     }
 
