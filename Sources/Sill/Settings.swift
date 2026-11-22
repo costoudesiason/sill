@@ -110,7 +110,7 @@ private struct AppearancePane: View {
             } header: {
                 Text("Window")
             } footer: {
-                Text("Rounder corners make the window see-through, which macOS redraws in full on every frame. Off is fastest.")
+                Text("Rounder corners make the window see-through, which costs some smoothness while pages scroll. Off is fastest.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }

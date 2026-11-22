@@ -13,6 +13,12 @@ final class StageView: NSView {
     }
 }
 
+/// The bar and its glass, in one view whose top corners can be rounded
+/// without clipping the page below (see BrowserWindowController.applyLooks).
+final class TopClipView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 /// Where the page goes. The window's own colour shows here while a page has
 /// yet to draw (see SillWebView.holdForFirstFrame), rather than white in a
 /// dark window; drawn by the layer, so it follows light and dark itself.
@@ -40,6 +46,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private lazy var bar = TopBar(strip: strip)
     private let stage = StageView()
     private let pageHost = PageHostView()
+    private let top = TopClipView()
     private lazy var palette = Palette(browser: self)
     private lazy var findBar = FindBar(browser: self)
     private let status = StatusPill()
@@ -97,10 +104,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         ground.material = .sidebar
         ground.blendingMode = .behindWindow
         ground.state = .followsWindowActiveState
-        stage.addSubview(ground)
+        top.wantsLayer = true
+        top.addSubview(ground)
         wash.wantsLayer = true
-        stage.addSubview(wash)
-        stage.addSubview(bar)
+        top.addSubview(wash)
+        top.addSubview(bar)
+        stage.addSubview(top)
         stage.addSubview(pageHost)
         stage.addSubview(status)
         stage.addSubview(toastView)
@@ -145,15 +154,38 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         ground.isHidden = !prefs.glassBar
         wash.isHidden = !prefs.glassBar
         // Rounder corners need a see-through window, clipped to them; the
-        // system's own corners cost nothing.
+        // system's own corners cost nothing. Only the corners are clipped:
+        // the bar's top two and the page's bottom two. A rounded mask over
+        // the whole window, page and all, made every frame of a scrolling
+        // page or a video go through an extra offscreen pass.
         let round = prefs.roundCorners
+        let radius = round ? prefs.cornerRadius : 0
         window?.isOpaque = !round
         window?.backgroundColor = round ? .clear : .windowBackgroundColor
-        stage.layer?.cornerRadius = round ? prefs.cornerRadius : 0
-        stage.layer?.masksToBounds = round
+        // Its own background follows the radius without clipping anything.
+        stage.layer?.cornerRadius = radius
+        stage.layer?.masksToBounds = false
         stage.layer?.backgroundColor = round && !prefs.glassBar ? NSColor.windowBackgroundColor.cgColor : nil
+        Self.clip(top, radius: radius, corners: .top)
+        Self.clip(pageHost, radius: radius, corners: .bottom)
         window?.invalidateShadow()
         strip.prefsChanged()
+    }
+
+    private enum Edge { case top, bottom }
+
+    /// Rounds and clips two of `view`'s corners, or none at radius 0. A
+    /// layer's y runs down the screen when AppKit has flipped it (a flipped
+    /// view's own layer is), and then its min-Y corners are the top ones.
+    private static func clip(_ view: NSView, radius: CGFloat, corners edge: Edge) {
+        guard let layer = view.layer else { return }
+        let down = layer.contentsAreFlipped()
+        let upper: CACornerMask = down ? [.layerMinXMinYCorner, .layerMaxXMinYCorner] : [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+        let lower: CACornerMask = down ? [.layerMinXMaxYCorner, .layerMaxXMaxYCorner] : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        layer.cornerCurve = .continuous
+        layer.cornerRadius = radius
+        layer.maskedCorners = edge == .top ? upper : lower
+        layer.masksToBounds = radius > 0
     }
 
     // MARK: - Bar
@@ -186,7 +218,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     var topInset: CGFloat { TopBar.height }
 
     private func stageLaidOut() {
-        bar.frame = NSRect(x: 0, y: 0, width: stage.bounds.width, height: TopBar.height)
+        top.frame = NSRect(x: 0, y: 0, width: stage.bounds.width, height: TopBar.height)
+        bar.frame = top.bounds
         // The page starts below the bar: nothing goes behind the glass.
         pageHost.frame = NSRect(x: 0, y: topInset, width: stage.bounds.width, height: max(0, stage.bounds.height - topInset))
         // Only as tall as the bar plus a margin the page covers: its rim stays
