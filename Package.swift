@@ -10,7 +10,8 @@ let package = Package(
             path: "Sources/Sill",
             // AppKit is main-thread by nature; strict isolation buys ceremony here.
             // Release builds use -O: speed over size in the hot loops.
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: [.swiftLanguageMode(.v5),
+                            .unsafeFlags(["-enforce-exclusivity=unchecked"], .when(configuration: .release))]
         )
     ]
 )

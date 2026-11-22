@@ -1,6 +1,31 @@
 import AppKit
 import Combine
 import QuartzCore
+import os
+
+enum Perf {
+    struct Interval {
+        let state: OSSignpostIntervalState
+    }
+
+    private static let signposter = OSSignposter(subsystem: Bundle.main.bundleIdentifier ?? "Sill", category: "perf")
+    static var launch: Interval?
+
+    static func begin(_ name: StaticString) -> Interval? {
+        guard signposter.isEnabled else { return nil }
+        return Interval(state: signposter.beginInterval(name, id: signposter.makeSignpostID()))
+    }
+
+    static func end(_ name: StaticString, _ interval: Interval?) {
+        guard let interval else { return }
+        signposter.endInterval(name, interval.state)
+    }
+
+    static func cancel(_ name: StaticString, _ interval: Interval?) {
+        guard let interval else { return }
+        signposter.endInterval(name, interval.state, "cancelled")
+    }
+}
 
 // MARK: - Motion
 

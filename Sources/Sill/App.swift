@@ -36,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Launch
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        Perf.launch = Perf.begin("Launch to first window")
+        History.preload()
         NSApp.mainMenu = MainMenu.build()
         // Before any tab loads: the first loads wait for it (at most a second).
         if Preferences.shared.blocksAds { Shield.shared.compile() }

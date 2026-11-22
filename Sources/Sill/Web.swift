@@ -103,6 +103,30 @@ enum Web {
 /// The web view, knowing which tab it belongs to.
 final class SillWebView: WKWebView {
     weak var tab: Tab?
+    private var navigationInterval: Perf.Interval?
+    var tracedNavigationCommitted = false
+
+    func traceNavigation(_ interval: Perf.Interval) {
+        cancelNavigationTrace()
+        let observe = NSSelectorFromString("_setObservedRenderingProgressEvents:")
+        guard responds(to: observe) else { Perf.cancel("Palette Return to first frame", interval); return }
+        typealias Setter = @convention(c) (AnyObject, Selector, UInt) -> Void
+        unsafeBitCast(method(for: observe), to: Setter.self)(self, observe, Self.firstFrame)
+        navigationInterval = interval
+    }
+
+    func finishNavigationTrace() {
+        guard tracedNavigationCommitted else { return }
+        Perf.end("Palette Return to first frame", navigationInterval)
+        navigationInterval = nil
+        tracedNavigationCommitted = false
+    }
+
+    func cancelNavigationTrace() {
+        Perf.cancel("Palette Return to first frame", navigationInterval)
+        navigationInterval = nil
+        tracedNavigationCommitted = false
+    }
 
     /// Clicking into one half of a split brings that half's tab to the front.
     override func becomeFirstResponder() -> Bool {

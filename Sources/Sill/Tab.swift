@@ -172,6 +172,7 @@ final class Tab: NSObject {
     /// place, when shown.
     func sleep() {
         guard let webView, !webView.isLoading else { return }
+        webView.cancelNavigationTrace()
         // Waking reloads it anyway: a crash noted before sleeping mustn't reload it twice.
         needsReload = false
         pending = webView.url ?? url
@@ -210,6 +211,7 @@ final class Tab: NSObject {
     // MARK: - going places
 
     func load(_ url: URL, typed: Bool = false) {
+        webView?.cancelNavigationTrace()
         typedNavigation = typed
         self.url = url
         if let webView {
@@ -238,7 +240,10 @@ final class Tab: NSObject {
         if webView.url == nil, let url { webView.load(URLRequest(url: url)) }
         else if fromOrigin { webView.reloadFromOrigin() } else { webView.reload() }
     }
-    func stop() { webView?.stopLoading() }
+    func stop() {
+        webView?.cancelNavigationTrace()
+        webView?.stopLoading()
+    }
 
     // MARK: - from the page script
 
@@ -328,6 +333,7 @@ extension Tab: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        (webView as? SillWebView)?.tracedNavigationCommitted = true
         scrolled(false)
         playingVideo = false
         guard let url = webView.url else { return }
@@ -345,11 +351,13 @@ extension Tab: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        (webView as? SillWebView)?.cancelNavigationTrace()
         (webView as? SillWebView)?.showFirstFrame()
         showError(error, in: webView)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        (webView as? SillWebView)?.cancelNavigationTrace()
         (webView as? SillWebView)?.showFirstFrame()
         showError(error, in: webView)
     }
@@ -377,6 +385,7 @@ extension Tab: WKNavigationDelegate {
     /// back at once; behind another tab, when it's next shown. Twice in a
     /// minute, it says so rather than reloading into the same crash forever.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        (webView as? SillWebView)?.cancelNavigationTrace()
         let now = Date()
         crashes = crashes.filter { now.timeIntervalSince($0) < 60 } + [now]
         if crashes.count >= 2, let url = webView.url ?? url {
@@ -419,7 +428,10 @@ extension Tab: WKUIDelegate {
     /// a navigation-delegate call, answered here because Tab is both delegates.
     @objc(_webView:renderingProgressDidChange:)
     func webView(_ webView: WKWebView, renderingProgressDidChange events: UInt) {
-        if events & SillWebView.firstFrame != 0 { (webView as? SillWebView)?.showFirstFrame() }
+        if events & SillWebView.firstFrame != 0 {
+            (webView as? SillWebView)?.finishNavigationTrace()
+            (webView as? SillWebView)?.showFirstFrame()
+        }
     }
 
     /// The button on macOS's picture in picture window that puts the video

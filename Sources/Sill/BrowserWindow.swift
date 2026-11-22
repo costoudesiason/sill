@@ -36,6 +36,14 @@ final class PageHostView: NSView {
 
 @MainActor
 final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        if window?.isVisible == true {
+            Perf.end("Launch to first window", Perf.launch)
+            Perf.launch = nil
+        }
+    }
+
     let isPrivate: Bool
     /// A small window a page opened at a size of its own ("Sign in with…").
     let isPopup: Bool
@@ -305,6 +313,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     func select(_ tab: Tab, animated: Bool = false) {
         guard tabs.contains(where: { $0 === tab }) else { return }
+        let interval = Perf.begin("Tab select to page placed")
         if paletteOpen && selected !== tab { palette.close(animated: false) }
         madeFindBar?.close()
         let previous = selected
@@ -331,6 +340,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         tab.lastShown = Date()
         let webView = tab.materialize()
         placePages(keep: keep)
+        Perf.end("Tab select to page placed", interval)
         tab.reloadIfCrashed()
         // Back from picture in picture: WebKit puts a video back in its page
         // only once that page is in the window, so after it is.
@@ -352,6 +362,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     func close(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
+        tab.webView?.cancelNavigationTrace()
         if let url = tab.webView?.url ?? tab.url, !isPrivate {
             closed.append((url, tab.displayTitle, index, tab.interactionState))
             if closed.count > 30 { closed.removeFirst() }
@@ -465,7 +476,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     func windowWillClose(_ notification: Notification) {
         napTimer?.invalidate()
         spare = nil
-        for tab in tabs { tab.webView?.removeFromSuperview() }
+        for tab in tabs {
+            tab.webView?.cancelNavigationTrace()
+            tab.webView?.removeFromSuperview()
+        }
         AppDelegate.shared.windowClosed(self)
     }
 

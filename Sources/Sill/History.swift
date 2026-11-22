@@ -23,16 +23,41 @@ struct Visit: Codable, Hashable {
 @MainActor
 final class History {
     static let shared = History()
-    private(set) var visits: [String: Visit] = [:]
+    private(set) var visits: [String: Visit] = [:] { didSet { recentOrder = nil } }
+    private struct Indexed {
+        let searchableURL: String
+        let title: String
+        let display: String
+        let depth: Double
+        let rawHost: String?
+        let host: String
+
+        init(_ visit: Visit) {
+            let url = visit.address
+            searchableURL = url.map { (($0.host() ?? "") + $0.path).lowercased() } ?? visit.url.lowercased()
+            title = visit.title.lowercased()
+            display = Address.display(url).lowercased()
+            depth = Double(1 + display.filter { $0 == "/" }.count) * 0.5 + 0.5
+            rawHost = url?.host()?.lowercased()
+            host = Domains.bare(rawHost)
+        }
+    }
+    private var index: [String: Indexed] = [:]
+    private var recentOrder: [Visit]?
+    private static let loader = HistoryLoader()
     /// Five seconds: a page changing its title or address in a burst is one write, not many.
     private let saver = Saver<[Visit]>(Places.support.appendingPathComponent("history.json"), delay: 5)
     private static let cap = 6000
 
+    static func preload() {
+        loader.start(Places.support.appendingPathComponent("history.json"))
+    }
+
     private init() {
         let url = Places.support.appendingPathComponent("history.json")
-        if let data = try? Data(contentsOf: url), let list = try? JSONDecoder().decode([Visit].self, from: data) {
-            visits = Dictionary(list.map { ($0.url, $0) }, uniquingKeysWith: { a, b in a.last > b.last ? a : b })
-        }
+        let list = Self.loader.result() ?? HistoryLoader.read(url)
+        visits = Dictionary(list.map { ($0.url, $0) }, uniquingKeysWith: { a, b in a.last > b.last ? a : b })
+        index = visits.mapValues(Indexed.init)
     }
 
     static func key(_ url: URL) -> String? {
@@ -52,6 +77,7 @@ final class History {
         if typed { visit.typed += 1 }
         if let title, !title.isEmpty { visit.title = title }
         visits[key] = visit
+        index[key] = Indexed(visit)
         trim()
         persist()
     }
@@ -59,6 +85,7 @@ final class History {
     func retitle(_ url: URL, _ title: String) {
         guard !title.isEmpty, let key = Self.key(url), visits[key] != nil, visits[key]?.title != title else { return }
         visits[key]?.title = title
+        if let visit = visits[key] { index[key] = Indexed(visit) }
         persist()
     }
 
@@ -78,6 +105,7 @@ final class History {
                 copy.url = key
                 visits[key] = copy
             }
+            if let visit = visits[key] { index[key] = Indexed(visit) }
         }
         trim()
         persist()
@@ -85,6 +113,7 @@ final class History {
 
     func remove(_ key: String) {
         visits[key] = nil
+        index[key] = nil
         persist()
     }
 
@@ -95,6 +124,7 @@ final class History {
 
     func clear() {
         visits = [:]
+        index = [:]
         persist()
     }
 
@@ -107,15 +137,15 @@ final class History {
         for visit in visits.values {
             // The host and path, not the query: a search page's parameters
             // would otherwise match almost anything.
-            let url = visit.address.map { (($0.host() ?? "") + $0.path).lowercased() } ?? visit.url.lowercased()
-            let title = visit.title.lowercased()
-            guard words.allSatisfy({ url.contains($0) || title.contains($0) }) else { continue }
+            guard let fields = index[visit.url] else { continue }
+            let title = fields.title
+            guard words.allSatisfy({ fields.searchableURL.contains($0) || title.contains($0) }) else { continue }
             var score = visit.score(now: now)
-            let bareURL = Address.display(visit.address).lowercased()
+            let bareURL = fields.display
             if bareURL.hasPrefix(words[0]) { score *= 4 }
             else if title.hasPrefix(words[0]) { score *= 2 }
             // Prefer the site's front page over a deep link of equal weight.
-            score /= Double(1 + bareURL.filter { $0 == "/" }.count) * 0.5 + 0.5
+            score /= fields.depth
             scored.append((visit, score))
         }
         scored.sort { $0.1 > $1.1 }
@@ -123,8 +153,9 @@ final class History {
         var seen = Set<String>()
         var result: [Visit] = []
         for (visit, _) in scored {
-            let key = Address.display(visit.address).lowercased() + "\u{1}" + visit.title
-            guard seen.insert(key).inserted, seen.insert(Address.display(visit.address).lowercased()).inserted else { continue }
+            guard let display = index[visit.url]?.display else { continue }
+            let key = display + "\u{1}" + visit.title
+            guard seen.insert(key).inserted, seen.insert(display).inserted else { continue }
             result.append(visit)
             if result.count == limit { break }
         }
@@ -133,7 +164,8 @@ final class History {
 
     /// Lately visited, one per address.
     func recent(limit: Int) -> [Visit] {
-        Array(visits.values.sorted { $0.last > $1.last }.prefix(limit))
+        if recentOrder == nil { recentOrder = visits.values.sorted { $0.last > $1.last } }
+        return Array(recentOrder!.prefix(limit))
     }
 
     /// Most visited sites, one per host.
@@ -156,10 +188,10 @@ final class History {
         let now = Date()
         var best: (String, Double)?
         for visit in visits.values {
-            guard let url = visit.address, let rawHost = url.host()?.lowercased() else { continue }
-            let host = Domains.bare(rawHost)
+            guard let fields = index[visit.url], let rawHost = fields.rawHost else { continue }
+            let host = fields.host
             var candidates = [host, rawHost]
-            if prefix.contains("/") { candidates.append(Address.display(url).lowercased()) }
+            if prefix.contains("/") { candidates.append(fields.display) }
             for candidate in candidates where candidate.hasPrefix(prefix) && candidate.count > prefix.count {
                 let score = visit.score(now: now) + (candidate == host ? 0.5 : 0)
                 if best == nil || score > best!.1 { best = (candidate, score) }
@@ -172,6 +204,7 @@ final class History {
         guard visits.count > Self.cap else { return }
         let keep = visits.values.sorted { $0.last > $1.last }.prefix(Self.cap * 9 / 10)
         visits = Dictionary(keep.map { ($0.url, $0) }, uniquingKeysWith: { a, _ in a })
+        index = index.filter { visits[$0.key] != nil }
     }
 
     private func persist() {
@@ -179,4 +212,38 @@ final class History {
     }
 
     func flush() { saver.flush(Array(visits.values)) }
+}
+
+private final class HistoryLoader: @unchecked Sendable {
+    private let lock = NSLock()
+    private var loaded: [Visit]?
+    private var started = false
+    private var consumed = false
+
+    func start(_ url: URL) {
+        lock.lock()
+        guard !started else { lock.unlock(); return }
+        started = true
+        lock.unlock()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let list = Self.read(url)
+            self.lock.lock()
+            if !self.consumed { self.loaded = list }
+            self.lock.unlock()
+        }
+    }
+
+    func result() -> [Visit]? {
+        lock.lock()
+        defer { lock.unlock() }
+        let list = loaded
+        loaded = nil
+        consumed = true
+        return list
+    }
+
+    static func read(_ url: URL) -> [Visit] {
+        guard let data = try? Data(contentsOf: url), let list = try? JSONDecoder().decode([Visit].self, from: data) else { return [] }
+        return list
+    }
 }

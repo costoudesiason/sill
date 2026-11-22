@@ -139,6 +139,7 @@ final class Palette: NSObject {
 
     func open(_ mode: Mode, in stage: NSView) {
         guard let browser else { return }
+        let interval = Perf.begin("Palette open to visible")
         self.mode = mode
         // Glass picks its look from what's behind it a frame late; pin the
         // window's own, and fixed colours with it, before anything is drawn,
@@ -185,7 +186,8 @@ final class Palette: NSObject {
             editor.typingAttributes = [.foregroundColor: Ink.current.primary, .font: field.font!]
             editor.selectAll(nil)
         }
-        if !wasOpen { appear() }
+        if !wasOpen { appear { Perf.end("Palette open to visible", interval) } }
+        else { Perf.end("Palette open to visible", interval) }
     }
 
     func close(animated: Bool = true) {
@@ -208,11 +210,11 @@ final class Palette: NSObject {
         browser?.paletteClosed()
     }
 
-    private func appear() {
+    private func appear(completion: @escaping () -> Void) {
         card.alphaValue = 0
-        guard !Motion.reduced else { card.alphaValue = 1; return }
+        guard !Motion.reduced else { card.alphaValue = 1; completion(); return }
         card.layer?.add(scaleAnimation(from: 0.96, to: 1, duration: 0.26), forKey: "scale")
-        Motion.animate(0.18) { card.animator().alphaValue = 1 }
+        Motion.animate(0.18, { card.animator().alphaValue = 1 }, completion: completion)
     }
 
     /// Grows from (or shrinks toward) the card's centre: AppKit pins a view's
@@ -274,6 +276,8 @@ final class Palette: NSObject {
 
     private func rebuild(keepSelection: Bool = false) {
         guard let browser else { return }
+        let interval = Perf.begin("Palette rebuild")
+        defer { Perf.end("Palette rebuild", interval) }
         let previous = keepSelection ? selectedItemKey : nil
         let text = query
         var rows: [Row] = []
@@ -496,17 +500,20 @@ final class Palette: NSObject {
         perform(item)
     }
 
-    private func performSelected() {
+    private func performSelected(tracingReturn: Bool = false) {
         let row = table.selectedRow
         if row >= 0, row < rows.count, let item = rows[row].item {
-            perform(item)
+            perform(item, tracingReturn: tracingReturn)
         } else if !query.isEmpty, mode != .tabs {
-            perform(Address.url(from: query).map(Item.go) ?? .search(query))
+            perform(Address.url(from: query).map(Item.go) ?? .search(query), tracingReturn: tracingReturn)
         }
     }
 
-    private func perform(_ item: Item) {
+    private func perform(_ item: Item, tracingReturn: Bool = false) {
         guard let browser else { return }
+        let interval: Perf.Interval?
+        if tracingReturn, case .tab = item { interval = nil }
+        else { interval = tracingReturn ? Perf.begin("Palette Return to first frame") : nil }
         let engine = Preferences.shared.engine
         let mode = self.mode
         close()
@@ -519,6 +526,10 @@ final class Palette: NSObject {
             if let url = visit.address { browser.navigate(to: url, newTab: mode == .newTab, typed: true) }
         case .search(let q), .suggestion(let q):
             browser.navigate(to: engine.search(q), newTab: mode == .newTab, typed: false)
+        }
+        if let interval {
+            if let view = browser.selected?.webView { view.traceNavigation(interval) }
+            else { Perf.cancel("Palette Return to first frame", interval) }
         }
     }
 
@@ -554,8 +565,8 @@ extension Palette: NSTextFieldDelegate {
         switch selector {
         case #selector(NSResponder.moveDown(_:)): move(1); return true
         case #selector(NSResponder.moveUp(_:)): move(-1); return true
-        case #selector(NSResponder.insertNewline(_:)): performSelected(); return true
-        case #selector(NSResponder.insertLineBreak(_:)): performSelected(); return true
+        case #selector(NSResponder.insertNewline(_:)): performSelected(tracingReturn: true); return true
+        case #selector(NSResponder.insertLineBreak(_:)): performSelected(tracingReturn: true); return true
         case #selector(NSResponder.cancelOperation(_:)):
             // First Esc takes back the completion; the next one closes.
             if textView.selectedRange().length > 0, textView.selectedRange().location > 0,
