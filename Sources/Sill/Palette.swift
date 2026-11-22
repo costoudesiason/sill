@@ -338,6 +338,14 @@ final class Palette: NSObject {
         }
         self.rows = rows
         table.reloadData()
+        // The top hit, if it's a site: loaded ahead so Return opens it at once.
+        if mode == .newTab, let first = rows.first(where: { $0.item != nil })?.item {
+            switch first {
+            case .go(let url): browser.prerenderSoon(url)
+            case .visit(let visit): browser.prerenderSoon(visit.address)
+            default: browser.prerenderSoon(nil)
+            }
+        }
         let current: Int? = mode == .tabs && text.isEmpty
             ? rows.firstIndex { if case .item(.tab(let tab)) = $0 { return tab === browser.selected }; return false }
             : nil

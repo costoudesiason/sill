@@ -110,12 +110,18 @@ final class TabStripView: NSView {
             return
         }
         for item in leaving {
+            // It goes under its neighbours and fades as it folds away, so the
+            // tab sliding into its place never shows through it, doubled.
             item.layoutWidth = item.frame.width
             item.isLeaving = true
+            item.isFront = false
+            item.isPaired = false
+            item.layer?.zPosition = -1
         }
         Motion.animate(Self.reflow, {
             for item in leaving {
                 item.animator().frame = NSRect(x: item.frame.minX, y: item.frame.minY, width: 0, height: item.frame.height)
+                item.animator().alphaValue = 0
             }
             for item in items where item !== dragged {
                 if let target = frames[ObjectIdentifier(item)] { item.animator().frame = target }
@@ -250,7 +256,25 @@ final class TabItemView: NSView {
     /// this width and the frame clips them.
     var layoutWidth: CGFloat? { didSet { if layoutWidth != oldValue { Motion.still { layoutContents() } } } }
     var isPaired = false { didSet { if isPaired != oldValue { needsDisplay = true } } }
-    var isFront = false { didSet { if isFront != oldValue { restyle() } } }
+    var isFront = false { didSet { if isFront != oldValue { wearGlass(isFront); restyle() } } }
+
+    private func wearGlass(_ on: Bool) {
+        Motion.still {
+            if on {
+                content.removeFromSuperview()
+                glass.frame = bounds
+                glass.cornerRadius = bounds.height / 2
+                glass.contentView = content
+                content.frame = glass.bounds
+                addSubview(glass)
+            } else {
+                glass.contentView = nil
+                glass.removeFromSuperview()
+                content.frame = bounds
+                addSubview(content)
+            }
+        }
+    }
     private var isHovered = false { didSet { if isHovered != oldValue { restyle() } } }
 
     private let icon = NSImageView()
@@ -264,6 +288,13 @@ final class TabItemView: NSView {
     override var wantsUpdateLayer: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// The tab in front is a piece of Liquid Glass. Its title and icon live
+    /// inside the glass's own content view (a glass view only promises that
+    /// view sits inside it; anything beside it gets refracted), so they move
+    /// in when the tab comes to the front and out when it leaves.
+    private let glass = NSGlassEffectView()
+    private let content = FlippedView()
+
     init(tab: Tab, strip: TabStripView) {
         self.tab = tab
         self.strip = strip
@@ -272,14 +303,16 @@ final class TabItemView: NSView {
         layer?.cornerCurve = .continuous
         layer?.masksToBounds = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
+        glass.effectIsInteractive = true
+        addSubview(content)
 
         icon.imageScaling = .scaleProportionallyUpOrDown
-        addSubview(icon)
+        content.addSubview(icon)
 
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
-        addSubview(spinner)
+        content.addSubview(spinner)
 
         label.font = .systemFont(ofSize: 13)
         label.lineBreakMode = .byClipping
@@ -289,7 +322,7 @@ final class TabItemView: NSView {
         fade.startPoint = CGPoint(x: 0, y: 0.5)
         fade.endPoint = CGPoint(x: 1, y: 0.5)
         fade.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
-        addSubview(label)
+        content.addSubview(label)
 
         closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Tab")?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
@@ -298,7 +331,7 @@ final class TabItemView: NSView {
         closeButton.action = #selector(closeClicked)
         closeButton.toolTip = "Close Tab"
         closeButton.setAccessibilityLabel("Close Tab")
-        addSubview(closeButton)
+        content.addSubview(closeButton)
 
         setAccessibilityRole(.radioButton)
         refresh()
@@ -374,9 +407,7 @@ final class TabItemView: NSView {
             let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             let color: NSColor
             if isFront {
-                // The selected segment of a macOS 27 segmented control: a
-                // lighter capsule on the bar.
-                color = dark ? NSColor(white: 1, alpha: 0.16) : NSColor(white: 1, alpha: 0.95)
+                color = .clear   // the glass is the selection
             } else if isPaired {
                 color = dark ? NSColor(white: 1, alpha: 0.09) : NSColor(white: 1, alpha: 0.6)
             } else if isHovered {
@@ -406,6 +437,13 @@ final class TabItemView: NSView {
     }
 
     private func layoutContents() {
+        if glass.superview === self {
+            glass.frame = bounds
+            glass.cornerRadius = bounds.height / 2
+            content.frame = glass.bounds
+        } else {
+            content.frame = bounds
+        }
         let h = bounds.height
         let w = layoutWidth ?? bounds.width
         let narrow = w < 64

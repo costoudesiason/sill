@@ -97,6 +97,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// A web view made while ⌘T is open, so Return doesn't wait for one to
     /// be built before the page can start loading.
     private var spare: SillWebView?
+    /// What the spare is already loading, guessed from the palette's top hit.
+    private var prerendered: URL?
+    private var prerenderTimer: Timer?
 
     init(isPrivate: Bool, popup: Bool = false) {
         self.isPrivate = isPrivate
@@ -294,8 +297,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             if !shouldSelect {
                 tab.materialize()
             } else if let view = spare {
+                // Return on the site the palette was already loading: the page
+                // is there, mid-load or done, and becomes the tab as it is.
+                let ready = prerendered.map { Self.samePage($0, url) } ?? false
                 spare = nil
-                tab.adopt(view)
+                prerendered = nil
+                tab.adopt(view, loaded: ready)
             }
         }
         if shouldSelect { select(tab, animated: true) } else { strip.sync(animated: true) }
@@ -424,13 +431,43 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
     }
 
+    /// While ⌘T is open, its top hit, when it's a site you've been to, starts
+    /// loading out of sight in the spare view: Return then shows a page that
+    /// is already there. A short pause first, so passing letters don't load.
+    func prerenderSoon(_ url: URL?) {
+        prerenderTimer?.invalidate()
+        guard let url, paletteOpen, palette.mode == .newTab, !isPrivate,
+              let host = url.host(), History.shared.knows(host: host) else { return }
+        if let prerendered, Self.samePage(prerendered, url) { return }
+        prerenderTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.paletteOpen else { return }
+                let view = self.spare ?? SillWebView(frame: .zero, configuration: Web.configuration(private: self.isPrivate))
+                self.spare = view
+                self.prerendered = url
+                view.stopLoading()
+                Shield.shared.whenReady { [weak view] in view?.load(URLRequest(url: url)) }
+            }
+        }
+    }
+
+    static func samePage(_ a: URL, _ b: URL) -> Bool {
+        func key(_ url: URL) -> String {
+            Domains.bare(url.host()) + (url.path == "/" ? "" : url.path) + (url.query.map { "?" + $0 } ?? "")
+        }
+        return key(a) == key(b)
+    }
+
     func paletteClosed() {
         if let webView = selected?.webView { window?.makeFirstResponder(webView) }
         // A spare nobody took (the palette was cancelled) gives its memory back.
         // Later in the turn, so the Return that closed the palette can claim it.
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.paletteOpen else { return }
+            self.prerenderTimer?.invalidate()
+            self.spare?.stopLoading()
             self.spare = nil
+            self.prerendered = nil
         }
     }
 

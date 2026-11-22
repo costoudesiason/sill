@@ -88,7 +88,7 @@ final class Tab: NSObject {
     /// window keeps one ready while ⌘T is open), and loads what's waiting.
     /// `popup`: WebKit made its configuration for a window a page opened,
     /// and loads it itself.
-    func adopt(_ view: SillWebView, popup: Bool = false) {
+    func adopt(_ view: SillWebView, popup: Bool = false, loaded: Bool = false) {
         guard webView == nil else { return }
         // A configuration WebKit hands over for a new window is a copy made
         // inside WebKit: picture in picture is allowed again to be sure.
@@ -103,6 +103,19 @@ final class Tab: NSObject {
         view.isInspectable = true
         webView = view
         watch(view)
+        // Already loading (or loaded) this very page: keep it, take its place.
+        if loaded {
+            pending = nil
+            savedState = nil
+            if let url = view.url { self.url = url }
+            if let title = view.title, !title.isEmpty { self.title = title }
+            if !isPrivate, let url = view.url { History.shared.record(url, title: view.title, typed: true) }
+            favicon = Favicons.shared.cached(for: view.url ?? url)
+            isLoading = view.isLoading
+            host?.tabChanged(self, .url)
+            host?.tabChanged(self, .title)
+            return
+        }
         // Unseen until it draws, when there's a page coming; a popup's view
         // is already drawing what its opener put there.
         if !popup, savedState != nil || pending != nil { view.holdForFirstFrame() }
