@@ -47,6 +47,10 @@ final class Tab: NSObject {
     /// WebKit's caches rather than as a fresh load of its address.
     private var savedState: Any?
     private var watching: [NSKeyValueObservation] = []
+    /// When its page's process last died, for telling a crash loop from a one-off.
+    private var crashes: [Date] = []
+    /// Its process died while it was out of sight: it reloads when shown.
+    private var needsReload = false
     /// The title last given to history, for which page: a page that keeps
     /// setting the same title doesn't touch history again.
     private var lastRetitled: (url: URL, title: String)?
@@ -217,6 +221,13 @@ final class Tab: NSObject {
         host?.tabChanged(self, .url)
     }
 
+    /// Shown again after its process died behind another tab.
+    func reloadIfCrashed() {
+        guard needsReload else { return }
+        needsReload = false
+        reload()
+    }
+
     func goBack() { webView?.goBack() }
     func goForward() { webView?.goForward() }
     func reload(fromOrigin: Bool = false) {
@@ -359,8 +370,21 @@ extension Tab: WKNavigationDelegate {
         }
     }
 
+    /// The page's process died (out of memory, or a crash). Shown, it comes
+    /// back at once; behind another tab, when it's next shown. Twice in a
+    /// minute, it says so rather than reloading into the same crash forever.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        webView.reload()
+        let now = Date()
+        crashes = crashes.filter { now.timeIntervalSince($0) < 60 } + [now]
+        if crashes.count >= 2, let url = webView.url ?? url {
+            crashes = []
+            needsReload = false
+            let html = ErrorPage.html(title: "This page keeps crashing",
+                                      detail: "Its content process stopped twice in a minute, so Sill didn’t reload it again.", url: url)
+            webView.loadSimulatedRequest(URLRequest(url: url), responseHTML: html)
+            return
+        }
+        if webView.window == nil { needsReload = true } else { webView.reload() }
     }
 }
 

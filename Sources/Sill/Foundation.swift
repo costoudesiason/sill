@@ -202,13 +202,16 @@ enum Places {
     }()
 }
 
+/// One queue for every saver, made once. (A generic type can't hold a
+/// static one, and the computed one it had made a new queue each time.)
+private let saveQueue = DispatchQueue(label: "app.sill.save", qos: .utility)
+
 /// Writes a value to disk a moment after the last change, off the main thread.
 final class Saver<Value: Encodable> {
     private let url: URL
     private let delay: TimeInterval
     private var pending: DispatchWorkItem?
-    private static var queue: DispatchQueue { DispatchQueue(label: "app.sill.save", qos: .utility) }
-    private let queue = Saver.queue
+    private let queue = saveQueue
 
     init(_ url: URL, delay: TimeInterval = 1) {
         self.url = url

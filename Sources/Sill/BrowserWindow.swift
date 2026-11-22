@@ -47,8 +47,22 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private let stage = StageView()
     private let pageHost = PageHostView()
     private let top = TopClipView()
-    private lazy var palette = Palette(browser: self)
-    private lazy var findBar = FindBar(browser: self)
+    /// Made the first time they're used, not at the window's first layout.
+    private var madePalette: Palette?
+    private var madeFindBar: FindBar?
+    private var palette: Palette {
+        if let madePalette { return madePalette }
+        let made = Palette(browser: self)
+        madePalette = made
+        return made
+    }
+    private var findBar: FindBar {
+        if let madeFindBar { return madeFindBar }
+        let made = FindBar(browser: self)
+        madeFindBar = made
+        return made
+    }
+    private var paletteOpen: Bool { madePalette?.isOpen ?? false }
     private let status = StatusPill()
     /// The bar's ground: the desktop behind the window, blended by the
     /// window server as Finder's sidebar is (cheap, and steady while the page
@@ -226,8 +240,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // hidden under the page, and no glass is drawn where none is seen.
         ground.frame = NSRect(x: 0, y: 0, width: stage.bounds.width, height: TopBar.height)
         wash.frame = ground.frame
-        palette.stageResized(stage)
-        findBar.place(in: stage, top: topInset)
+        madePalette?.stageResized(stage)
+        if let findBar = madeFindBar, findBar.isOpen { findBar.place(in: stage, top: topInset) }
         status.place(in: stage)
         toastView.place(in: stage)
     }
@@ -275,8 +289,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     func select(_ tab: Tab, animated: Bool = false) {
         guard tabs.contains(where: { $0 === tab }) else { return }
-        if palette.isOpen && selected !== tab { palette.close(animated: false) }
-        findBar.close()
+        if paletteOpen && selected !== tab { palette.close(animated: false) }
+        madeFindBar?.close()
         let previous = selected
         // The page being left keeps its place in the window, under the new
         // one, until its video has floated off into Picture in Picture: a
@@ -305,6 +319,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             webView.autoresizingMask = [.width, .height]
             pageHost.addSubview(webView)
         }
+        tab.reloadIfCrashed()
         // Back from picture in picture: WebKit puts a video back in its page
         // only once that page is in the window, so after it is.
         if tab === pictured {
@@ -317,7 +332,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         window?.title = tab.displayTitle
         updateNavigation()
         status.show(nil)
-        if !palette.isOpen { window?.makeFirstResponder(webView) }
+        if !paletteOpen { window?.makeFirstResponder(webView) }
         changed()
     }
 
@@ -381,7 +396,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     // MARK: - Palette
 
     func showPalette(_ mode: Palette.Mode) {
-        if palette.isOpen && palette.mode == mode && mode == .newTab { palette.close(); return }
+        if paletteOpen && palette.mode == mode && mode == .newTab { palette.close(); return }
         status.show(nil)
         palette.open(mode, in: stage)
         if mode != .tabs, spare == nil {
@@ -397,7 +412,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if let webView = selected?.webView { window?.makeFirstResponder(webView) }
     }
 
-    var paletteIsOpen: Bool { palette.isOpen }
+    var paletteIsOpen: Bool { paletteOpen }
 
     // MARK: - Window
 
@@ -486,7 +501,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     @objc func openLocation(_ sender: Any?) { showPalette(selected == nil ? .newTab : .address) }
 
     @objc func closeTab(_ sender: Any?) {
-        if palette.isOpen { palette.close(); return }
+        if paletteOpen { palette.close(); return }
         if let selected { close(selected) } else { window?.close() }
     }
 
@@ -557,7 +572,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
              #selector(showInspector(_:)):
             return selected != nil
         case #selector(stopLoading(_:)): return selected?.isLoading ?? false
-        case #selector(findNext(_:)), #selector(findPrevious(_:)): return findBar.hasQuery
+        case #selector(findNext(_:)), #selector(findPrevious(_:)): return madeFindBar?.hasQuery ?? false
         case #selector(nextTab(_:)), #selector(previousTab(_:)): return tabs.count > 1
         case #selector(selectTabByNumber(_:)): return item.tag <= tabs.count || item.tag == 9
         default: return true
@@ -613,7 +628,7 @@ extension BrowserWindowController: TabHost {
     }
 
     func hovered(_ tab: Tab, link: String?) {
-        guard tab === selected, !palette.isOpen, Preferences.shared.showsLinkPreview else { return }
+        guard tab === selected, !paletteOpen, Preferences.shared.showsLinkPreview else { return }
         status.show(link.flatMap(URL.init(string:)).map { Address.display($0) })
     }
 
@@ -634,7 +649,7 @@ final class BrowserNSWindow: NSWindow {
 
 extension BrowserWindowController {
     func escape() {
-        if palette.isOpen { palette.close() } else if findBar.isOpen { findBar.close() }
+        if paletteOpen { palette.close() } else if madeFindBar?.isOpen == true { madeFindBar?.close() }
     }
 }
 
