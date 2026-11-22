@@ -464,6 +464,8 @@ final class Palette: NSObject {
 
     /// ⌘K or the pill's Actions: what else can be done with the chosen row.
     func showActions() {
+        // ⌘K or a click on Actions while its menu is up closes it.
+        guard GlassMenu.shouldOpen(from: pill) else { return }
         let row = table.selectedRow
         guard row >= 0, row < rows.count, let item = rows[row].item, let browser else { return }
         let menu = NSMenu()
@@ -522,7 +524,7 @@ final class Palette: NSObject {
         case .search(let q), .suggestion(let q): title = q
         }
         GlassMenu(title: title, entries: entries)
-            .show(in: window, at: NSPoint(x: anchor.maxX, y: anchor.maxY + 8), above: true, alignRight: true)
+            .show(in: window, at: NSPoint(x: anchor.maxX, y: anchor.maxY + 8), above: true, alignRight: true, from: pill)
     }
 
     @objc private func clicked() {

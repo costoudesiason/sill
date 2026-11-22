@@ -802,6 +802,8 @@ extension BrowserWindowController {
         if let webView = selected?.webView { window?.makeFirstResponder(webView) }
     }
 
+    var windowNumber: Int { window?.windowNumber ?? 0 }
+
     /// Starts a sleeping or never-shown tab loading in the background.
     func warm(_ tab: Tab) {
         guard tab.webView == nil, tab.url != nil, tabs.contains(where: { $0 === tab }) else { return }

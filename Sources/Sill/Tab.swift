@@ -40,6 +40,8 @@ final class Tab: NSObject {
     /// Whether a video is playing in the page, as its script last said.
     private(set) var playingVideo = false
     var lastShown = Date()
+    /// Opened by an agent through Sill's agent socket.
+    var openedByAgent = false
 
     private var pending: URL?
     /// The page's back/forward list and place in it, kept while the tab

@@ -24,6 +24,29 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     /// The one on screen; showing another puts it away.
     private static var current: GlassMenu?
+    /// What opened the menu that just closed, and when: a click on the same
+    /// control a moment later closed it (the click landed outside the menu)
+    /// and must not open it again.
+    private static var lastClosed: (source: ObjectIdentifier, at: Date)?
+    private var source: ObjectIdentifier?
+
+    static var isOpen: Bool { current != nil }
+
+    /// Puts away whatever menu is open. True if there was one.
+    @discardableResult
+    static func dismissCurrent() -> Bool {
+        guard let current else { return false }
+        current.dismiss()
+        return true
+    }
+
+    /// Whether a click on `source` should open the menu, or is the click that
+    /// just closed it.
+    static func shouldOpen(from source: AnyObject) -> Bool {
+        if current?.source == ObjectIdentifier(source) { current?.dismiss(); return false }
+        if let last = lastClosed, last.source == ObjectIdentifier(source), Date().timeIntervalSince(last.at) < 0.4 { return false }
+        return true
+    }
 
     private let title: String?
     private let entries: [Entry]
@@ -54,7 +77,9 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         super.init()
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        // The glass draws its own edge and shadow; a window shadow on top is
+        // worked out as a rectangle and shows as dark corners around it.
+        panel.hasShadow = false
         panel.level = .popUpMenu
         panel.delegate = self
         panel.isReleasedWhenClosed = false
@@ -101,9 +126,10 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     /// Opens at `point` (window coordinates, bottom-left origin), growing
     /// down from it, or up from it when `above`, kept on the screen.
-    func show(in window: NSWindow, at point: NSPoint, above: Bool = false, alignRight: Bool = false) {
+    func show(in window: NSWindow, at point: NSPoint, above: Bool = false, alignRight: Bool = false, from source: AnyObject? = nil) {
         Self.current?.dismiss(animated: false)
         Self.current = self
+        self.source = source.map(ObjectIdentifier.init)
         parent = window
         parentResponder = window.firstResponder
 
@@ -144,6 +170,7 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     func dismiss(animated: Bool = true) {
         guard Self.current === self else { return }
         Self.current = nil
+        if let source { Self.lastClosed = (source, Date()) }
         let panel = self.panel
         let finish = { [weak self] in
             panel.parent?.removeChildWindow(panel)
@@ -306,6 +333,16 @@ final class MenuPanel: NSPanel {
     override var canBecomeMain: Bool { false }
     override func keyDown(with event: NSEvent) {
         if onKey?(event) != true { super.keyDown(with: event) }
+    }
+
+    /// ⌘K again closes it, as it does in Raycast.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers == "k" {
+            GlassMenu.dismissCurrent()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 }
 

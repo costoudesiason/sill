@@ -5,6 +5,12 @@ let package = Package(
     name: "Sill",
     platforms: [.macOS("27.0")],
     targets: [
+        // The MCP server agents run: it speaks to Sill's local agent socket.
+        .executableTarget(
+            name: "sill-mcp",
+            path: "Sources/sill-mcp",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .executableTarget(
             name: "Sill",
             path: "Sources/Sill",

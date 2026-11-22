@@ -498,7 +498,7 @@ final class TabItemView: NSView {
 
     /// Right-click: the tab's commands in a glass menu at the pointer.
     override func rightMouseDown(with event: NSEvent) {
-        guard let browser = strip?.browser, let window else { return }
+        guard let browser = strip?.browser, let window, GlassMenu.shouldOpen(from: self) else { return }
         let menu = browser.menu(for: tab)
         let entries = GlassMenu.entries(from: menu, symbols: [
             "New Tab": "plus", "Reload": "arrow.clockwise", "Duplicate": "plus.square.on.square",
@@ -506,7 +506,7 @@ final class TabItemView: NSView {
             "Split Right": "rectangle.righthalf.inset.filled", "Separate Split View": "rectangle",
             "Close Tab": "xmark", "Close Other Tabs": "xmark.square", "Close Tabs to the Right": "arrow.right.to.line",
         ], keys: ["New Tab": ["⌘", "T"], "Reload": ["⌘", "R"], "Close Tab": ["⌘", "W"], "Copy Link": ["⇧", "⌘", "C"]])
-        GlassMenu(title: tab.displayTitle, entries: entries).show(in: window, at: event.locationInWindow)
+        GlassMenu(title: tab.displayTitle, entries: entries).show(in: window, at: event.locationInWindow, from: self)
     }
 
     override func menu(for event: NSEvent) -> NSMenu? { nil }

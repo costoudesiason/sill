@@ -145,6 +145,8 @@ final class Preferences: ObservableObject {
     // Tabs and media
     @Published var autoPictureInPicture: Bool { didSet { store.set(autoPictureInPicture, forKey: "autoPiP") } }
     @Published var sleepsTabs: Bool { didSet { store.set(sleepsTabs, forKey: "sleepsTabs") } }
+    /// Agents on this Mac may drive Sill over its local socket (sill-mcp).
+    @Published var agentControl: Bool { didSet { store.set(agentControl, forKey: "agentControl") } }
     @Published var sleepAfterMinutes: Int { didSet { store.set(sleepAfterMinutes, forKey: "sleepAfterMinutes") } }
     /// Ads and trackers from third parties are blocked (Shield.swift).
     @Published var blocksAds: Bool {
@@ -176,6 +178,7 @@ final class Preferences: ObservableObject {
         autoPictureInPicture = store.bool(forKey: "autoPiP")
         sleepsTabs = store.bool(forKey: "sleepsTabs")
         sleepAfterMinutes = store.integer(forKey: "sleepAfterMinutes")
+        agentControl = store.bool(forKey: "agentControl")
         blocksAds = store.bool(forKey: "blocksAds")
         engine = SearchEngine(rawValue: store.string(forKey: "engine") ?? "") ?? .google
         suggestions = store.bool(forKey: "suggestions")

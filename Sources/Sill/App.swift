@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         launched = true
         _ = ApplePasswords.shared
         NSApp.appearance = Preferences.shared.theme.appearance
+        AgentServer.shared.follow(Preferences.shared)
         themeWatch = Preferences.shared.$theme.sink { NSApp.appearance = $0.appearance }
         pressure.setEventHandler { [weak self] in
             MainActor.assumeIsolated {
