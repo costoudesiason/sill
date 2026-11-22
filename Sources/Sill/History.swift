@@ -14,16 +14,21 @@ struct Visit: Codable, Hashable {
 
     /// Frecency: how often, weighted by how recently.
     func score(now: Date = Date()) -> Double {
-        let days = max(0, now.timeIntervalSince(last) / 86_400)
+        Self.score(weight: Double(count) + Double(typed) * 2, since: now.timeIntervalSince(last))
+    }
+
+    /// The same sum from its parts, for a search that keeps them side by side.
+    static func score(weight: Double, since seconds: TimeInterval) -> Double {
+        let days = max(0, seconds / 86_400)
         let recency: Double = days < 1 ? 1 : days < 4 ? 0.7 : days < 14 ? 0.5 : days < 31 ? 0.3 : days < 90 ? 0.15 : 0.05
-        return (Double(count) + Double(typed) * 2) * recency
+        return weight * recency
     }
 }
 
 @MainActor
 final class History {
     static let shared = History()
-    private(set) var visits: [String: Visit] = [:] { didSet { knownHosts = nil; shelf = nil; latest = nil } }
+    private(set) var visits: [String: Visit] = [:] { didSet { knownHosts = nil; shelf = nil; flat = nil; latest = nil } }
     private var knownHosts: Set<String>?
     /// The last answer to `recent`, kept until history changes: the empty
     /// palette asks each time it is shown or its field is cleared, and each
@@ -136,23 +141,50 @@ final class History {
         return made
     }
 
+    /// The shelf's bytes end to end, and where each entry's lie: a keystroke
+    /// walks this one run of memory and touches an entry only if it matches,
+    /// where walking the shelf itself copies every entry to look at it.
+    private struct Flat {
+        /// Five to an entry: path, title, host, raw host, bare. Each a start and a length.
+        static let path = 0, title = 1, host = 2, rawHost = 3, bare = 4, fields = 5
+        var bytes = ContiguousArray<UInt8>()
+        var spans = ContiguousArray<Int32>()
+        /// Three to an entry, what its score is made of: visits counted, when last, how deep.
+        var weights = ContiguousArray<Double>()
+    }
+    private var flat: Flat?
+
+    private func flattened(_ entries: [(Visit, Reading)]) -> Flat {
+        if let flat { return flat }
+        var made = Flat()
+        made.spans.reserveCapacity(entries.count * Flat.fields * 2)
+        for (visit, read) in entries {
+            made.weights.append(Double(visit.count) + Double(visit.typed) * 2)
+            made.weights.append(visit.last.timeIntervalSinceReferenceDate)
+            made.weights.append(read.depth)
+            for field in [read.pathBytes, read.titleBytes, read.hostBytes, read.rawHostBytes, read.bareBytes] {
+                made.spans.append(Int32(made.bytes.count))
+                made.spans.append(Int32(field.count))
+                made.bytes.append(contentsOf: field)
+            }
+        }
+        flat = made
+        return made
+    }
+
     private static func bytes(_ text: String) -> ContiguousArray<UInt8> {
         // One spelling of each accented letter, as comparing strings would see it.
         ContiguousArray(text.precomposedStringWithCanonicalMapping.utf8)
     }
 
-    private static func has(_ hay: ContiguousArray<UInt8>, _ needle: ContiguousArray<UInt8>) -> Bool {
-        guard needle.count <= hay.count else { return false }
-        return hay.withUnsafeBytes { h in
-            needle.withUnsafeBytes { n in memmem(h.baseAddress, h.count, n.baseAddress, n.count) != nil }
+    /// The words' bytes held still for as long as `body` looks at them.
+    private static func pointers(to words: [ContiguousArray<UInt8>], _ body: ([UnsafeRawBufferPointer]) -> Void) {
+        var held: [UnsafeRawBufferPointer] = []
+        func hold(_ index: Int) {
+            guard index < words.count else { body(held); return }
+            words[index].withUnsafeBytes { held.append($0); hold(index + 1) }
         }
-    }
-
-    private static func starts(_ hay: ContiguousArray<UInt8>, _ prefix: ContiguousArray<UInt8>) -> Bool {
-        guard prefix.count <= hay.count else { return false }
-        return hay.withUnsafeBytes { h in
-            prefix.withUnsafeBytes { p in memcmp(h.baseAddress, p.baseAddress, p.count) == 0 }
-        }
+        hold(0)
     }
 
     private func reading(_ visit: Visit) -> Reading {
@@ -185,25 +217,52 @@ final class History {
         let words = text.lowercased().split(separator: " ").map(String.init)
         guard !words.isEmpty else { return [] }
         let now = Date()
-        var scored: [(Visit, Reading, Double)] = []
+        // A score and a place on the shelf for each match, in shelf order.
+        var scored: [(score: Double, at: Int)] = []
         let needles = words.map(Self.bytes)
-        for (visit, read) in entries {
-            guard needles.allSatisfy({ Self.has(read.pathBytes, $0) || Self.has(read.titleBytes, $0) }) else { continue }
-            var score = visit.score(now: now)
-            if read.bare.hasPrefix(words[0]) { score *= 4 }
-            else if read.lowerTitle.hasPrefix(words[0]) { score *= 2 }
-            // Prefer the site's front page over a deep link of equal weight.
-            score /= read.depth
-            scored.append((visit, read, score))
-        }
-        scored.sort { $0.2 > $1.2 }
-        // One entry per page as it reads: www and trailing slashes don't make another.
-        var seen = Set<String>()
+        let entries = entries
+        let flat = flattened(entries)
         var result: [Visit] = []
-        for (visit, read, _) in scored {
-            guard seen.insert(read.bare + "\u{1}" + visit.title).inserted, seen.insert(read.bare).inserted else { continue }
-            result.append(visit)
-            if result.count == limit { break }
+        entries.withUnsafeBufferPointer { entries in
+            flat.bytes.withUnsafeBufferPointer { bytes in
+                flat.spans.withUnsafeBufferPointer { spans in
+                    Self.pointers(to: needles) { needles in
+                        func has(_ at: Int, _ field: Int, _ needle: UnsafeRawBufferPointer) -> Bool {
+                            let span = (at * Flat.fields + field) * 2
+                            let count = Int(spans[span + 1])
+                            guard needle.count <= count else { return false }
+                            return memmem(bytes.baseAddress! + Int(spans[span]), count, needle.baseAddress, needle.count) != nil
+                        }
+                        // A plain word can only begin text whose bytes begin with it, so
+                        // the bytes turn most entries away before a string is compared.
+                        let plain = needles[0].allSatisfy { $0 < 0x80 }
+                        func begins(_ at: Int, _ field: Int) -> Bool {
+                            let span = (at * Flat.fields + field) * 2
+                            guard needles[0].count <= Int(spans[span + 1]) else { return false }
+                            return memcmp(bytes.baseAddress! + Int(spans[span]), needles[0].baseAddress, needles[0].count) == 0
+                        }
+                        let moment = now.timeIntervalSinceReferenceDate
+                        for at in entries.indices {
+                            guard needles.allSatisfy({ has(at, Flat.path, $0) || has(at, Flat.title, $0) }) else { continue }
+                            var score = Visit.score(weight: flat.weights[at * 3], since: moment - flat.weights[at * 3 + 1])
+                            if !plain || begins(at, Flat.bare), entries[at].1.bare.hasPrefix(words[0]) { score *= 4 }
+                            else if !plain || begins(at, Flat.title), entries[at].1.lowerTitle.hasPrefix(words[0]) { score *= 2 }
+                            // Prefer the site's front page over a deep link of equal weight.
+                            score /= flat.weights[at * 3 + 2]
+                            scored.append((score, at))
+                        }
+                    }
+                }
+            }
+            scored.sort { $0.score > $1.score }
+            // One entry per page as it reads: www and trailing slashes don't make another.
+            var seen = Set<String>()
+            for (_, at) in scored {
+                guard seen.insert(entries[at].1.bare + "\u{1}" + entries[at].0.title).inserted,
+                      seen.insert(entries[at].1.bare).inserted else { continue }
+                result.append(entries[at].0)
+                if result.count == limit { break }
+            }
         }
         return result
     }
@@ -244,16 +303,30 @@ final class History {
         var best: (String, Double)?
         let deep = prefix.contains("/")
         let start = Self.bytes(prefix)
-        for (visit, read) in entries {
-            guard let rawHost = read.rawHost else { continue }
-            let host = read.host
-            // Bytes first: nearly every entry is turned away here.
-            guard Self.starts(read.hostBytes, start) || Self.starts(read.rawHostBytes, start)
-                    || (deep && Self.starts(read.bareBytes, start)) else { continue }
-            for candidate in deep ? [host, rawHost, read.bare] : [host, rawHost]
-            where candidate.hasPrefix(prefix) && candidate.count > prefix.count {
-                let score = visit.score(now: now) + (candidate == host ? 0.5 : 0)
-                if best == nil || score > best!.1 { best = (candidate, score) }
+        let entries = entries
+        let flat = flattened(entries)
+        entries.withUnsafeBufferPointer { entries in
+            flat.bytes.withUnsafeBufferPointer { bytes in
+                flat.spans.withUnsafeBufferPointer { spans in
+                    start.withUnsafeBytes { start in
+                        func starts(_ at: Int, _ field: Int) -> Bool {
+                            let span = (at * Flat.fields + field) * 2
+                            guard start.count <= Int(spans[span + 1]) else { return false }
+                            return memcmp(bytes.baseAddress! + Int(spans[span]), start.baseAddress, start.count) == 0
+                        }
+                        for at in entries.indices {
+                            // Bytes first: nearly every entry is turned away here.
+                            guard starts(at, Flat.host) || starts(at, Flat.rawHost) || (deep && starts(at, Flat.bare)),
+                                  let rawHost = entries[at].1.rawHost else { continue }
+                            let host = entries[at].1.host
+                            for candidate in deep ? [host, rawHost, entries[at].1.bare] : [host, rawHost]
+                            where candidate.hasPrefix(prefix) && candidate.count > prefix.count {
+                                let score = entries[at].0.score(now: now) + (candidate == host ? 0.5 : 0)
+                                if best == nil || score > best!.1 { best = (candidate, score) }
+                            }
+                        }
+                    }
+                }
             }
         }
         return best?.0
