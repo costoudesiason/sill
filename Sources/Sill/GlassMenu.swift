@@ -6,8 +6,14 @@ import AppKit
 /// Return runs the highlighted row, Esc or a click elsewhere puts it away.
 /// Used for the palette's Actions (⌘K) and a tab's right-click menu; pages
 /// keep WebKit's own menus.
+///
+/// It's drawn inside the browser window, over everything, as the palette is:
+/// glass in a window of its own samples a rectangle behind that window and
+/// shows odd shapes at its rounded corners. A clear layer under the card
+/// catches a click anywhere else and puts the menu away, so that click does
+/// nothing more (a second click on Actions closes, it doesn't reopen).
 @MainActor
-final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
+final class GlassMenu: NSObject, NSTextFieldDelegate {
     struct Item {
         var title: String
         var symbol: String?
@@ -50,11 +56,11 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     private let title: String?
     private let entries: [Entry]
-    private let panel: MenuPanel
+    private let overlay = MenuOverlay()
     private let glass = NSGlassEffectView()
     private let body = FlippedView()
     private let titleLabel = NSTextField(labelWithString: "")
-    private let search = NSTextField()
+    private let search = MenuSearchField()
     private let searchRule = NSView()
     private var rows: [GlassMenuRow] = []
     private var rules: [NSView] = []
@@ -73,22 +79,15 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     init(title: String?, entries: [Entry]) {
         self.title = title
         self.entries = entries
-        panel = MenuPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         super.init()
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        // The glass draws its own edge and shadow; a window shadow on top is
-        // worked out as a rectangle and shows as dark corners around it.
-        panel.hasShadow = false
-        panel.level = .popUpMenu
-        panel.delegate = self
-        panel.isReleasedWhenClosed = false
-        panel.onKey = { [weak self] event in self?.key(event) ?? false }
+        overlay.onOutsideClick = { [weak self] in self?.dismiss() }
+        overlay.autoresizingMask = [.width, .height]
+        search.onCommandK = { [weak self] in self?.dismiss() }
 
         glass.cornerRadius = 22
         glass.style = .regular
         glass.contentView = body
-        panel.contentView = glass
+        overlay.addSubview(glass)
 
         titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
         body.addSubview(titleLabel)
@@ -125,17 +124,17 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     // MARK: - showing
 
     /// Opens at `point` (window coordinates, bottom-left origin), growing
-    /// down from it, or up from it when `above`, kept on the screen.
+    /// down from it, or up from it when `above`, kept inside the window.
     func show(in window: NSWindow, at point: NSPoint, above: Bool = false, alignRight: Bool = false, from source: AnyObject? = nil) {
+        guard let host = window.contentView else { return }
         Self.current?.dismiss(animated: false)
         Self.current = self
         self.source = source.map(ObjectIdentifier.init)
         parent = window
         parentResponder = window.firstResponder
 
-        let appearance = window.effectiveAppearance
-        let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        panel.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        let dark = window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        overlay.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         glass.tintColor = dark ? NSColor(white: 0.16, alpha: 0.3) : nil
         Ink.current = Ink(dark: dark)
         titleLabel.textColor = Ink.current.secondary
@@ -145,49 +144,41 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         ])
         searchRule.layer?.backgroundColor = Ink.current.fill.cgColor
 
+        overlay.frame = host.bounds
+        host.addSubview(overlay)
         rebuild(filter: "")
         let size = NSSize(width: Self.width, height: height)
-        let origin = window.convertPoint(toScreen: point)
-        var frame = NSRect(x: alignRight ? origin.x - size.width : origin.x,
-                           y: above ? origin.y : origin.y - size.height,
+        let at = overlay.convert(point, from: nil)
+        var frame = NSRect(x: alignRight ? at.x - size.width : at.x,
+                           y: above ? at.y : at.y - size.height,
                            width: size.width, height: size.height)
-        if let screen = (window.screen ?? NSScreen.main)?.visibleFrame {
-            frame.origin.x = min(max(frame.minX, screen.minX + 6), screen.maxX - size.width - 6)
-            if frame.minY < screen.minY + 6 { frame.origin.y = origin.y }
-            frame.origin.y = min(max(frame.minY, screen.minY + 6), screen.maxY - size.height - 6)
-        }
-        panel.setFrame(frame, display: false)
-        glass.frame = NSRect(origin: .zero, size: frame.size)
+        let room = overlay.bounds.insetBy(dx: 8, dy: 8)
+        if frame.minY < room.minY { frame.origin.y = at.y }
+        frame.origin.x = min(max(frame.minX, room.minX), room.maxX - size.width)
+        frame.origin.y = min(max(frame.minY, room.minY), room.maxY - size.height)
+        glass.frame = frame
         body.frame = glass.bounds
         layout()
-        window.addChildWindow(panel, ordered: .above)
-        panel.alphaValue = Motion.reduced ? 1 : 0
-        panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(search)
-        if !Motion.reduced { Motion.animate(0.14) { panel.animator().alphaValue = 1 } }
+        window.makeFirstResponder(search)
+        guard !Motion.reduced else { return }
+        glass.alphaValue = 0
+        Motion.animate(0.14) { glass.animator().alphaValue = 1 }
     }
 
     func dismiss(animated: Bool = true) {
         guard Self.current === self else { return }
         Self.current = nil
         if let source { Self.lastClosed = (source, Date()) }
-        let panel = self.panel
-        let finish = { [weak self] in
-            panel.parent?.removeChildWindow(panel)
-            panel.orderOut(nil)
-            self?.parent?.makeKey()
-            if let responder = self?.parentResponder { self?.parent?.makeFirstResponder(responder) }
+        let overlay = self.overlay
+        overlay.onOutsideClick = nil
+        if let responder = parentResponder, parent?.firstResponder === search.currentEditor() || parent?.firstResponder === search {
+            parent?.makeFirstResponder(responder)
         }
         if animated && !Motion.reduced {
-            Motion.animate(0.1, { panel.animator().alphaValue = 0 }, completion: finish)
+            Motion.animate(0.1, { glass.animator().alphaValue = 0 }, completion: { overlay.removeFromSuperview() })
         } else {
-            finish()
+            overlay.removeFromSuperview()
         }
-    }
-
-    func windowDidResignKey(_ notification: Notification) {
-        // A click anywhere else, or another app: the menu goes.
-        dismiss()
     }
 
     // MARK: - the list
@@ -235,7 +226,7 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 
     private func layout() {
-        let w = panel.frame.width
+        let w = glass.frame.width
         var y = Self.inset
         if !titleLabel.isHidden {
             // In line with the rows' icons below it.
@@ -266,12 +257,11 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 
     private func refit() {
-        var frame = panel.frame
+        var frame = glass.frame
         let top = frame.maxY
         frame.size.height = height
         frame.origin.y = top - frame.height
-        panel.setFrame(frame, display: true)
-        glass.frame = NSRect(origin: .zero, size: frame.size)
+        glass.frame = frame
         body.frame = glass.bounds
         layout()
     }
@@ -325,21 +315,24 @@ final class GlassMenu: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 }
 
-/// The panel the menu lives in: it takes the keyboard (for its field) while
-/// the browser stays the app's main window.
-final class MenuPanel: NSPanel {
-    var onKey: ((NSEvent) -> Bool)?
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
-    override func keyDown(with event: NSEvent) {
-        if onKey?(event) != true { super.keyDown(with: event) }
-    }
+/// The clear layer over the window while a menu is open: a click anywhere
+/// but the card puts the menu away and goes no further.
+final class MenuOverlay: NSView {
+    var onOutsideClick: (() -> Void)?
+    override func mouseDown(with event: NSEvent) { onOutsideClick?() }
+    override func rightMouseDown(with event: NSEvent) { onOutsideClick?() }
+    override func otherMouseDown(with event: NSEvent) { onOutsideClick?() }
+    override func scrollWheel(with event: NSEvent) {}
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
 
-    /// ⌘K again closes it, as it does in Raycast.
+/// The menu's search field: ⌘K again closes the menu, as in Raycast.
+final class MenuSearchField: NSTextField {
+    var onCommandK: (() -> Void)?
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-           event.charactersIgnoringModifiers == "k" {
-            GlassMenu.dismissCurrent()
+           event.charactersIgnoringModifiers == "k", currentEditor() != nil {
+            onCommandK?()
             return true
         }
         return super.performKeyEquivalent(with: event)
