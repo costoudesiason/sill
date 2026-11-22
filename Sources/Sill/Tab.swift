@@ -6,6 +6,9 @@ import WebKit
 @MainActor
 protocol TabHost: AnyObject {
     var window: NSWindow? { get }
+    /// The page area's size: pages loaded out of sight are laid out at it,
+    /// so they're ready to show as they are, and readable by agents.
+    var pageBounds: NSRect { get }
     func tabChanged(_ tab: Tab, _ what: Tab.Change)
     func open(from tab: Tab, url: URL?, configuration: WKWebViewConfiguration?, background: Bool) -> Tab
     func openPopup(from tab: Tab, configuration: WKWebViewConfiguration, size: NSSize) -> Tab?
@@ -81,7 +84,8 @@ final class Tab: NSObject {
     @discardableResult
     func materialize(with configuration: WKWebViewConfiguration? = nil) -> SillWebView {
         if let webView { return webView }
-        let view = SillWebView(frame: .zero, configuration: configuration ?? Web.configuration(private: isPrivate))
+        let view = SillWebView(frame: host?.pageBounds ?? NSRect(x: 0, y: 0, width: 1280, height: 800),
+                               configuration: configuration ?? Web.configuration(private: isPrivate))
         adopt(view, popup: configuration != nil)
         return view
     }

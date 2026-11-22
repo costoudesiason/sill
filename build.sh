@@ -16,6 +16,9 @@ APP="build/Sill.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Sill"
+# The MCP server agents run (AGENTS.md), beside the app's own binary.
+mkdir -p "$APP/Contents/Helpers"
+cp "$(dirname "$BIN")/sill-mcp" "$APP/Contents/Helpers/sill-mcp"
 # The icon: an Icon Composer file, compiled the way Xcode would, so macOS
 # renders its glass layers (Assets.car) with a flat fallback (AppIcon.icns).
 xcrun actool --compile "$APP/Contents/Resources" --app-icon AppIcon --platform macosx \
@@ -95,6 +98,7 @@ if [ -f Sill.provisionprofile ]; then
 fi
 STAMP="--timestamp=none"
 [ "${1:-}" = "ship" ] && STAMP="--timestamp"
+codesign --force --options runtime $STAMP -s "$IDENTITY" "$APP/Contents/Helpers/sill-mcp" >/dev/null
 codesign --force --options runtime --entitlements "$ENTITLEMENTS" $STAMP -s "$IDENTITY" "$APP" >/dev/null
 echo "Built $APP ($(du -sh "$APP" | cut -f1), signed: $IDENTITY)"
 

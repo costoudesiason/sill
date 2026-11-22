@@ -426,7 +426,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             // On the next turn, so the palette is on screen first.
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.spare == nil, self.window?.isVisible == true else { return }
-                self.spare = SillWebView(frame: .zero, configuration: Web.configuration(private: self.isPrivate))
+                self.spare = SillWebView(frame: self.pageBounds, configuration: Web.configuration(private: self.isPrivate))
             }
         }
     }
@@ -442,7 +442,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         prerenderTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.paletteOpen else { return }
-                let view = self.spare ?? SillWebView(frame: .zero, configuration: Web.configuration(private: self.isPrivate))
+                let view = self.spare ?? SillWebView(frame: self.pageBounds, configuration: Web.configuration(private: self.isPrivate))
                 self.spare = view
                 self.prerendered = url
                 view.stopLoading()
@@ -803,6 +803,10 @@ extension BrowserWindowController {
     }
 
     var windowNumber: Int { window?.windowNumber ?? 0 }
+
+    var pageBounds: NSRect {
+        pageHost.bounds.width > 0 ? NSRect(origin: .zero, size: pageHost.bounds.size) : NSRect(x: 0, y: 0, width: 1280, height: 800)
+    }
 
     /// Starts a sleeping or never-shown tab loading in the background.
     func warm(_ tab: Tab) {
