@@ -95,6 +95,14 @@ enum Web {
         // idle, so background audio and picture in picture carry on.
         PictureInPicture.allow(configuration.preferences)
         backspaceStays(configuration.preferences)
+        // A page out of sight has its timers held to one tick a second; this
+        // lets the gap grow the longer it stays hidden, as Safari does. Each
+        // tick that touches the page otherwise wakes the app to draw nothing.
+        let grows = NSSelectorFromString("_setHiddenPageDOMTimerThrottlingAutoIncreases:")
+        if configuration.preferences.responds(to: grows) {
+            typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
+            unsafeBitCast(configuration.preferences.method(for: grows), to: Setter.self)(configuration.preferences, grows, true)
+        }
         // A page put back in the window doesn't hold the app still until it
         // has drawn; the page it replaces stays under it until then instead.
         let waits = NSSelectorFromString("_setWaitsForPaintAfterViewDidMoveToWindow:")
