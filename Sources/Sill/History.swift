@@ -132,6 +132,11 @@ final class History {
         return made
     }
 
+    private static func bytes(_ text: String) -> ContiguousArray<UInt8> {
+        // One spelling of each accented letter, as comparing strings would see it.
+        ContiguousArray(text.precomposedStringWithCanonicalMapping.utf8)
+    }
+
     private static func has(_ hay: ContiguousArray<UInt8>, _ needle: ContiguousArray<UInt8>) -> Bool {
         guard needle.count <= hay.count else { return false }
         return hay.withUnsafeBytes { h in
@@ -162,11 +167,11 @@ final class History {
                            host: host,
                            title: visit.title,
                            lowerTitle: lowerTitle,
-                           pathBytes: ContiguousArray(path.utf8),
-                           titleBytes: ContiguousArray(lowerTitle.utf8),
-                           hostBytes: ContiguousArray(host.utf8),
-                           rawHostBytes: ContiguousArray((rawHost ?? "").utf8),
-                           bareBytes: ContiguousArray(bare.utf8))
+                           pathBytes: Self.bytes(path),
+                           titleBytes: Self.bytes(lowerTitle),
+                           hostBytes: Self.bytes(host),
+                           rawHostBytes: Self.bytes(rawHost ?? ""),
+                           bareBytes: Self.bytes(bare))
         readings[visit.url] = made
         return made
     }
@@ -177,7 +182,7 @@ final class History {
         guard !words.isEmpty else { return [] }
         let now = Date()
         var scored: [(Visit, Reading, Double)] = []
-        let needles = words.map { ContiguousArray($0.utf8) }
+        let needles = words.map(Self.bytes)
         for (visit, read) in entries {
             guard needles.allSatisfy({ Self.has(read.pathBytes, $0) || Self.has(read.titleBytes, $0) }) else { continue }
             var score = visit.score(now: now)
@@ -231,7 +236,7 @@ final class History {
         let now = Date()
         var best: (String, Double)?
         let deep = prefix.contains("/")
-        let start = ContiguousArray(prefix.utf8)
+        let start = Self.bytes(prefix)
         for (visit, read) in entries {
             guard let rawHost = read.rawHost else { continue }
             let host = read.host
