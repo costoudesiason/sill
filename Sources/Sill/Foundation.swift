@@ -146,6 +146,14 @@ final class Preferences: ObservableObject {
     @Published var autoPictureInPicture: Bool { didSet { store.set(autoPictureInPicture, forKey: "autoPiP") } }
     @Published var sleepsTabs: Bool { didSet { store.set(sleepsTabs, forKey: "sleepsTabs") } }
     @Published var sleepAfterMinutes: Int { didSet { store.set(sleepAfterMinutes, forKey: "sleepAfterMinutes") } }
+    /// Ads and trackers from third parties are blocked (Shield.swift).
+    @Published var blocksAds: Bool {
+        didSet {
+            store.set(blocksAds, forKey: "blocksAds")
+            // Settings change on the main thread; the blocker lives there.
+            MainActor.assumeIsolated { Shield.shared.setEnabled(blocksAds) }
+        }
+    }
 
     @Published var engine: SearchEngine { didSet { store.set(engine.rawValue, forKey: "engine") } }
     @Published var suggestions: Bool { didSet { store.set(suggestions, forKey: "suggestions") } }
@@ -156,7 +164,7 @@ final class Preferences: ObservableObject {
     private init() {
         store.register(defaults: ["suggestions": true, "restoresTabs": true, "applePasswords": true,
                                   "glassBar": true, "glassWash": 0.25, "cornerRadius": 26.0, "showsLinkPreview": true,
-                                  "autoPiP": true, "sleepsTabs": true, "sleepAfterMinutes": 45])
+                                  "autoPiP": true, "sleepsTabs": true, "sleepAfterMinutes": 45, "blocksAds": true])
         theme = Theme(rawValue: store.string(forKey: "theme") ?? "") ?? .system
         glassBar = store.bool(forKey: "glassBar")
         glassWash = store.double(forKey: "glassWash")
@@ -168,6 +176,7 @@ final class Preferences: ObservableObject {
         autoPictureInPicture = store.bool(forKey: "autoPiP")
         sleepsTabs = store.bool(forKey: "sleepsTabs")
         sleepAfterMinutes = store.integer(forKey: "sleepAfterMinutes")
+        blocksAds = store.bool(forKey: "blocksAds")
         engine = SearchEngine(rawValue: store.string(forKey: "engine") ?? "") ?? .google
         suggestions = store.bool(forKey: "suggestions")
         restoresTabs = store.bool(forKey: "restoresTabs")
@@ -193,13 +202,16 @@ enum Places {
     }()
 }
 
+/// One queue for every saver, made once. (A generic type can't hold a
+/// static one, and the computed one it had made a new queue each time.)
+private let saveQueue = DispatchQueue(label: "app.sill.save", qos: .utility)
+
 /// Writes a value to disk a moment after the last change, off the main thread.
 final class Saver<Value: Encodable> {
     private let url: URL
     private let delay: TimeInterval
     private var pending: DispatchWorkItem?
-    private static var queue: DispatchQueue { DispatchQueue(label: "app.sill.save", qos: .utility) }
-    private let queue = Saver.queue
+    private let queue = saveQueue
 
     init(_ url: URL, delay: TimeInterval = 1) {
         self.url = url

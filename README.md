@@ -21,6 +21,14 @@ controls), plain content everywhere else.
   inline address completion, search suggestions. ↩ opens, ⌘K shows actions,
   Tab accepts a completion, Esc backs out. ⌘L (or a click on the tab in
   front) edits the current address.
+- **Picture in picture.** Leave a tab playing a video and macOS's own
+  picture in picture window takes it; come back (or press its return
+  button) and it goes back into the page.
+- **Ads and trackers blocked.** A short, hand-written WebKit content rule
+  list (about 44 advertising and analytics companies, blocked only as third
+  parties, plus the empty boxes they leave). Compiled once and cached. No
+  third-party filter list is bundled. YouTube is left alone; right-click a
+  tab to turn it off for one site.
 - **Everything else a browser needs:** back/forward swipes, find (⌘F),
   zoom, downloads to ~/Downloads, private windows (⇧⌘N, nothing written),
   reopen closed tab (⇧⌘T), ⌘1–9, ⌃Tab, Web Inspector (⌥⌘I), default browser.
@@ -49,4 +57,10 @@ To turn both on:
 
 The Apple Passwords protocol (SRP pairing, sealed messages) and the native
 messaging pipe are adapted from [Search](https://github.com/driceroland/Search)
-by Office Commun, MIT License.
+by Office Commun, MIT License, as are the ad and tracker rules in
+`Shield.swift`. About twenty of their generic ad-slot names come from
+EasyList's hiding rules. See NOTICE.
+
+## License
+
+MIT. See LICENSE and NOTICE.

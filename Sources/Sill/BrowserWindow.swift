@@ -13,6 +13,27 @@ final class StageView: NSView {
     }
 }
 
+/// The bar and its glass, in one view whose top corners can be rounded
+/// without clipping the page below (see BrowserWindowController.applyLooks).
+final class TopClipView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// Where the page goes. The window's own colour shows here while a page has
+/// yet to draw (see SillWebView.holdForFirstFrame), rather than white in a
+/// dark window; drawn by the layer, so it follows light and dark itself.
+final class PageHostView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    }
+}
+
 @MainActor
 final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     let isPrivate: Bool
@@ -24,9 +45,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     let strip = TabStripView()
     private lazy var bar = TopBar(strip: strip)
     private let stage = StageView()
-    private let pageHost = NSView()
-    private lazy var palette = Palette(browser: self)
-    private lazy var findBar = FindBar(browser: self)
+    private let pageHost = PageHostView()
+    private let top = TopClipView()
+    /// Made the first time they're used, not at the window's first layout.
+    private var madePalette: Palette?
+    private var madeFindBar: FindBar?
+    private var palette: Palette {
+        if let madePalette { return madePalette }
+        let made = Palette(browser: self)
+        madePalette = made
+        return made
+    }
+    private var findBar: FindBar {
+        if let madeFindBar { return madeFindBar }
+        let made = FindBar(browser: self)
+        madeFindBar = made
+        return made
+    }
+    private var paletteOpen: Bool { madePalette?.isOpen ?? false }
     private let status = StatusPill()
     /// The bar's ground: the desktop behind the window, blended by the
     /// window server as Finder's sidebar is (cheap, and steady while the page
@@ -38,10 +74,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private let toastView = Toast()
     private var downloadsPopover: NSPopover?
     /// Recently closed in this window, newest last, for ⇧⌘T.
-    private var closed: [(url: URL, title: String, index: Int)] = []
+    private var closed: [(url: URL, title: String, index: Int, state: Any?)] = []
     var onChange: (() -> Void)?
     private var napTimer: Timer?
     private var watchingPrefs: AnyCancellable?
+    /// The tab whose video Sill sent to picture in picture, to bring back when it's shown again.
+    private weak var pictured: Tab?
+    /// A web view made while ⌘T is open, so Return doesn't wait for one to
+    /// be built before the page can start loading.
+    private var spare: SillWebView?
 
     init(isPrivate: Bool, popup: Bool = false) {
         self.isPrivate = isPrivate
@@ -77,10 +118,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         ground.material = .sidebar
         ground.blendingMode = .behindWindow
         ground.state = .followsWindowActiveState
-        stage.addSubview(ground)
+        top.wantsLayer = true
+        top.addSubview(ground)
         wash.wantsLayer = true
-        stage.addSubview(wash)
-        stage.addSubview(bar)
+        top.addSubview(wash)
+        top.addSubview(bar)
+        stage.addSubview(top)
         stage.addSubview(pageHost)
         stage.addSubview(status)
         stage.addSubview(toastView)
@@ -125,15 +168,38 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         ground.isHidden = !prefs.glassBar
         wash.isHidden = !prefs.glassBar
         // Rounder corners need a see-through window, clipped to them; the
-        // system's own corners cost nothing.
+        // system's own corners cost nothing. Only the corners are clipped:
+        // the bar's top two and the page's bottom two. A rounded mask over
+        // the whole window, page and all, made every frame of a scrolling
+        // page or a video go through an extra offscreen pass.
         let round = prefs.roundCorners
+        let radius = round ? prefs.cornerRadius : 0
         window?.isOpaque = !round
         window?.backgroundColor = round ? .clear : .windowBackgroundColor
-        stage.layer?.cornerRadius = round ? prefs.cornerRadius : 0
-        stage.layer?.masksToBounds = round
+        // Its own background follows the radius without clipping anything.
+        stage.layer?.cornerRadius = radius
+        stage.layer?.masksToBounds = false
         stage.layer?.backgroundColor = round && !prefs.glassBar ? NSColor.windowBackgroundColor.cgColor : nil
+        Self.clip(top, radius: radius, corners: .top)
+        Self.clip(pageHost, radius: radius, corners: .bottom)
         window?.invalidateShadow()
         strip.prefsChanged()
+    }
+
+    private enum Edge { case top, bottom }
+
+    /// Rounds and clips two of `view`'s corners, or none at radius 0. A
+    /// layer's y runs down the screen when AppKit has flipped it (a flipped
+    /// view's own layer is), and then its min-Y corners are the top ones.
+    private static func clip(_ view: NSView, radius: CGFloat, corners edge: Edge) {
+        guard let layer = view.layer else { return }
+        let down = layer.contentsAreFlipped()
+        let upper: CACornerMask = down ? [.layerMinXMinYCorner, .layerMaxXMinYCorner] : [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+        let lower: CACornerMask = down ? [.layerMinXMaxYCorner, .layerMaxXMaxYCorner] : [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        layer.cornerCurve = .continuous
+        layer.cornerRadius = radius
+        layer.maskedCorners = edge == .top ? upper : lower
+        layer.masksToBounds = radius > 0
     }
 
     // MARK: - Bar
@@ -166,15 +232,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     var topInset: CGFloat { TopBar.height }
 
     private func stageLaidOut() {
-        bar.frame = NSRect(x: 0, y: 0, width: stage.bounds.width, height: TopBar.height)
+        top.frame = NSRect(x: 0, y: 0, width: stage.bounds.width, height: TopBar.height)
+        bar.frame = top.bounds
         // The page starts below the bar: nothing goes behind the glass.
         pageHost.frame = NSRect(x: 0, y: topInset, width: stage.bounds.width, height: max(0, stage.bounds.height - topInset))
         // Only as tall as the bar plus a margin the page covers: its rim stays
         // hidden under the page, and no glass is drawn where none is seen.
         ground.frame = NSRect(x: 0, y: 0, width: stage.bounds.width, height: TopBar.height)
         wash.frame = ground.frame
-        palette.stageResized(stage)
-        findBar.place(in: stage, top: topInset)
+        madePalette?.stageResized(stage)
+        if let findBar = madeFindBar, findBar.isOpen { findBar.place(in: stage, top: topInset) }
         status.place(in: stage)
         toastView.place(in: stage)
     }
@@ -198,7 +265,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     @discardableResult
     func addTab(url: URL?, configuration: WKWebViewConfiguration? = nil, at index: Int? = nil,
-                select shouldSelect: Bool = true, opener: Tab? = nil, typed: Bool = false) -> Tab {
+                select shouldSelect: Bool = true, opener: Tab? = nil, typed: Bool = false, state: Any? = nil) -> Tab {
         let tab = Tab(url: nil, isPrivate: isPrivate)
         tab.host = self
         tab.opener = opener
@@ -207,7 +274,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             tab.materialize(with: configuration)
         } else if let url {
             tab.load(url, typed: typed)
-            if !shouldSelect { tab.materialize() }
+            tab.restore(state)
+            if !shouldSelect {
+                tab.materialize()
+            } else if let view = spare {
+                spare = nil
+                tab.adopt(view)
+            }
         }
         if shouldSelect { select(tab, animated: true) } else { strip.sync(animated: true) }
         changed()
@@ -216,21 +289,27 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     func select(_ tab: Tab, animated: Bool = false) {
         guard tabs.contains(where: { $0 === tab }) else { return }
-        if palette.isOpen && selected !== tab { palette.close(animated: false) }
-        findBar.close()
+        if paletteOpen && selected !== tab { palette.close(animated: false) }
+        madeFindBar?.close()
         let previous = selected
         // The page being left keeps its place in the window, under the new
         // one, until its video has floated off into Picture in Picture: a
-        // page taken out of the window first would have it cancelled.
+        // page taken out of the window first would have it cancelled. Only
+        // a page playing something is asked; any other leaves at once.
         var keep: WKWebView?
-        if previous !== tab, let previous, let old = previous.webView, Preferences.shared.autoPictureInPicture {
+        if previous !== tab, let previous, let old = previous.webView, Preferences.shared.autoPictureInPicture,
+           previous.playingVideo || Self.isPlayingAudio(old) {
             keep = old
-            PictureInPicture.leave(previous) { [weak self, weak old] in
-                guard let self, let old, old !== self.selected?.webView else { return }
+            PictureInPicture.leave(previous) { [weak self, weak old, weak previous] floated in
+                guard let self else { return }
+                if floated, let previous {
+                    // Back on it before the video landed: it comes straight back.
+                    if previous === self.selected { PictureInPicture.return(to: previous) } else { self.pictured = previous }
+                }
+                guard let old, old !== self.selected?.webView else { return }
                 old.removeFromSuperview()
             }
         }
-        if previous !== tab { PictureInPicture.return(to: tab) }
         selected = tab
         tab.lastShown = Date()
         let webView = tab.materialize()
@@ -240,21 +319,33 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             webView.autoresizingMask = [.width, .height]
             pageHost.addSubview(webView)
         }
-        strip.sync(animated: animated)
+        tab.reloadIfCrashed()
+        // Back from picture in picture: WebKit puts a video back in its page
+        // only once that page is in the window, so after it is.
+        if tab === pictured {
+            pictured = nil
+            PictureInPicture.return(to: tab)
+        }
+        // Clicks, ⌘1–9 and ⌃Tab only move the selection; a tab added or
+        // closed changes the row.
+        if strip.matches(tabs) { strip.select(tab) } else { strip.sync(animated: animated) }
         window?.title = tab.displayTitle
         updateNavigation()
         status.show(nil)
-        if !palette.isOpen { window?.makeFirstResponder(webView) }
+        if !paletteOpen { window?.makeFirstResponder(webView) }
         changed()
     }
 
     func close(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
         if let url = tab.webView?.url ?? tab.url, !isPrivate {
-            closed.append((url, tab.displayTitle, index))
+            closed.append((url, tab.displayTitle, index, tab.interactionState))
             if closed.count > 30 { closed.removeFirst() }
         }
         tabs.remove(at: index)
+        // Its video goes with it, not left floating with nothing to return to.
+        tab.webView?.closeAllMediaPresentations { }
+        if pictured === tab { pictured = nil }
         tab.webView?.removeFromSuperview()
         if tabs.isEmpty {
             selected = nil
@@ -305,16 +396,23 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     // MARK: - Palette
 
     func showPalette(_ mode: Palette.Mode) {
-        if palette.isOpen && palette.mode == mode && mode == .newTab { palette.close(); return }
+        if paletteOpen && palette.mode == mode && mode == .newTab { palette.close(); return }
         status.show(nil)
         palette.open(mode, in: stage)
+        if mode != .tabs, spare == nil {
+            // On the next turn, so the palette is on screen first.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.spare == nil, self.window?.isVisible == true else { return }
+                self.spare = SillWebView(frame: .zero, configuration: Web.configuration(private: self.isPrivate))
+            }
+        }
     }
 
     func paletteClosed() {
         if let webView = selected?.webView { window?.makeFirstResponder(webView) }
     }
 
-    var paletteIsOpen: Bool { palette.isOpen }
+    var paletteIsOpen: Bool { paletteOpen }
 
     // MARK: - Window
 
@@ -325,21 +423,26 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         return (webView.value(forKey: key) as? Bool) ?? true
     }
 
-    private func napIdleTabs() {
+    /// Puts tabs idle for `olderThan` seconds (the setting, unless the Mac is
+    /// short of memory and asks sooner) to sleep. Never the one in front, one
+    /// whose video floats, or one playing sound or using the camera.
+    func napIdleTabs(olderThan: TimeInterval? = nil) {
         guard Preferences.shared.sleepsTabs else { return }
-        let after = TimeInterval(max(5, Preferences.shared.sleepAfterMinutes) * 60)
+        let after = olderThan ?? TimeInterval(max(5, Preferences.shared.sleepAfterMinutes) * 60)
         let now = Date()
-        for tab in tabs where tab !== selected {
+        for tab in tabs where tab !== selected && tab !== pictured {
+            // A floating video may be muted, so not "playing audio": it counts anyway.
             guard let webView = tab.webView, now.timeIntervalSince(tab.lastShown) > after,
                   webView.cameraCaptureState == .none, webView.microphoneCaptureState == .none,
-                  !Self.isPlayingAudio(webView)
+                  webView.fullscreenState == .notInFullscreen, !Self.isPlayingAudio(webView)
             else { continue }
-            tab.sleep()
+            tab.sleepUnlessTyping()
         }
     }
 
     func windowWillClose(_ notification: Notification) {
         napTimer?.invalidate()
+        spare = nil
         for tab in tabs { tab.webView?.removeFromSuperview() }
         AppDelegate.shared.windowClosed(self)
     }
@@ -364,6 +467,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             self.addTab(url: url, at: index + 1)
         }
         add("Copy Link", { if let url = tab.webView?.url ?? tab.url { Pasteboard.copy(url) } }, enabled: tab.url != nil)
+        // Off for the one site it broke, rather than everywhere.
+        if Preferences.shared.blocksAds, let host = (tab.webView?.url ?? tab.url)?.host(), !host.isEmpty {
+            let paused = Shield.shared.isPaused(on: host)
+            let item = ClosureMenuItem(title: "Block Ads on \(Domains.bare(host))") { [weak tab] in
+                Shield.shared.pause(host, !paused) { tab?.reload() }
+            }
+            item.state = paused ? .off : .on
+            menu.addItem(item)
+        }
         menu.addItem(.separator())
         add("Close Tab") { [weak self] in self?.close(tab) }
         add("Close Other Tabs", { [weak self] in
@@ -389,13 +501,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     @objc func openLocation(_ sender: Any?) { showPalette(selected == nil ? .newTab : .address) }
 
     @objc func closeTab(_ sender: Any?) {
-        if palette.isOpen { palette.close(); return }
+        if paletteOpen { palette.close(); return }
         if let selected { close(selected) } else { window?.close() }
     }
 
     @objc func reopenClosedTab(_ sender: Any?) {
         guard let last = closed.popLast() else { return }
-        addTab(url: last.url, at: min(last.index, tabs.count))
+        // With its back and forward history, as it was.
+        addTab(url: last.url, at: min(last.index, tabs.count), state: last.state)
     }
 
     @objc func goBack(_ sender: Any?) { selected?.goBack() }
@@ -459,7 +572,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
              #selector(showInspector(_:)):
             return selected != nil
         case #selector(stopLoading(_:)): return selected?.isLoading ?? false
-        case #selector(findNext(_:)), #selector(findPrevious(_:)): return findBar.hasQuery
+        case #selector(findNext(_:)), #selector(findPrevious(_:)): return madeFindBar?.hasQuery ?? false
         case #selector(nextTab(_:)), #selector(previousTab(_:)): return tabs.count > 1
         case #selector(selectTabByNumber(_:)): return item.tag <= tabs.count || item.tag == 9
         default: return true
@@ -474,8 +587,9 @@ extension BrowserWindowController: TabHost {
         switch what {
         case .title, .icon, .loading:
             strip.refresh(tab)
+            // Not a session save: titles are read when it's written, and a
+            // page ticking its title would put the save off forever.
             if tab === selected, what == .title { window?.title = tab.displayTitle }
-            if what == .title { changed() }
         case .url:
             strip.refresh(tab)
             changed()
@@ -507,8 +621,14 @@ extension BrowserWindowController: TabHost {
 
     func closeRequested(_ tab: Tab) { close(tab) }
 
+    func bringBack(_ tab: Tab) {
+        select(tab, animated: true)
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+    }
+
     func hovered(_ tab: Tab, link: String?) {
-        guard tab === selected, !palette.isOpen, Preferences.shared.showsLinkPreview else { return }
+        guard tab === selected, !paletteOpen, Preferences.shared.showsLinkPreview else { return }
         status.show(link.flatMap(URL.init(string:)).map { Address.display($0) })
     }
 
@@ -529,7 +649,7 @@ final class BrowserNSWindow: NSWindow {
 
 extension BrowserWindowController {
     func escape() {
-        if palette.isOpen { palette.close() } else if findBar.isOpen { findBar.close() }
+        if paletteOpen { palette.close() } else if madeFindBar?.isOpen == true { madeFindBar?.close() }
     }
 }
 

@@ -10,6 +10,8 @@ protocol TabHost: AnyObject {
     func open(from tab: Tab, url: URL?, configuration: WKWebViewConfiguration?, background: Bool) -> Tab
     func openPopup(from tab: Tab, configuration: WKWebViewConfiguration, size: NSSize) -> Tab?
     func closeRequested(_ tab: Tab)
+    /// To the front, with its window: its video is coming back from picture in picture.
+    func bringBack(_ tab: Tab)
     func hovered(_ tab: Tab, link: String?)
     func focused(_ tab: Tab, field: LoginField)
 }
@@ -31,15 +33,27 @@ final class Tab: NSObject {
     private(set) var title: String
     private(set) var favicon: NSImage?
     private(set) var isLoading = false
-    private(set) var progress: Double = 0
     private(set) var canGoBack = false
     private(set) var canGoForward = false
     /// Whether the page is scrolled away from its top.
     private(set) var isScrolled = false
+    /// Whether a video is playing in the page, as its script last said.
+    private(set) var playingVideo = false
     var lastShown = Date()
 
     private var pending: URL?
+    /// The page's back/forward list and place in it, kept while the tab
+    /// sleeps (or after it closed), so it comes back as it was and from
+    /// WebKit's caches rather than as a fresh load of its address.
+    private var savedState: Any?
     private var watching: [NSKeyValueObservation] = []
+    /// When its page's process last died, for telling a crash loop from a one-off.
+    private var crashes: [Date] = []
+    /// Its process died while it was out of sight: it reloads when shown.
+    private var needsReload = false
+    /// The title last given to history, for which page: a page that keeps
+    /// setting the same title doesn't touch history again.
+    private var lastRetitled: (url: URL, title: String)?
     /// Typed or picked in the palette: counts for more in history.
     private var typedNavigation = false
 
@@ -66,6 +80,19 @@ final class Tab: NSObject {
     func materialize(with configuration: WKWebViewConfiguration? = nil) -> SillWebView {
         if let webView { return webView }
         let view = SillWebView(frame: .zero, configuration: configuration ?? Web.configuration(private: isPrivate))
+        adopt(view, popup: configuration != nil)
+        return view
+    }
+
+    /// Takes `view` as this tab's page, made just now or ahead of time (the
+    /// window keeps one ready while ⌘T is open), and loads what's waiting.
+    /// `popup`: WebKit made its configuration for a window a page opened,
+    /// and loads it itself.
+    func adopt(_ view: SillWebView, popup: Bool = false) {
+        guard webView == nil else { return }
+        // A configuration WebKit hands over for a new window is a copy made
+        // inside WebKit: picture in picture is allowed again to be sure.
+        PictureInPicture.allow(view.configuration.preferences)
         view.tab = self
         view.navigationDelegate = self
         view.uiDelegate = self
@@ -75,11 +102,23 @@ final class Tab: NSObject {
         view.isInspectable = true
         webView = view
         watch(view)
-        if let pending, configuration == nil {
+        // Unseen until it draws, when there's a page coming; a popup's view
+        // is already drawing what its opener put there.
+        if !popup, savedState != nil || pending != nil { view.holdForFirstFrame() }
+        if !popup, let state = savedState {
+            savedState = nil
+            pending = nil
+            Shield.shared.whenReady { [weak self, weak view] in
+                guard let view, self?.webView === view else { return }
+                view.interactionState = state
+            }
+        } else if let pending, !popup {
             self.pending = nil
-            view.load(URLRequest(url: pending))
+            Shield.shared.whenReady { [weak self, weak view] in
+                guard let view, self?.webView === view else { return }
+                view.load(URLRequest(url: pending))
+            }
         }
-        return view
     }
 
     private func watch(_ view: SillWebView) {
@@ -88,7 +127,10 @@ final class Tab: NSObject {
                 MainActor.assumeIsolated {
                     guard let self, let title = view.title, !title.isEmpty || view.url != nil else { return }
                     self.title = title
-                    if !self.isPrivate, let url = view.url { History.shared.retitle(url, title) }
+                    if !self.isPrivate, let url = view.url, self.lastRetitled?.url != url || self.lastRetitled?.title != title {
+                        self.lastRetitled = (url, title)
+                        History.shared.retitle(url, title)
+                    }
                     self.host?.tabChanged(self, .title)
                 }
             },
@@ -108,9 +150,6 @@ final class Tab: NSObject {
                     self.host?.tabChanged(self, .loading)
                 }
             },
-            view.observe(\.estimatedProgress, options: [.new]) { [weak self] view, _ in
-                MainActor.assumeIsolated { self?.progress = view.estimatedProgress }
-            },
             view.observe(\.canGoBack, options: [.new]) { [weak self] view, _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
@@ -128,14 +167,42 @@ final class Tab: NSObject {
         ]
     }
 
-    /// Lets the page go to save memory; it comes back from its address when shown.
+    /// Lets the page go to save memory; it comes back, with its history and
+    /// place, when shown.
     func sleep() {
         guard let webView, !webView.isLoading else { return }
         pending = webView.url ?? url
+        savedState = webView.interactionState
+        playingVideo = false
         watching = []
         webView.removeFromSuperview()
         self.webView = nil
     }
+
+    /// Sleeps, unless something has been typed into the page and not sent:
+    /// a sleeping page would lose it.
+    func sleepUnlessTyping() {
+        guard let webView else { return }
+        let typing = """
+        (function () {
+          var e = document.activeElement;
+          return !!(e && (e.isContentEditable || ((e.tagName === 'INPUT' || e.tagName === 'TEXTAREA') && e.value)));
+        })();
+        """
+        webView.evaluateJavaScript(typing, in: nil, in: Web.world) { [weak self, weak webView] result in
+            // A page that can't be asked (a PDF, say) has nothing typed in it.
+            guard let self, let webView, self.webView === webView, (try? result.get()) as? Bool != true else { return }
+            self.sleep()
+        }
+    }
+
+    /// The history of a tab that was closed, for ⇧⌘T: used the first time it's shown.
+    func restore(_ state: Any?) {
+        guard webView == nil, let state else { return }
+        savedState = state
+    }
+
+    var interactionState: Any? { webView?.interactionState }
 
     // MARK: - going places
 
@@ -143,11 +210,22 @@ final class Tab: NSObject {
         typedNavigation = typed
         self.url = url
         if let webView {
-            webView.load(URLRequest(url: url))
+            Shield.shared.whenReady { [weak self, weak webView] in
+                guard let webView, self?.webView === webView else { return }
+                webView.load(URLRequest(url: url))
+            }
         } else {
             pending = url
+            savedState = nil
         }
         host?.tabChanged(self, .url)
+    }
+
+    /// Shown again after its process died behind another tab.
+    func reloadIfCrashed() {
+        guard needsReload else { return }
+        needsReload = false
+        reload()
     }
 
     func goBack() { webView?.goBack() }
@@ -174,11 +252,13 @@ final class Tab: NSObject {
         host?.tabChanged(self, .scroll)
     }
     func focused(_ field: LoginField) { host?.focused(self, field: field) }
+    func mediaChanged(_ playing: Bool) { playingVideo = playing }
 
     func found(icon: URL) {
         guard let page = webView?.url else { return }
         Favicons.shared.fetch(page: page, icon: icon) { [weak self] image in
-            guard let self, let image, self.webView?.url?.host() == page.host() else { return }
+            // The icon it already shows: nothing to redraw.
+            guard let self, let image, image !== self.favicon, self.webView?.url?.host() == page.host() else { return }
             self.favicon = image
             self.host?.tabChanged(self, .icon)
         }
@@ -246,6 +326,7 @@ extension Tab: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         scrolled(false)
+        playingVideo = false
         guard let url = webView.url else { return }
         if !isPrivate { History.shared.record(url, title: webView.title, typed: typedNavigation) }
         typedNavigation = false
@@ -255,11 +336,18 @@ extension Tab: WKNavigationDelegate {
         }
     }
 
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // A page with nothing to lay out never has a first frame: done is done.
+        (webView as? SillWebView)?.showFirstFrame()
+    }
+
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        (webView as? SillWebView)?.showFirstFrame()
         showError(error, in: webView)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        (webView as? SillWebView)?.showFirstFrame()
         showError(error, in: webView)
     }
 
@@ -282,8 +370,21 @@ extension Tab: WKNavigationDelegate {
         }
     }
 
+    /// The page's process died (out of memory, or a crash). Shown, it comes
+    /// back at once; behind another tab, when it's next shown. Twice in a
+    /// minute, it says so rather than reloading into the same crash forever.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        webView.reload()
+        let now = Date()
+        crashes = crashes.filter { now.timeIntervalSince($0) < 60 } + [now]
+        if crashes.count >= 2, let url = webView.url ?? url {
+            crashes = []
+            needsReload = false
+            let html = ErrorPage.html(title: "This page keeps crashing",
+                                      detail: "Its content process stopped twice in a minute, so Sill didn’t reload it again.", url: url)
+            webView.loadSimulatedRequest(URLRequest(url: url), responseHTML: html)
+            return
+        }
+        if webView.window == nil { needsReload = true } else { webView.reload() }
     }
 }
 
@@ -308,6 +409,21 @@ extension Tab: WKUIDelegate {
 
     func webViewDidClose(_ webView: WKWebView) {
         host?.closeRequested(self)
+    }
+
+    /// The button on macOS's picture in picture window that puts the video
+    /// back. WebKit puts it back into its page only once that page is seen,
+    /// and the page is a tab behind another: it comes to the front first.
+    /// The page has drawn something: a view kept unseen so far comes in.
+    /// WebKit calls this only on a view that asked (holdForFirstFrame).
+    @objc(_webView:renderingProgressDidChange:)
+    func webView(_ webView: WKWebView, renderingProgressDidChange events: UInt) {
+        if events & SillWebView.firstFrame != 0 { (webView as? SillWebView)?.showFirstFrame() }
+    }
+
+    @objc(_webViewFullscreenMayReturnToInline:)
+    func webViewFullscreenMayReturnToInline(_ webView: WKWebView) {
+        host?.bringBack(self)
     }
 
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,

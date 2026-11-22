@@ -37,8 +37,11 @@ enum Web {
         configuration.preferences.isTextInteractionEnabled = true
         configuration.allowsAirPlayForMediaPlayback = true
         configuration.defaultWebpagePreferences.preferredContentMode = .desktop
-        // Pages out of sight keep running, with WebKit's timer throttling.
-        configuration.preferences.inactiveSchedulingPolicy = .throttle
+        // Pages out of sight are left to WebKit's default, which suspends a
+        // page once it is idle and in no window: a tab behind another costs
+        // nothing. A page playing sound or video, or still loading, isn't
+        // idle, so background audio and picture in picture carry on.
+        PictureInPicture.allow(configuration.preferences)
         return configuration
     }
 }
@@ -54,6 +57,53 @@ final class SillWebView: WKWebView {
             if item.identifier?.rawValue == "WKMenuItemIdentifierDownloadLinkedFile" { item.title = "Download Linked File" }
         }
         super.willOpenMenu(menu, with: event)
+    }
+
+    // MARK: the first frame
+
+    /// A web view that has never drawn is opaque white: a flash of it between
+    /// opening a tab and the page arriving, worst in a dark window. So a fresh
+    /// view starts unseen, over the window's own colour, and comes in once
+    /// WebKit says there is something on it worth seeing.
+    private var held = false
+    private var presenting = false
+
+    /// _WKRenderingProgressEventFirstVisuallyNonEmptyLayout, the moment
+    /// Safari shows a page that is coming in.
+    static let firstFrame: UInt = 1 << 1
+
+    /// WebKit tells of the first frame only through names outside the public
+    /// framework, so it's asked whether it knows them first; one that doesn't
+    /// shows the view straight away, as before.
+    func holdForFirstFrame() {
+        let observe = NSSelectorFromString("_setObservedRenderingProgressEvents:")
+        guard responds(to: observe) else { return }
+        typealias Setter = @convention(c) (AnyObject, Selector, UInt) -> Void
+        unsafeBitCast(method(for: observe), to: Setter.self)(self, observe, Self.firstFrame)
+        held = true
+        alphaValue = 0
+        // A web process that dies before it draws never says so: in after a second regardless.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.showFirstFrame() }
+    }
+
+    /// In, quickly, once that frame has reached the window: WebKit reports
+    /// it a few frames before, and fading in then still shows the white.
+    func showFirstFrame() {
+        guard held, !presenting else { return }
+        presenting = true
+        let fadeIn = { [weak self] in
+            guard let self, self.held else { return }
+            self.held = false
+            self.presenting = false
+            Motion.animate(0.12) { self.animator().alphaValue = 1 }
+        }
+        let presented = NSSelectorFromString("_doAfterNextPresentationUpdate:")
+        guard responds(to: presented) else { return fadeIn() }
+        var done = false
+        let once = { if !done { done = true; fadeIn() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { once() }
+        typealias After = @convention(c) (AnyObject, Selector, @escaping @convention(block) () -> Void) -> Void
+        unsafeBitCast(method(for: presented), to: After.self)(self, presented) { DispatchQueue.main.async { once() } }
     }
 }
 
@@ -83,6 +133,8 @@ final class MessageRouter: NSObject, WKScriptMessageHandler {
             }
         case "scroll":
             tab.scrolled((body["v"] as? Bool) ?? false)
+        case "media":
+            tab.mediaChanged((body["playing"] as? Bool) ?? false)
         case "icon":
             if let href = body["href"] as? String, let url = URL(string: href) { tab.found(icon: url) }
         case "field":
@@ -134,6 +186,16 @@ enum PageScripts {
         const now = (document.scrollingElement || document.documentElement).scrollTop > 0;
         if (now !== away) { away = now; post({ t: 'scroll', v: now }); }
       }, { passive: true });
+
+      // Whether a video is playing, so switching tabs asks only pages that
+      // have one to float it. Media events don't bubble; capture sees them.
+      let playing = false;
+      const media = () => {
+        const now = [...document.querySelectorAll('video')].some(v => !v.paused && !v.ended && v.readyState > 1);
+        if (now !== playing) { playing = now; post({ t: 'media', playing: now }); }
+      };
+      ['playing', 'pause', 'ended', 'emptied'].forEach(e => document.addEventListener(e, media, true));
+      media();
 
       // The page's icon: the one nearest 64 px, an SVG, or /favicon.ico.
       const icon = () => {
@@ -219,13 +281,19 @@ enum PageScripts {
 
 // MARK: - Favicons
 
-/// Site icons, by host: in memory, on disk in Caches, fetched once.
+/// Site icons, by host: in memory, on disk in Caches, fetched once per icon
+/// address. Decoding and writing happen off the main thread; the main
+/// thread only files the finished image.
 @MainActor
 final class Favicons {
     static let shared = Favicons()
     private var memory: [String: NSImage] = [:]
+    /// Where each host's icon in memory came from: the same address again needs no fetch.
+    private var source: [String: URL] = [:]
     private var misses: Set<String> = []
     private var inflight: [String: [(NSImage?) -> Void]] = [:]
+    /// Once every icon on disk is in memory, nothing is read from disk again.
+    private var preloaded = false
     private let folder = Places.caches.appendingPathComponent("Icons", isDirectory: true)
     private let session: URLSession = {
         let configuration = URLSessionConfiguration.default
@@ -247,11 +315,32 @@ final class Favicons {
         folder.appendingPathComponent(key.replacingOccurrences(of: "/", with: "_"))
     }
 
+    /// Every icon on disk, decoded in the background, into memory: tabs and
+    /// palette rows then never read or decode one on the main thread.
+    func preload() {
+        let folder = folder
+        DispatchQueue.global(qos: .utility).async {
+            let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+            var found: [(String, NSImage)] = []
+            for url in files {
+                guard let data = try? Data(contentsOf: url), let (image, _) = Self.decode(data) else { continue }
+                found.append((url.lastPathComponent, image))
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    for (key, image) in found where self.memory[key] == nil { self.memory[key] = image }
+                    self.preloaded = true
+                }
+            }
+        }
+    }
+
     func cached(for page: URL?) -> NSImage? {
         guard let key = key(page) else { return nil }
         if let image = memory[key] { return image }
-        if misses.contains(key) { return nil }
-        if let data = try? Data(contentsOf: file(key)), let image = Self.image(from: data) {
+        if preloaded || misses.contains(key) { return nil }
+        // Asked before the preload has finished: from disk, this once.
+        if let data = try? Data(contentsOf: file(key)), let (image, _) = Self.decode(data) {
             memory[key] = image
             return image
         }
@@ -261,83 +350,133 @@ final class Favicons {
 
     func fetch(page: URL, icon: URL, done: @escaping (NSImage?) -> Void) {
         guard let key = key(page) else { return done(nil) }
+        if let image = memory[key], source[key] == icon { return done(image) }
         if inflight[key] != nil { inflight[key]?.append(done); return }
         inflight[key] = [done]
         var request = URLRequest(url: icon)
         request.cachePolicy = .returnCacheDataElseLoad
+        let file = file(key)
         session.dataTask(with: request) { [weak self] data, response, _ in
+            // On the session's own queue: decode, shrink and write here.
+            var made: NSImage?
+            if let data, (response as? HTTPURLResponse)?.statusCode ?? 200 < 400, let (image, stored) = Self.decode(data) {
+                made = image
+                try? stored.write(to: file, options: .atomic)
+            }
             DispatchQueue.main.async {
-                guard let self else { return }
-                var image: NSImage?
-                if let data, (response as? HTTPURLResponse)?.statusCode ?? 200 < 400, let made = Self.image(from: data) {
-                    image = made
-                    self.memory[key] = made
-                    self.misses.remove(key)
-                    try? data.write(to: self.file(key), options: .atomic)
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if let made {
+                        self.memory[key] = made
+                        self.source[key] = icon
+                        self.misses.remove(key)
+                    }
+                    let waiting = self.inflight.removeValue(forKey: key) ?? []
+                    waiting.forEach { $0(made ?? self.memory[key]) }
                 }
-                let waiting = self.inflight.removeValue(forKey: key) ?? []
-                waiting.forEach { $0(image ?? self.memory[key]) }
             }
         }.resume()
     }
 
-    private static func image(from data: Data) -> NSImage? {
+    /// An icon from whatever a site serves, at no more than 64 px, and what
+    /// to keep on disk: a small PNG, or the file itself for what ImageIO
+    /// can't read (SVG).
+    nonisolated private static func decode(_ data: Data) -> (NSImage, Data)? {
+        let options = [kCGImageSourceThumbnailMaxPixelSize: 64,
+                       kCGImageSourceCreateThumbnailFromImageAlways: true,
+                       kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary
+        if let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0,
+           let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options) {
+            guard thumbnail.width >= 8 else { return nil }
+            let png = NSMutableData()
+            if let destination = CGImageDestinationCreateWithData(png, "public.png" as CFString, 1, nil) {
+                CGImageDestinationAddImage(destination, thumbnail, nil)
+                CGImageDestinationFinalize(destination)
+            }
+            let image = NSImage(cgImage: thumbnail, size: NSSize(width: thumbnail.width, height: thumbnail.height))
+            return (image, png.length > 0 ? png as Data : data)
+        }
         guard let image = NSImage(data: data), image.size.width >= 8 else { return nil }
-        return image
+        return (image, data)
     }
 }
 
 
 // MARK: - Picture in Picture
 
-/// Leaving a tab that is playing a video takes the video with you, floating,
-/// as Safari does; coming back puts it back in the page.
+/// Leaving a tab that is playing a video takes the video with you, floating
+/// in macOS's own picture in picture window, as Safari does; coming back
+/// puts it back in the page.
+///
+/// Two things make it work. WebKit lets a page into picture in picture on
+/// macOS only with a preference outside the public framework, off by default
+/// in any app but Safari: without it the page is told PiP isn't there at
+/// all. And WebKit wants a user gesture: a script the app runs with
+/// evaluateJavaScript counts as one, but only for its synchronous part, so
+/// the scripts below never await. They run in Sill's world; the videos are
+/// the same elements there, as the DOM is shared between worlds.
+///
+/// Sill's scripts see the main frame only, so a video embedded from another
+/// site (an iframe) doesn't float by itself; youtube.com, Netflix and Twitch
+/// play theirs in the main frame.
 @MainActor
 enum PictureInPicture {
-    /// Resolves true once the video is floating, false if there was none.
-    private static let enter = """
-    const v = [...document.querySelectorAll('video')].find(v => !v.paused && !v.ended && v.readyState > 1
-      && v.getBoundingClientRect().width > 100);
-    if (!v || document.pictureInPictureElement === v) return false;
-    v.dataset.sillPip = '1';
-    try {
-      if (document.pictureInPictureEnabled && !v.disablePictureInPicture) {
-        await v.requestPictureInPicture();
-        return true;
-      }
-    } catch (_) {}
-    if (v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode('picture-in-picture')) {
-      v.webkitSetPresentationMode('picture-in-picture');
-      await new Promise(r => setTimeout(r, 450));
-      return v.webkitPresentationMode === 'picture-in-picture';
+    /// Lets pages in `preferences` use picture in picture, as Safari does.
+    /// Always on: the setting only decides whether Sill floats a video by
+    /// itself, and pages' own PiP buttons work either way.
+    static func allow(_ preferences: WKPreferences) {
+        let set = NSSelectorFromString("_setAllowsPictureInPictureMediaPlayback:")
+        guard preferences.responds(to: set) else { return }
+        typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
+        unsafeBitCast(preferences.method(for: set), to: Setter.self)(preferences, set, true)
     }
-    delete v.dataset.sillPip;
-    return false;
-    """
-    private static let exit = """
-    const v = document.querySelector('video[data-sill-pip]');
-    if (!v) return false;
-    delete v.dataset.sillPip;
-    if (document.pictureInPictureElement === v) { await document.exitPictureInPicture(); return true; }
-    if (v.webkitPresentationMode === 'picture-in-picture') v.webkitSetPresentationMode('inline');
-    return true;
+
+    /// The largest video playing, into picture in picture. Answers "in",
+    /// "none" (nothing playing) or "refused".
+    private static let enter = """
+    (function () {
+      var videos = document.querySelectorAll('video'), best = null, area = 0;
+      for (var i = 0; i < videos.length; i++) {
+        var v = videos[i];
+        if (v.webkitPresentationMode === 'picture-in-picture') return 'in';
+        if (v.paused || v.ended || v.readyState < 2) continue;
+        var box = v.getBoundingClientRect();
+        if (box.width * box.height >= area) { area = box.width * box.height; best = v; }
+      }
+      if (!best) return 'none';
+      if (!best.webkitSupportsPresentationMode || !best.webkitSupportsPresentationMode('picture-in-picture')) return 'refused';
+      try { best.webkitSetPresentationMode('picture-in-picture'); return 'in'; } catch (e) { return 'refused'; }
+    })();
     """
 
-    /// `done` runs once the video has floated (after the window animation)
-    /// or straight away when there's nothing to float.
-    static func leave(_ tab: Tab, done: @escaping () -> Void) {
-        guard let webView = tab.webView else { return done() }
-        webView.callAsyncJavaScript(enter, arguments: [:], in: nil, in: .page) { result in
-            let floated = (try? result.get()) as? Bool ?? false
-            if floated {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: done)
+    /// Back into the page, whatever is floating from it.
+    private static let exit = """
+    (function () {
+      var videos = document.querySelectorAll('video'), out = false;
+      for (var i = 0; i < videos.length; i++) {
+        if (videos[i].webkitPresentationMode === 'picture-in-picture') {
+          try { videos[i].webkitSetPresentationMode('inline'); out = true; } catch (e) {}
+        }
+      }
+      return out ? 'out' : 'none';
+    })();
+    """
+
+    /// `done(true)` runs once the video has floated (after the window
+    /// animation), `done(false)` straight away when nothing did.
+    static func leave(_ tab: Tab, done: @escaping (Bool) -> Void) {
+        // A video in full screen is already where it wants to be.
+        guard let webView = tab.webView, webView.fullscreenState == .notInFullscreen else { return done(false) }
+        webView.evaluateJavaScript(enter, in: nil, in: Web.world) { result in
+            if (try? result.get()) as? String == "in" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { done(true) }
             } else {
-                done()
+                done(false)
             }
         }
     }
 
     static func `return`(to tab: Tab) {
-        tab.webView?.callAsyncJavaScript(exit, arguments: [:], in: nil, in: .page) { _ in }
+        tab.webView?.evaluateJavaScript(exit, in: nil, in: Web.world) { _ in }
     }
 }
