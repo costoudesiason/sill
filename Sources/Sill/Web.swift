@@ -56,6 +56,53 @@ final class SillWebView: WKWebView {
         }
         super.willOpenMenu(menu, with: event)
     }
+
+    // MARK: the first frame
+
+    /// A web view that has never drawn is opaque white: a flash of it between
+    /// opening a tab and the page arriving, worst in a dark window. So a fresh
+    /// view starts unseen, over the window's own colour, and comes in once
+    /// WebKit says there is something on it worth seeing.
+    private var held = false
+    private var presenting = false
+
+    /// _WKRenderingProgressEventFirstVisuallyNonEmptyLayout, the moment
+    /// Safari shows a page that is coming in.
+    static let firstFrame: UInt = 1 << 1
+
+    /// WebKit tells of the first frame only through names outside the public
+    /// framework, so it's asked whether it knows them first; one that doesn't
+    /// shows the view straight away, as before.
+    func holdForFirstFrame() {
+        let observe = NSSelectorFromString("_setObservedRenderingProgressEvents:")
+        guard responds(to: observe) else { return }
+        typealias Setter = @convention(c) (AnyObject, Selector, UInt) -> Void
+        unsafeBitCast(method(for: observe), to: Setter.self)(self, observe, Self.firstFrame)
+        held = true
+        alphaValue = 0
+        // A web process that dies before it draws never says so: in after a second regardless.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.showFirstFrame() }
+    }
+
+    /// In, quickly, once that frame has reached the window: WebKit reports
+    /// it a few frames before, and fading in then still shows the white.
+    func showFirstFrame() {
+        guard held, !presenting else { return }
+        presenting = true
+        let fadeIn = { [weak self] in
+            guard let self, self.held else { return }
+            self.held = false
+            self.presenting = false
+            Motion.animate(0.12) { self.animator().alphaValue = 1 }
+        }
+        let presented = NSSelectorFromString("_doAfterNextPresentationUpdate:")
+        guard responds(to: presented) else { return fadeIn() }
+        var done = false
+        let once = { if !done { done = true; fadeIn() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { once() }
+        typealias After = @convention(c) (AnyObject, Selector, @escaping @convention(block) () -> Void) -> Void
+        unsafeBitCast(method(for: presented), to: After.self)(self, presented) { DispatchQueue.main.async { once() } }
+    }
 }
 
 /// A sign-in box the person just clicked, as the page script saw it.

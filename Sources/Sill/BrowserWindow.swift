@@ -13,6 +13,21 @@ final class StageView: NSView {
     }
 }
 
+/// Where the page goes. The window's own colour shows here while a page has
+/// yet to draw (see SillWebView.holdForFirstFrame), rather than white in a
+/// dark window; drawn by the layer, so it follows light and dark itself.
+final class PageHostView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    }
+}
+
 @MainActor
 final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     let isPrivate: Bool
@@ -24,7 +39,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     let strip = TabStripView()
     private lazy var bar = TopBar(strip: strip)
     private let stage = StageView()
-    private let pageHost = NSView()
+    private let pageHost = PageHostView()
     private lazy var palette = Palette(browser: self)
     private lazy var findBar = FindBar(browser: self)
     private let status = StatusPill()

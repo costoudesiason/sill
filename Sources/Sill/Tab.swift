@@ -86,6 +86,9 @@ final class Tab: NSObject {
         view.isInspectable = true
         webView = view
         watch(view)
+        // Unseen until it draws, when there's a page coming; a popup's view
+        // is already drawing what its opener put there.
+        if configuration == nil, savedState != nil || pending != nil { view.holdForFirstFrame() }
         if configuration == nil, let state = savedState {
             savedState = nil
             pending = nil
@@ -310,11 +313,18 @@ extension Tab: WKNavigationDelegate {
         }
     }
 
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // A page with nothing to lay out never has a first frame: done is done.
+        (webView as? SillWebView)?.showFirstFrame()
+    }
+
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        (webView as? SillWebView)?.showFirstFrame()
         showError(error, in: webView)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        (webView as? SillWebView)?.showFirstFrame()
         showError(error, in: webView)
     }
 
@@ -368,6 +378,13 @@ extension Tab: WKUIDelegate {
     /// The button on macOS's picture in picture window that puts the video
     /// back. WebKit puts it back into its page only once that page is seen,
     /// and the page is a tab behind another: it comes to the front first.
+    /// The page has drawn something: a view kept unseen so far comes in.
+    /// WebKit calls this only on a view that asked (holdForFirstFrame).
+    @objc(_webView:renderingProgressDidChange:)
+    func webView(_ webView: WKWebView, renderingProgressDidChange events: UInt) {
+        if events & SillWebView.firstFrame != 0 { (webView as? SillWebView)?.showFirstFrame() }
+    }
+
     @objc(_webViewFullscreenMayReturnToInline:)
     func webViewFullscreenMayReturnToInline(_ webView: WKWebView) {
         host?.bringBack(self)
