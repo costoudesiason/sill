@@ -294,33 +294,50 @@ final class Favicons {
 /// as Safari does; coming back puts it back in the page.
 @MainActor
 enum PictureInPicture {
+    /// Resolves true once the video is floating, false if there was none.
     private static let enter = """
-    (() => {
-      const v = [...document.querySelectorAll('video')].find(v => !v.paused && !v.ended && v.readyState > 2
-        && v.getBoundingClientRect().width > 120 && !v.disablePictureInPicture);
-      if (!v || document.pictureInPictureElement || v.webkitPresentationMode === 'picture-in-picture') return false;
-      if (v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode('picture-in-picture')) {
-        v.webkitSetPresentationMode('picture-in-picture'); v.dataset.sillPip = '1'; return true;
+    const v = [...document.querySelectorAll('video')].find(v => !v.paused && !v.ended && v.readyState > 1
+      && v.getBoundingClientRect().width > 100);
+    if (!v || document.pictureInPictureElement === v) return false;
+    v.dataset.sillPip = '1';
+    try {
+      if (document.pictureInPictureEnabled && !v.disablePictureInPicture) {
+        await v.requestPictureInPicture();
+        return true;
       }
-      return false;
-    })()
+    } catch (_) {}
+    if (v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode('picture-in-picture')) {
+      v.webkitSetPresentationMode('picture-in-picture');
+      await new Promise(r => setTimeout(r, 450));
+      return v.webkitPresentationMode === 'picture-in-picture';
+    }
+    delete v.dataset.sillPip;
+    return false;
     """
     private static let exit = """
-    (() => {
-      const v = document.querySelector('video[data-sill-pip]');
-      if (!v) return false;
-      delete v.dataset.sillPip;
-      if (v.webkitPresentationMode === 'picture-in-picture') v.webkitSetPresentationMode('inline');
-      return true;
-    })()
+    const v = document.querySelector('video[data-sill-pip]');
+    if (!v) return false;
+    delete v.dataset.sillPip;
+    if (document.pictureInPictureElement === v) { await document.exitPictureInPicture(); return true; }
+    if (v.webkitPresentationMode === 'picture-in-picture') v.webkitSetPresentationMode('inline');
+    return true;
     """
 
-    static func leave(_ tab: Tab) {
-        guard let webView = tab.webView else { return }
-        webView.evaluateJavaScript(enter, in: nil, in: .page) { _ in }
+    /// `done` runs once the video has floated (after the window animation)
+    /// or straight away when there's nothing to float.
+    static func leave(_ tab: Tab, done: @escaping () -> Void) {
+        guard let webView = tab.webView else { return done() }
+        webView.callAsyncJavaScript(enter, arguments: [:], in: nil, in: .page) { result in
+            let floated = (try? result.get()) as? Bool ?? false
+            if floated {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: done)
+            } else {
+                done()
+            }
+        }
     }
 
     static func `return`(to tab: Tab) {
-        tab.webView?.evaluateJavaScript(exit, in: nil, in: .page) { _ in }
+        tab.webView?.callAsyncJavaScript(exit, arguments: [:], in: nil, in: .page) { _ in }
     }
 }

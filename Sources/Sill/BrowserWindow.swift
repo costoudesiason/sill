@@ -219,15 +219,23 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if palette.isOpen && selected !== tab { palette.close(animated: false) }
         findBar.close()
         let previous = selected
-        if previous !== tab, let previous, Preferences.shared.autoPictureInPicture {
-            PictureInPicture.leave(previous)
+        // The page being left keeps its place in the window, under the new
+        // one, until its video has floated off into Picture in Picture: a
+        // page taken out of the window first would have it cancelled.
+        var keep: WKWebView?
+        if previous !== tab, let previous, let old = previous.webView, Preferences.shared.autoPictureInPicture {
+            keep = old
+            PictureInPicture.leave(previous) { [weak self, weak old] in
+                guard let self, let old, old !== self.selected?.webView else { return }
+                old.removeFromSuperview()
+            }
         }
         if previous !== tab { PictureInPicture.return(to: tab) }
         selected = tab
         tab.lastShown = Date()
         let webView = tab.materialize()
         if previous !== tab || webView.superview !== pageHost {
-            pageHost.subviews.forEach { $0.removeFromSuperview() }
+            pageHost.subviews.forEach { if $0 !== keep { $0.removeFromSuperview() } }
             webView.frame = pageHost.bounds
             webView.autoresizingMask = [.width, .height]
             pageHost.addSubview(webView)
