@@ -78,6 +78,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     }
     private var paletteOpen: Bool { madePalette?.isOpen ?? false }
     private let status = StatusPill()
+    private lazy var peek: Peek = { let peek = Peek(); stage.addSubview(peek); return peek }()
+    private var madePeek = false
+    private var hoveredLink: URL?
+    private var peekWatch: Any?
     /// The bar's ground: the desktop behind the window, blended by the
     /// window server as Finder's sidebar is (cheap, and steady while the page
     /// redraws), under a wash you set in Settings.
@@ -147,6 +151,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         stage.addSubview(pageHost)
         stage.addSubview(status)
         stage.addSubview(toastView)
+        watchForPeek()
         stage.onLayout = { [weak self] in self?.stageLaidOut() }
 
         bar.back.target = self
@@ -357,6 +362,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         window?.title = tab.displayTitle
         updateNavigation()
         status.show(nil)
+        hoveredLink = nil
+        endPeek()
         if !paletteOpen { window?.makeFirstResponder(webView) }
         changed()
     }
@@ -425,6 +432,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     func showPalette(_ mode: Palette.Mode) {
         if paletteOpen && palette.mode == mode && mode == .newTab { palette.close(); return }
         status.show(nil)
+        endPeek()
         palette.open(mode, in: stage)
         if mode == .newTab, spare == nil {
             // On the next turn, so the palette is on screen first.
@@ -524,11 +532,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     func windowWillClose(_ notification: Notification) {
         napTimer?.invalidate()
         spare = nil
+        if let peekWatch { NSEvent.removeMonitor(peekWatch) }
+        peekWatch = nil
+        endPeek()
         for tab in tabs { tab.webView?.removeFromSuperview() }
         AppDelegate.shared.windowClosed(self)
     }
 
     func windowDidBecomeKey(_ notification: Notification) { AppDelegate.shared.lastBrowser = self }
+    func windowDidResignKey(_ notification: Notification) { endPeek() }
 
     // MARK: - Context menu for a tab
 
@@ -716,8 +728,41 @@ extension BrowserWindowController: TabHost {
     }
 
     func hovered(_ tab: Tab, link: String?) {
-        guard tab === selected, !paletteOpen, Preferences.shared.showsLinkPreview else { return }
-        status.show(link.flatMap(URL.init(string:)).map { Address.display($0) })
+        guard tab === selected, !paletteOpen else { return }
+        let url = link.flatMap(URL.init(string:))
+        hoveredLink = url
+        peekIfAsked()
+        guard Preferences.shared.showsLinkPreview else { return }
+        status.show(url.map { Address.display($0) })
+    }
+
+    // MARK: - A look at a link
+
+    /// ⌥ going down or up, and anything that ends a look: a click, a key, a scroll.
+    private func watchForPeek() {
+        guard peekWatch == nil else { return }
+        peekWatch = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]) { [weak self] event in
+            guard let self, event.window === self.window else { return event }
+            if event.type == .flagsChanged { self.peekIfAsked() } else { self.endPeek() }
+            return event
+        }
+    }
+
+    private func peekIfAsked() {
+        let flags = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard let url = hoveredLink, let tab = selected, let window, window.isKeyWindow, !paletteOpen,
+              flags.contains(.option), flags.isDisjoint(with: [.command, .control, .shift]),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              // Not a place on the page it's already on.
+              url.absoluteString.split(separator: "#").first != tab.webView?.url?.absoluteString.split(separator: "#").first
+        else { return endPeek() }
+        let point = stage.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        madePeek = true
+        peek.show(url, by: point, in: stage, below: topInset, private: tab.isPrivate)
+    }
+
+    private func endPeek() {
+        if madePeek { peek.hide() }
     }
 
     func focused(_ tab: Tab, field: LoginField) {
