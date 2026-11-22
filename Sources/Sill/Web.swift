@@ -238,7 +238,7 @@ final class PreloadedPage: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func matches(_ url: URL) -> Bool {
         guard !failed, let key = History.key(self.url) else { return false }
-        return key == History.key(url)
+        return key == History.key(url) && self.url.fragment == url.fragment
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
