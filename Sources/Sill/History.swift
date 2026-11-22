@@ -98,33 +98,61 @@ final class History {
         persist()
     }
 
+    /// What searching needs of an entry, worked out once rather than on every
+    /// keystroke: parsing and lowercasing six thousand addresses is most of
+    /// what a search costs.
+    private struct Reading {
+        /// The host and path, not the query: a search page's parameters
+        /// would otherwise match almost anything.
+        let path: String
+        let bare: String
+        let depth: Double
+        let rawHost: String?
+        let host: String
+        let title: String
+        let lowerTitle: String
+    }
+    private var readings: [String: Reading] = [:]
+
+    private func reading(_ visit: Visit) -> Reading {
+        if let known = readings[visit.url], known.title == visit.title { return known }
+        if readings.count > Self.cap * 2 { readings = [:] }
+        let url = visit.address
+        let bare = Address.display(url).lowercased()
+        let rawHost = url?.host()?.lowercased()
+        let made = Reading(path: url.map { (($0.host() ?? "") + $0.path).lowercased() } ?? visit.url.lowercased(),
+                           bare: bare,
+                           depth: Double(1 + bare.utf8.reduce(0) { $1 == 47 ? $0 + 1 : $0 }) * 0.5 + 0.5,
+                           rawHost: rawHost,
+                           host: Domains.bare(rawHost),
+                           title: visit.title,
+                           lowerTitle: visit.title.lowercased())
+        readings[visit.url] = made
+        return made
+    }
+
     /// Entries matching every word typed, best first.
     func search(_ text: String, limit: Int) -> [Visit] {
         let words = text.lowercased().split(separator: " ").map(String.init)
         guard !words.isEmpty else { return [] }
         let now = Date()
-        var scored: [(Visit, Double)] = []
+        var scored: [(Visit, Reading, Double)] = []
         for visit in visits.values {
-            // The host and path, not the query: a search page's parameters
-            // would otherwise match almost anything.
-            let url = visit.address.map { (($0.host() ?? "") + $0.path).lowercased() } ?? visit.url.lowercased()
-            let title = visit.title.lowercased()
-            guard words.allSatisfy({ url.contains($0) || title.contains($0) }) else { continue }
+            let read = reading(visit)
+            guard words.allSatisfy({ read.path.contains($0) || read.lowerTitle.contains($0) }) else { continue }
             var score = visit.score(now: now)
-            let bareURL = Address.display(visit.address).lowercased()
-            if bareURL.hasPrefix(words[0]) { score *= 4 }
-            else if title.hasPrefix(words[0]) { score *= 2 }
+            if read.bare.hasPrefix(words[0]) { score *= 4 }
+            else if read.lowerTitle.hasPrefix(words[0]) { score *= 2 }
             // Prefer the site's front page over a deep link of equal weight.
-            score /= Double(1 + bareURL.filter { $0 == "/" }.count) * 0.5 + 0.5
-            scored.append((visit, score))
+            score /= read.depth
+            scored.append((visit, read, score))
         }
-        scored.sort { $0.1 > $1.1 }
+        scored.sort { $0.2 > $1.2 }
         // One entry per page as it reads: www and trailing slashes don't make another.
         var seen = Set<String>()
         var result: [Visit] = []
-        for (visit, _) in scored {
-            let key = Address.display(visit.address).lowercased() + "\u{1}" + visit.title
-            guard seen.insert(key).inserted, seen.insert(Address.display(visit.address).lowercased()).inserted else { continue }
+        for (visit, read, _) in scored {
+            guard seen.insert(read.bare + "\u{1}" + visit.title).inserted, seen.insert(read.bare).inserted else { continue }
             result.append(visit)
             if result.count == limit { break }
         }
@@ -155,12 +183,13 @@ final class History {
         guard prefix.count >= 1, !prefix.contains(" ") else { return nil }
         let now = Date()
         var best: (String, Double)?
+        let deep = prefix.contains("/")
         for visit in visits.values {
-            guard let url = visit.address, let rawHost = url.host()?.lowercased() else { continue }
-            let host = Domains.bare(rawHost)
-            var candidates = [host, rawHost]
-            if prefix.contains("/") { candidates.append(Address.display(url).lowercased()) }
-            for candidate in candidates where candidate.hasPrefix(prefix) && candidate.count > prefix.count {
+            let read = reading(visit)
+            guard let rawHost = read.rawHost else { continue }
+            let host = read.host
+            for candidate in deep ? [host, rawHost, read.bare] : [host, rawHost]
+            where candidate.hasPrefix(prefix) && candidate.count > prefix.count {
                 let score = visit.score(now: now) + (candidate == host ? 0.5 : 0)
                 if best == nil || score > best!.1 { best = (candidate, score) }
             }

@@ -97,6 +97,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// A web view made while ⌘T is open, so Return doesn't wait for one to
     /// be built before the page can start loading.
     private var spare: SillWebView?
+    private var expected = Set<String>()
 
     init(isPrivate: Bool, popup: Bool = false) {
         self.isPrivate = isPrivate
@@ -420,11 +421,28 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.spare == nil, self.window?.isVisible == true else { return }
                 self.spare = SillWebView(frame: .zero, configuration: Web.configuration(private: self.isPrivate))
+                self.expect(Preferences.shared.engine.search(""))
             }
+        } else {
+            expect(Preferences.shared.engine.search(""))
         }
     }
 
+    /// Opens a connection to a site the palette is likely to send a page to
+    /// (the search engine, or a site you've been to that the field is
+    /// finishing), so the lookup and handshake are done by the time Return
+    /// is pressed. Once per site for each time the palette is open.
+    func expect(_ url: URL?) {
+        guard let url, url.scheme == "https", let host = url.host(),
+              let view = spare ?? selected?.webView, expected.insert(host).inserted
+        else { return }
+        let connect = NSSelectorFromString("_preconnectToServer:")
+        guard view.responds(to: connect), let root = URL(string: "https://\(host)/") else { return }
+        view.perform(connect, with: root)
+    }
+
     func paletteClosed() {
+        expected = []
         if let webView = selected?.webView { window?.makeFirstResponder(webView) }
         // A spare nobody took (the palette was cancelled) gives its memory back.
         // Later in the turn, so the Return that closed the palette can claim it.

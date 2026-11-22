@@ -17,6 +17,44 @@ enum Web {
         return controller
     }()
 
+    /// One pool of web processes for every page, set up the way Safari's is.
+    /// A pool made the public way keeps nothing ready: each new site starts a
+    /// process from nothing and each one left is thrown away. This one keeps
+    /// a started process waiting for the next page, and keeps the processes
+    /// of sites lately left, so going back to one finds it still running.
+    /// WebKit sizes both to the Mac's memory and drops them under pressure.
+    /// The settings are outside the public framework, so each is asked for
+    /// by name; without them the pool is an ordinary one.
+    static let pool: WKProcessPool = {
+        let make = NSSelectorFromString("_initWithConfiguration:")
+        guard let settingsClass = NSClassFromString("_WKProcessPoolConfiguration") as? NSObject.Type,
+              WKProcessPool.instancesRespond(to: make)
+        else { return WKProcessPool() }
+        let settings = settingsClass.init()
+        for (key, setter) in [("usesWebProcessCache", "setUsesWebProcessCache:"),
+                              ("prewarmsProcessesAutomatically", "setPrewarmsProcessesAutomatically:")]
+        where settings.responds(to: NSSelectorFromString(setter)) {
+            settings.setValue(true, forKey: key)
+        }
+        typealias Alloc = @convention(c) (AnyClass, Selector) -> Unmanaged<AnyObject>
+        typealias Init = @convention(c) (Unmanaged<AnyObject>, Selector, AnyObject) -> Unmanaged<AnyObject>?
+        let alloc = NSSelectorFromString("alloc")
+        guard let allocate = class_getClassMethod(WKProcessPool.self, alloc),
+              let initialise = class_getInstanceMethod(WKProcessPool.self, make)
+        else { return WKProcessPool() }
+        let empty = unsafeBitCast(method_getImplementation(allocate), to: Alloc.self)(WKProcessPool.self, alloc)
+        let made = unsafeBitCast(method_getImplementation(initialise), to: Init.self)(empty, make, settings)
+        return (made?.takeRetainedValue() as? WKProcessPool) ?? WKProcessPool()
+    }()
+
+    /// Starts the first web process while the window is still being built,
+    /// so the first page doesn't wait for one. The first of a launch is by
+    /// far the slowest to start.
+    static func warm() {
+        let start = NSSelectorFromString("_warmInitialProcess")
+        if pool.responds(to: start) { pool.perform(start) }
+    }
+
     /// Private windows share one cookie jar for as long as Sill runs, and it is never written down.
     static let privateStore = WKWebsiteDataStore.nonPersistent()
 
@@ -38,6 +76,7 @@ enum Web {
 
     static func configuration(private isPrivate: Bool) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
+        configuration.processPool = pool
         configuration.userContentController = controller
         configuration.websiteDataStore = isPrivate ? privateStore : .default()
         configuration.applicationNameForUserAgent = applicationName

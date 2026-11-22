@@ -1,6 +1,7 @@
 import AppKit
 
 MainActor.assumeIsolated {
+    Web.warm()
     let app = NSApplication.shared
     let delegate = AppDelegate()
     app.delegate = delegate

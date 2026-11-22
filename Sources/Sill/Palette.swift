@@ -531,6 +531,7 @@ final class Palette: NSObject {
         guard completing, !text.isEmpty, editor.selectedRange().location == (text as NSString).length,
               let completion = History.shared.completion(for: text)
         else { return }
+        browser?.expect(Address.url(from: completion))
         // Keep the case they typed; add the rest, selected, so typing on replaces it.
         let rest = String(completion.dropFirst(text.count))
         guard !rest.isEmpty else { return }
