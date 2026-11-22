@@ -84,6 +84,8 @@ final class MessageRouter: NSObject, WKScriptMessageHandler {
             }
         case "scroll":
             tab.scrolled((body["v"] as? Bool) ?? false)
+        case "media":
+            tab.mediaChanged((body["playing"] as? Bool) ?? false)
         case "icon":
             if let href = body["href"] as? String, let url = URL(string: href) { tab.found(icon: url) }
         case "field":
@@ -135,6 +137,16 @@ enum PageScripts {
         const now = (document.scrollingElement || document.documentElement).scrollTop > 0;
         if (now !== away) { away = now; post({ t: 'scroll', v: now }); }
       }, { passive: true });
+
+      // Whether a video is playing, so switching tabs asks only pages that
+      // have one to float it. Media events don't bubble; capture sees them.
+      let playing = false;
+      const media = () => {
+        const now = [...document.querySelectorAll('video')].some(v => !v.paused && !v.ended && v.readyState > 1);
+        if (now !== playing) { playing = now; post({ t: 'media', playing: now }); }
+      };
+      ['playing', 'pause', 'ended', 'emptied'].forEach(e => document.addEventListener(e, media, true));
+      media();
 
       // The page's icon: the one nearest 64 px, an SVG, or /favicon.ico.
       const icon = () => {

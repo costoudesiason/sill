@@ -38,6 +38,8 @@ final class Tab: NSObject {
     private(set) var canGoForward = false
     /// Whether the page is scrolled away from its top.
     private(set) var isScrolled = false
+    /// Whether a video is playing in the page, as its script last said.
+    private(set) var playingVideo = false
     var lastShown = Date()
 
     private var pending: URL?
@@ -140,6 +142,7 @@ final class Tab: NSObject {
     func sleep() {
         guard let webView, !webView.isLoading else { return }
         pending = webView.url ?? url
+        playingVideo = false
         watching = []
         webView.removeFromSuperview()
         self.webView = nil
@@ -185,6 +188,7 @@ final class Tab: NSObject {
         host?.tabChanged(self, .scroll)
     }
     func focused(_ field: LoginField) { host?.focused(self, field: field) }
+    func mediaChanged(_ playing: Bool) { playingVideo = playing }
 
     func found(icon: URL) {
         guard let page = webView?.url else { return }
@@ -257,6 +261,7 @@ extension Tab: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         scrolled(false)
+        playingVideo = false
         guard let url = webView.url else { return }
         if !isPrivate { History.shared.record(url, title: webView.title, typed: typedNavigation) }
         typedNavigation = false

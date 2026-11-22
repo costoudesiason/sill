@@ -76,18 +76,19 @@ final class TabStripView: NSView {
         let leaving = items.filter { !ids.contains($0.tab.id) }
         items.removeAll { !ids.contains($0.tab.id) }
 
+        // A new tile is filled in as it's made, a tile whose tab changed was
+        // refreshed when it did (refresh(_:)), and a change of front restyles
+        // itself: nothing else needs redoing here.
+        let existing = Dictionary(uniqueKeysWithValues: items.map { (ObjectIdentifier($0.tab), $0) })
         var fresh: [TabItemView] = []
         items = browser.tabs.map { tab in
-            if let item = items.first(where: { $0.tab === tab }) { return item }
+            if let item = existing[ObjectIdentifier(tab)] { return item }
             let item = TabItemView(tab: tab, strip: self)
             addSubview(item)
             fresh.append(item)
             return item
         }
-        for item in items {
-            item.isFront = item.tab === browser.selected
-            item.refresh()
-        }
+        for item in items { item.isFront = item.tab === browser.selected }
 
         let frames = targetFrames()
         // Coming: start as a sliver at the left edge of its slot.
@@ -132,6 +133,12 @@ final class TabStripView: NSView {
     /// Selection is a state: it changes at once, as in any Mac list.
     func select(_ tab: Tab?) {
         for item in items { item.isFront = item.tab === tab }
+    }
+
+    /// Whether the tiles are the window's tabs, in order: then a new
+    /// selection is all that changed, and select(_:) is enough.
+    func matches(_ tabs: [Tab]) -> Bool {
+        items.count == tabs.count && zip(items, tabs).allSatisfy { $0.tab === $1 }
     }
 
     func prefsChanged() {
@@ -306,6 +313,12 @@ final class TabItemView: NSView {
 
     // MARK: content
 
+    /// The icon a page without one of its own gets: made once, not per refresh.
+    private static let globe = NSImage(systemSymbolName: "globe", accessibilityDescription: nil)?
+        .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
+    private static let privateIcon = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: nil)?
+        .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
+
     func refresh() {
         label.stringValue = tab.displayTitle
         toolTip = tab.url.map { "\(tab.displayTitle)\n\(Address.display($0))" } ?? tab.displayTitle
@@ -317,9 +330,7 @@ final class TabItemView: NSView {
             spinner.stopAnimation(nil)
             icon.isHidden = false
         }
-        icon.image = tab.favicon ?? NSImage(systemSymbolName: tab.isPrivate ? "hand.raised.fill" : "globe",
-                                            accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
+        icon.image = tab.favicon ?? (tab.isPrivate ? Self.privateIcon : Self.globe)
         icon.contentTintColor = tab.favicon == nil ? .secondaryLabelColor : nil
         restyle()
         needsLayout = true

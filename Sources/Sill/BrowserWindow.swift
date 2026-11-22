@@ -223,9 +223,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         let previous = selected
         // The page being left keeps its place in the window, under the new
         // one, until its video has floated off into Picture in Picture: a
-        // page taken out of the window first would have it cancelled.
+        // page taken out of the window first would have it cancelled. Only
+        // a page playing something is asked; any other leaves at once.
         var keep: WKWebView?
-        if previous !== tab, let previous, let old = previous.webView, Preferences.shared.autoPictureInPicture {
+        if previous !== tab, let previous, let old = previous.webView, Preferences.shared.autoPictureInPicture,
+           previous.playingVideo || Self.isPlayingAudio(old) {
             keep = old
             PictureInPicture.leave(previous) { [weak self, weak old, weak previous] floated in
                 guard let self else { return }
@@ -252,7 +254,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             pictured = nil
             PictureInPicture.return(to: tab)
         }
-        strip.sync(animated: animated)
+        // Clicks, ⌘1–9 and ⌃Tab only move the selection; a tab added or
+        // closed changes the row.
+        if strip.matches(tabs) { strip.select(tab) } else { strip.sync(animated: animated) }
         window?.title = tab.displayTitle
         updateNavigation()
         status.show(nil)
