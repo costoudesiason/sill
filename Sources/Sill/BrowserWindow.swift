@@ -440,6 +440,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.spare == nil, self.window?.isVisible == true else { return }
                 self.spare = SillWebView(frame: self.pageBounds, configuration: Web.configuration(private: self.isPrivate))
+                // Starts its web process now, not at Return: no page is loaded.
+                self.spare?.evaluateJavaScript("")
                 self.expect(Preferences.shared.engine.search(""))
             }
         } else {
