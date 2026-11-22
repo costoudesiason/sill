@@ -473,7 +473,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         let now = Date()
         for tab in tabs where tab !== selected && tab !== pictured {
             // A floating video may be muted, so not "playing audio": it counts anyway.
-            guard let webView = tab.webView, webView.superview == nil, now.timeIntervalSince(tab.lastShown) > after,
+            guard let webView = tab.webView, webView.window == nil, now.timeIntervalSince(tab.lastShown) > after,
                   webView.cameraCaptureState == .none, webView.microphoneCaptureState == .none,
                   webView.fullscreenState == .notInFullscreen, !Self.isPlayingAudio(webView)
             else { continue }
