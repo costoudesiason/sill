@@ -120,6 +120,15 @@ final class Tab: NSObject {
         self.pending = url
         super.init()
         favicon = Favicons.shared.cached(for: url)
+        // Made before the icons on disk were all read (a window being
+        // restored): its own comes once they are, not from a file read here.
+        if favicon == nil, url != nil {
+            Favicons.shared.whenPreloaded { [weak self] in
+                guard let self, self.favicon == nil, let icon = Favicons.shared.cached(for: self.url) else { return }
+                self.favicon = icon
+                self.host?.tabChanged(self, .icon)
+            }
+        }
     }
 
     var displayTitle: String {
