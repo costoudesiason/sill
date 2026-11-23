@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// ⌘T and ⌘L: one glass panel over the page with a field and a list, the
 /// way Spotlight floats over the desktop. ⌘T opens what you pick in a new
@@ -41,7 +42,12 @@ final class Palette: NSObject {
     private let footerGlass = NSGlassEffectContainerView()
     private let footerContent = FlippedView()
     private let pill = FooterPill()
-    private let settingsButton = NSButton()
+    private let settingsButton = GlassIconButton(symbol: "slider.horizontal.3", label: "Settings (⌘,)")
+    /// Settings in the card, in place of the field, list and footer, and the
+    /// glass X that turns it back: the same size as the settings button.
+    private var settingsHost: NSHostingView<PaletteSettingsView>?
+    private let backButton = GlassIconButton(symbol: "xmark", label: "Back (Esc)", weight: .semibold)
+    private(set) var showingSettings = false
 
     private(set) var isOpen = false
     private(set) var mode: Mode = .newTab
@@ -124,13 +130,6 @@ final class Palette: NSObject {
         scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 6, right: 0)
         content.addSubview(scroll)
 
-        settingsButton.bezelStyle = .glass
-        settingsButton.borderShape = .circle
-        settingsButton.controlSize = .large
-        settingsButton.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "Settings")?
-            .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
-        settingsButton.imagePosition = .imageOnly
-        settingsButton.toolTip = "Settings (⌘,)"
         settingsButton.target = self
         settingsButton.action = #selector(openSettings)
         pill.onPrimary = { [weak self] in self?.performSelected() }
@@ -142,7 +141,14 @@ final class Palette: NSObject {
         footerGlass.spacing = 8
         footer.addSubview(footerGlass)
         content.addSubview(footer)
+
+        backButton.target = self
+        backButton.action = #selector(closeSettings)
+        backButton.keyEquivalent = "\u{1b}"
+        backButton.isHidden = true
     }
+
+    @objc private func closeSettings() { showSettings(false) }
 
     // MARK: - opening and closing
 
@@ -171,6 +177,8 @@ final class Palette: NSObject {
             stage.addSubview(catcher)
             stage.addSubview(card)
         }
+        // Always opens on the search, whatever it was left showing.
+        if showingSettings { showSettings(false, animated: false) }
         let initial: String
         switch mode {
         case .newTab, .tabs: initial = ""
@@ -266,6 +274,7 @@ final class Palette: NSObject {
         scroll.frame = NSRect(x: 0, y: Self.fieldHeight, width: w, height: height - Self.fieldHeight - Self.footerHeight)
         footer.frame = NSRect(x: 0, y: height - Self.footerHeight, width: w, height: Self.footerHeight)
         layoutFooter()
+        if showingSettings { settingsHost?.frame = content.bounds; layoutBackButton() }
     }
 
     func stageResized(_ stage: NSView) {
@@ -491,9 +500,83 @@ final class Palette: NSObject {
 
     // MARK: - acting
 
-    @objc private func openSettings() {
-        close()
-        AppDelegate.shared.showSettings(nil)
+    @objc private func openSettings() { showSettings(true) }
+
+    /// The card turns to its settings (or back): what's there fades out as
+    /// the other slides in from the side it lives on, at the same size.
+    func showSettings(_ on: Bool, animated: Bool = true) {
+        guard on != showingSettings else { return }
+        showingSettings = on
+        let searchParts: [NSView] = [searchIcon, field, scroll, footer]
+        // A plain switch: only the settings' icons move.
+        let shift: CGFloat = 0
+        let duration: TimeInterval = 0
+        if on {
+            let host = settingsHost ?? NSHostingView(rootView: PaletteSettingsView(onChoose: { [weak self] choice, rect in
+                self?.choose(choice, at: rect)
+            }))
+            settingsHost = host
+            let rest = content.bounds
+            Motion.still {
+                host.frame = rest.offsetBy(dx: shift, dy: 0)
+                host.alphaValue = 0
+                backButton.alphaValue = 0
+            }
+            if host.superview !== content { content.addSubview(host) }
+            content.addSubview(backButton)
+            layoutBackButton()
+            host.isHidden = false
+            backButton.isHidden = false
+            // Keys go to the settings, never to the hidden field; Esc is the X's.
+            if content.window?.makeFirstResponder(host) != true { content.window?.makeFirstResponder(nil) }
+            Motion.animate(duration, {
+                host.animator().frame = rest
+                host.animator().alphaValue = 1
+                backButton.animator().alphaValue = 1
+                searchParts.forEach { $0.animator().alphaValue = 0 }
+            }, completion: { [weak self] in
+                guard let self, self.showingSettings else { return }
+                searchParts.forEach { $0.isHidden = true }
+            })
+        } else {
+            guard let host = settingsHost else { return }
+            searchParts.forEach { $0.isHidden = false }
+            content.window?.makeFirstResponder(field)
+            if let editor = field.currentEditor() { editor.selectedRange = NSRange(location: (field.stringValue as NSString).length, length: 0) }
+            Motion.animate(duration, {
+                host.animator().frame = content.bounds.offsetBy(dx: shift, dy: 0)
+                host.animator().alphaValue = 0
+                backButton.animator().alphaValue = 0
+                searchParts.forEach { $0.animator().alphaValue = 1 }
+            }, completion: { [weak self] in
+                guard let self, !self.showingSettings else { return }
+                host.removeFromSuperview()
+                self.backButton.isHidden = true
+            })
+        }
+    }
+
+    private func layoutBackButton() {
+        let size: CGFloat = 36
+        backButton.frame = NSRect(x: content.bounds.width - 12 - size, y: (Self.fieldHeight - size) / 2, width: size, height: size)
+    }
+
+    /// A choice in the settings opens Sill's glass menu under its value.
+    private func choose(_ choice: PaletteSettingsView.Choice, at rect: CGRect) {
+        guard let host = settingsHost, let window = host.window,
+              // A click on the value while its menu is up closes it, and only that.
+              GlassMenu.shouldOpen(from: host) else { return }
+        let prefs = Preferences.shared
+        let entries: [GlassMenu.Entry]
+        switch choice {
+        case .engine:
+            entries = SearchEngine.allCases.map { engine in
+                .item(GlassMenu.Item(title: engine.name, isOn: prefs.engine == engine) { prefs.engine = engine })
+            }
+        }
+        // The rect is in the settings' own (top-left) space: under its right end.
+        let corner = host.convert(NSPoint(x: rect.maxX - 14, y: rect.maxY - 4), to: nil)
+        GlassMenu(title: nil, entries: entries, searchable: false).show(in: window, at: corner, alignRight: true, from: host)
     }
 
     /// ⌘K or the pill's Actions: what else can be done with the chosen row.
@@ -741,6 +824,22 @@ final class PaletteField: NSTextField {
             return true
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    /// Two spaces stay two spaces: the system's "add full stop with double
+    /// space" would turn the end of an address into "site.com." and fail it.
+    @objc(textView:shouldChangeTextInRange:replacementString:)
+    func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
+        if replacementString == ". ", range.length == 1, (textView.string as NSString).substring(with: range) == " ",
+           NSApp.currentEvent?.type == .keyDown, NSApp.currentEvent?.characters == " " {
+            textView.insertText(" ", replacementRange: NSRange(location: range.upperBound, length: 0))
+            return false
+        }
+        // NSTextField answers this itself, but not where Swift can call it.
+        let selector = NSSelectorFromString("textView:shouldChangeTextInRange:replacementString:")
+        guard let inherited = class_getMethodImplementation(NSTextField.self, selector) else { return true }
+        typealias Answer = @convention(c) (AnyObject, Selector, NSTextView, NSRange, NSString?) -> Bool
+        return unsafeBitCast(inherited, to: Answer.self)(self, selector, textView, range, replacementString as NSString?)
     }
 }
 

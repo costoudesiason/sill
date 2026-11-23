@@ -295,6 +295,10 @@ enum Address {
             return URL(string: text) ?? URL(string: text.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? text)
         }
         guard !text.contains(" ") else { return nil }
+        // [::1]:8080/path: an IPv6 address, which only reads as one in brackets.
+        if lower.hasPrefix("["), let close = lower.firstIndex(of: "]"), lower[lower.index(after: lower.startIndex)..<close].contains(":"),
+           lower[lower.index(after: lower.startIndex)..<close].allSatisfy({ $0.isHexDigit || $0 == ":" || $0 == "." }),
+           let url = URL(string: "http://" + text), url.host() != nil { return url }
         // host[:port][/path]
         let hostPart = lower.split(separator: "/", maxSplits: 1).first.map(String.init) ?? lower
         let hostOnly = hostPart.split(separator: ":").first.map(String.init) ?? hostPart

@@ -110,6 +110,8 @@ enum Web {
         configuration.preferences.isTextInteractionEnabled = true
         configuration.allowsAirPlayForMediaPlayback = true
         configuration.defaultWebpagePreferences.preferredContentMode = .desktop
+        // A page opens windows when you click, not on its own.
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         // Pages out of sight are left to WebKit's default, which suspends a
         // page once it is idle and in no window: a tab behind another costs
         // nothing. A page playing sound or video, or still loading, isn't
@@ -143,14 +145,98 @@ final class SillWebView: WKWebView {
         return became
     }
 
+    /// False once WebKit has found the page's process isn't answering
+    /// (a script that never ends).
+    var processIsResponsive: Bool {
+        let selector = NSSelectorFromString("_webProcessIsResponsive")
+        guard responds(to: selector) else { return true }
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Bool
+        return unsafeBitCast(method(for: selector), to: Getter.self)(self, selector)
+    }
+
+    /// Ends the page's process, as a crash would. By its pid: a process
+    /// that isn't answering doesn't take WebKit's own request to stop.
+    func endProcess() {
+        let selector = NSSelectorFromString("_webProcessIdentifier")
+        guard responds(to: selector) else { return }
+        typealias Getter = @convention(c) (AnyObject, Selector) -> pid_t
+        let pid = unsafeBitCast(method(for: selector), to: Getter.self)(self, selector)
+        if pid > 0 { kill(pid, SIGKILL) }
+    }
+
+    /// A page that isn't answering would swallow ⌘W, ⌘T and ⌘R for good:
+    /// they go to the menu instead.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard processIsResponsive else { return false }
+        let taken = super.performKeyEquivalent(with: event)
+        unanswered = taken ? event : nil
+        return taken
+    }
+
+    /// The last shortcut handed to the page, which hands it back if it has
+    /// no use for it. A page that hangs never does.
+    private var unanswered: NSEvent?
+
+    /// WebKit has found the page isn't answering: the shortcut it was just
+    /// given (within the few seconds that takes to notice) goes to the menu.
+    func processStoppedAnswering() {
+        guard let event = unanswered else { return }
+        unanswered = nil
+        if ProcessInfo.processInfo.systemUptime - event.timestamp < 10, window?.isKeyWindow == true {
+            NSApp.mainMenu?.performKeyEquivalent(with: event)
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { tab?.pageShown() }
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        if window != nil { tab?.pageShown() }
+    }
+
     /// "New Window" reads "New Tab" here: that's what it does.
+    /// The page's right-click menu is Sill's glass one: WebKit's items, in
+    /// the same order, run as WebKit runs them. Items that open a submenu
+    /// (Share, Services, Speech) aren't offered; the native menu doesn't show.
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         for item in menu.items {
             item.title = item.title.replacingOccurrences(of: "New Window", with: "New Tab")
             if item.identifier?.rawValue == "WKMenuItemIdentifierDownloadLinkedFile" { item.title = "Download Linked File" }
         }
         super.willOpenMenu(menu, with: event)
+        guard let window, GlassMenu.isEnabledForPages else { return }
+        let kept = menu.items.filter { $0.isSeparatorItem || ($0.submenu == nil && !$0.isHidden && $0.action != nil) }
+        let copy = NSMenu()
+        for item in kept { menu.removeItem(item); copy.addItem(item) }
+        menu.removeAllItems()
+        // macOS adds its Services item to any menu left: not to this one.
+        menu.allowsContextMenuPlugIns = false
+        let entries = GlassMenu.entries(from: copy, symbols: Self.symbols)
+        guard !entries.isEmpty else { return }
+        let point = event.locationInWindow
+        // After WebKit has finished with its own (now empty) menu.
+        DispatchQueue.main.async { [weak window] in
+            guard let window else { return }
+            withExtendedLifetime(copy) {
+                GlassMenu(title: nil, entries: entries, searchable: entries.count > 8).show(in: window, at: point, from: nil)
+            }
+        }
     }
+
+    private static let symbols: [String: String] = [
+        "Open Link in New Tab": "plus.square.on.square", "Open Link": "arrow.up.right.square",
+        "Download Linked File": "arrow.down.circle", "Copy Link": "link", "Copy": "doc.on.doc",
+        "Open Image in New Tab": "photo.on.rectangle", "Save Image As…": "square.and.arrow.down",
+        "Copy Image": "photo", "Copy Image Address": "link", "Back": "chevron.backward", "Forward": "chevron.forward",
+        "Reload": "arrow.clockwise", "Inspect Element": "hammer", "Look Up": "character.book.closed",
+        "Paste": "doc.on.clipboard", "Cut": "scissors", "Select All": "selection.pin.in.out",
+        "Search with Google": "magnifyingglass", "Translate": "translate", "Download Image": "arrow.down.circle",
+        "Download Video": "arrow.down.circle", "Copy Video Address": "link", "Show Controls": "slider.horizontal.below.rectangle",
+        "Enter Full Screen": "arrow.up.left.and.arrow.down.right", "Enter Picture in Picture": "pip.enter",
+    ]
 
     /// The page being left stays over the one coming in until that has drawn;
     /// for that moment it is only a picture, and clicks go to the new page.
@@ -159,6 +245,21 @@ final class SillWebView: WKWebView {
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
         outgoing = false
+    }
+
+    /// On screen: in a window and not put aside (see `park`).
+    var isShown: Bool { window != nil && !isHidden }
+
+    /// Put aside where it is, hidden, rather than taken out of the window.
+    /// WebKit blanks a page that comes back into a window until it has drawn
+    /// again, and holds the app still for that drawing; a page that was only
+    /// hidden still has its last frame and is simply shown.
+    func park() {
+        guard !isHidden else { return }
+        isHidden = true
+        outgoing = false
+        // Not resized with the window while it's away; sized when shown.
+        autoresizingMask = []
     }
 
     // MARK: the first frame

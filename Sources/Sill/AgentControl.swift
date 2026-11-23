@@ -275,7 +275,8 @@ enum AgentCommands {
 
         case "tabs.close":
             let (tab, browser) = try tab(args)
-            browser.close(tab)
+            // An agent's close is its own decision: the page isn't asked.
+            browser.closeNow(tab)
             return ["closed": tab.id.uuidString]
 
         case "page.navigate":
@@ -327,7 +328,7 @@ enum AgentCommands {
         case "page.click":
             let (view, tab, browser) = try webView(args)
             let target = try await locate(args, in: view)
-            if view.window != nil, tab === browser.selected || browser.split?.contains(tab) == true, args["real"] as? Bool ?? true {
+            if view.window != nil, !view.isHidden, tab === browser.selected || browser.split?.contains(tab) == true, args["real"] as? Bool ?? true {
                 realClick(at: target.point, in: view, double: args["double"] as? Bool ?? false)
             } else {
                 _ = try await evaluate("return window.__sillAgent.click(ref)", in: view, world: Web.world, arguments: ["ref": target.ref])
