@@ -130,7 +130,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return answer.map { $0 ? .terminateNow : .terminateCancel } ?? .terminateLater
     }
 
+    private var terminated = false
+
     func applicationWillTerminate(_ notification: Notification) {
+        // Once: Chromium says so again at the very end of its shutdown, when
+        // every window has closed and there is nothing left to save.
+        guard !terminated else { return }
+        terminated = true
         session.flush(sessionState())
         History.shared.flush()
         Downloads.shared.discardUnfinished()
@@ -401,4 +407,5 @@ enum MainMenu {
         return item
     }
 }
+
 

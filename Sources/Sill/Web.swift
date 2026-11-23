@@ -908,6 +908,9 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
     private weak var panel: NSWindow?
     private weak var host: CALayer?
     private var opening: CFRunLoopObserver?
+    /// Its page's window covered by another app: Chromium hides the page,
+    /// and a hidden page gives no frames. It is shown again.
+    private var covered: NSObjectProtocol?
     private var resized: NSObjectProtocol?
     /// AVKit's flight in is over: the float shows.
     private var landed = false
@@ -953,6 +956,14 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
         controller.delegate = self
         self.controller = controller
         tab.webView?.floating = true
+        covered = NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: window,
+                                                         queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                // After Chromium has had its say on the same notification.
+                DispatchQueue.main.async { self?.tab?.webView?.insistShown() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self?.tab?.webView?.insistShown() }
+            }
+        }
         // Floats once AVKit has frames to size its window by (started with
         // none, it works its size out as NaN and AppKit stops the app); if
         // it never can, the page is let go.
@@ -989,6 +1000,7 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
         possible = nil
         landed = false
         untrack()
+        if let covered { NotificationCenter.default.removeObserver(covered); self.covered = nil }
         controller?.delegate = nil
         if controller?.isPictureInPictureActive == true { controller?.stopPictureInPicture() }
         controller = nil
@@ -1289,3 +1301,4 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
         }
     }
 }
+

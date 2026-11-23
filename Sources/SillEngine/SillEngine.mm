@@ -70,9 +70,8 @@ static NSString* S(const CefString& s) { return [NSString stringWithUTF8String:s
 }
 - (void)finishTerminating {
   terminating_ = YES;
+  // The delegate hears it as an observer of the notification, as AppKit set it up.
   [[NSNotificationCenter defaultCenter] postNotificationName:NSApplicationWillTerminateNotification object:self];
-  if ([self.delegate respondsToSelector:@selector(applicationWillTerminate:)])
-    [self.delegate applicationWillTerminate:[NSNotification notificationWithName:NSApplicationWillTerminateNotification object:self]];
   [SEEngine quit];
 }
 @end
@@ -430,6 +429,11 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   if (hidden_ == hidden) return;
   hidden_ = hidden;
   if (browser_) browser_->GetHost()->WasHidden(hidden);
+}
+
+- (void)insistShown {
+  hidden_ = NO;
+  if (browser_) browser_->GetHost()->WasHidden(false);
 }
 
 - (BOOL)audioMuted { return muted_; }

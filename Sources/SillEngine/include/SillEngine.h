@@ -93,6 +93,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Whether the page is out of sight (Chromium stops drawing it, and lets
 /// its timers slow down).
 @property(nonatomic) BOOL pageHidden;
+/// Shown again, whatever Chromium decided (a window covered by another app hides its pages).
+- (void)insistShown;
 @property(nonatomic) BOOL audioMuted;
 
 - (void)loadURL:(NSURL *)url;
