@@ -29,6 +29,9 @@ final class TopBar: NSView {
     override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { true }
 
+    /// Room kept on the left for a window's traffic lights (popups only).
+    var leadingInset: CGFloat = 0 { didSet { if leadingInset != oldValue { needsLayout = true } } }
+
     init(strip: TabStripView) {
         self.strip = strip
         super.init(frame: .zero)
@@ -78,7 +81,7 @@ final class TopBar: NSView {
         container.frame = bounds
         containerContent.frame = container.bounds
 
-        navGlass.frame = NSRect(x: Self.margin, y: y, width: w * 2, height: c)
+        navGlass.frame = NSRect(x: Self.margin + leadingInset, y: y, width: w * 2, height: c)
         navContent.frame = navGlass.bounds
         back.frame = NSRect(x: 0, y: 0, width: w, height: c)
         forward.frame = NSRect(x: w, y: 0, width: w, height: c)

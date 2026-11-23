@@ -135,9 +135,21 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         window.isOpaque = true
         window.backgroundColor = .windowBackgroundColor
         if isPrivate { window.appearance = NSAppearance(named: .darkAqua) }
-        // No traffic lights: ⌘W, ⇧⌘W, ⌘M and full screen stay in the menus.
-        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            window.standardWindowButton(kind)?.isHidden = true
+        if popup {
+            // A small window a page opened ("Sign in with…") has its traffic
+            // lights, as any panel does: there's no tab row to close it from.
+            // An empty unified toolbar makes the title bar the bar's height,
+            // so macOS centres them in it.
+            let toolbar = NSToolbar(identifier: "popup")
+            toolbar.showsBaselineSeparator = false
+            toolbar.allowsUserCustomization = false
+            window.toolbar = toolbar
+            window.toolbarStyle = .unified
+        } else {
+            // No traffic lights: ⌘W, ⇧⌘W, ⌘M and full screen stay in the menus.
+            for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                window.standardWindowButton(kind)?.isHidden = true
+            }
         }
         super.init(window: window)
         window.delegate = self
@@ -279,6 +291,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     var topInset: CGFloat { TopBar.height }
 
     private func stageLaidOut() {
+        // Back and forward start after the traffic lights where there are some.
+        if isPopup, let window, let zoom = window.standardWindowButton(.zoomButton), !zoom.isHidden,
+           !window.styleMask.contains(.fullScreen) {
+            bar.leadingInset = zoom.convert(zoom.bounds, to: nil).maxX + 6
+        } else {
+            bar.leadingInset = 0
+        }
         top.frame = NSRect(x: 0, y: 0, width: stage.bounds.width, height: TopBar.height)
         bar.frame = top.bounds
         // The page starts below the bar: nothing goes behind the glass.
