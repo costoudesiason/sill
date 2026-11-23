@@ -61,7 +61,11 @@ final class Tab: NSObject {
     private(set) var isScrolled = false
     /// Whether a video is playing in the page, as its script last said.
     private(set) var playingVideo = false
-    var lastShown = Date() { didSet { warmedUnseen = false } }
+    var lastShown = Date() { didSet { warmedUnseen = false; seenAt = lastShown } }
+    /// When it was last in front, kept across a relaunch in the session, for
+    /// which restored tabs to load ahead. Not lastShown, which starts afresh
+    /// at launch so a tab woken then isn't put back to sleep straight away.
+    var seenAt: Date?
     /// Woken ahead for being next to the tab in front, and not looked at
     /// since: once it has slept again it isn't woken that way a second time,
     /// or each switch next door would load it afresh only for it to sleep.

@@ -121,6 +121,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// What the spare is already loading, guessed from the palette's top hit.
     private var prerendered: URL?
     private var prerenderTimer: Timer?
+    /// Restored tabs to load ahead once the ones next door have, latest seen first.
+    private var warmAfterRestore: [Tab] = []
 
     init(isPrivate: Bool, popup: Bool = false) {
         self.isPrivate = isPrivate
@@ -433,8 +435,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             guard let url = URL(string: state.url) else { return nil }
             let tab = Tab(url: url, title: state.title, isPrivate: isPrivate)
             tab.host = self
+            tab.seenAt = state.shown.map { Date(timeIntervalSince1970: $0) }
             return tab
         }
+        warmAfterRestore = tabs.filter { $0.seenAt != nil }.sorted { $0.seenAt! > $1.seenAt! }
         strip.sync(animated: false)
         if tabs.indices.contains(selectedIndex) { select(tabs[selectedIndex]) } else if let first = tabs.first { select(first) }
     }
@@ -1505,9 +1509,50 @@ extension BrowserWindowController {
                 }
                 if n == 0 { wake() } else { Frame.afterCommit(wake) }
             }
+            // Once, with the first tab shown after a relaunch.
+            if !self.warmAfterRestore.isEmpty {
+                self.warmRecent(self.warmAfterRestore)
+                self.warmAfterRestore = []
+            }
         }
         neighbourWarming = work
         DispatchQueue.main.asyncAfter(deadline: .now() + pause, execute: work)
+    }
+
+    /// After a relaunch the tabs either side of the one in front aren't the
+    /// only ones likely to be clicked: up to two more are loaded ahead, the
+    /// ones looked at last before quitting, one at a time once nothing in
+    /// the window is loading, and only while the Mac has 3 GB to spare. Each
+    /// is a web process of 100 to 400 MB once loaded (measured: Wikipedia
+    /// 111, apple.com 146, BBC News 402, the New York Times 441), and goes
+    /// back to sleep, as any tab does, if it isn't looked at.
+    private func warmRecent(_ candidates: [Tab], waited: TimeInterval = 0, warmed: Int = 0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            let left = candidates.filter { tab in tab.webView == nil && !tab.warmedUnseen && self.tabs.contains { $0 === tab } }
+            guard warmed < 2, let next = left.first else { return }
+            if self.tabs.contains(where: { $0.isLoading }) {
+                guard waited < 20 else { return }
+                return self.warmRecent(left, waited: waited + 1, warmed: warmed)
+            }
+            guard Self.memoryToSpare else { return }
+            self.warm(next)
+            next.warmedUnseen = next.webView != nil
+            self.warmRecent(Array(left.dropFirst()), warmed: warmed + 1)
+        }
+    }
+
+    /// Free, inactive and purgeable memory: what the Mac can give a page
+    /// without pushing anything else out.
+    private static var memoryToSpare: Bool {
+        var info = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count) }
+        }
+        guard result == KERN_SUCCESS else { return false }
+        let pages = UInt64(info.free_count) + UInt64(info.inactive_count) + UInt64(info.purgeable_count)
+        return pages * UInt64(getpagesize()) > 3 << 30
     }
 
     /// A click into the other half of a split makes that page the one in

@@ -5,6 +5,8 @@ import WebKit
 struct SessionTab: Codable {
     var url: String
     var title: String
+    /// When it was last in front (seconds since 1970), if ever.
+    var shown: Double?
 }
 
 struct SessionWindow: Codable {
@@ -194,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         browsers.filter { !$0.isPrivate && !$0.isPopup }.map { browser in
             let tabs = browser.tabs.compactMap { tab -> SessionTab? in
                 guard let url = tab.webView?.url ?? tab.url, url.scheme?.hasPrefix("http") == true else { return nil }
-                return SessionTab(url: url.absoluteString, title: tab.title)
+                return SessionTab(url: url.absoluteString, title: tab.title, shown: tab.seenAt?.timeIntervalSince1970)
             }
             let selected = browser.tabs.firstIndex { $0 === browser.selected } ?? 0
             return SessionWindow(tabs: tabs, selected: selected, frame: browser.window?.frameDescriptor)
