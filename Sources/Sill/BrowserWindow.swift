@@ -665,15 +665,28 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if olderThan != nil, !paletteOpen { spare = nil }
         guard Preferences.shared.sleepsTabs else { return }
         let after = olderThan ?? TimeInterval(max(5, Preferences.shared.sleepAfterMinutes) * 60)
-        let now = Date()
-        for tab in tabs where tab !== selected && tab !== pictured {
-            // A floating video may be muted, so not "playing audio": it counts anyway.
-            guard let webView = tab.webView, !webView.isShown, now.timeIntervalSince(tab.lastShown) > after,
-                  webView.cameraCaptureState == .none, webView.microphoneCaptureState == .none,
-                  webView.fullscreenState == .notInFullscreen, !Self.isPlayingAudio(webView)
-            else { continue }
-            tab.sleepUnlessTyping()
+        // One at a time, a moment apart, each asked again when its turn
+        // comes: a page let go costs the main thread a few milliseconds (its
+        // picture, its history, its view taken down), and a window of tabs
+        // going at once, as memory runs short, was a hitch of its own.
+        var turn: TimeInterval = 0
+        for tab in tabs where mayNap(tab, after: after) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + turn) { [weak self, weak tab] in
+                guard let self, let tab, self.tabs.contains(where: { $0 === tab }), self.mayNap(tab, after: after) else { return }
+                tab.sleepUnlessTyping()
+            }
+            turn += 0.15
         }
+    }
+
+    private func mayNap(_ tab: Tab, after: TimeInterval) -> Bool {
+        // A floating video may be muted, so not "playing audio": it counts anyway.
+        guard tab !== selected, tab !== pictured, let webView = tab.webView, !webView.isShown,
+              Date().timeIntervalSince(tab.lastShown) > after,
+              webView.cameraCaptureState == .none, webView.microphoneCaptureState == .none,
+              webView.fullscreenState == .notInFullscreen, !Self.isPlayingAudio(webView)
+        else { return false }
+        return true
     }
 
     /// Stops everything a page is playing, ends its picture in picture, and
@@ -1350,11 +1363,17 @@ extension BrowserWindowController {
         neighbourWarming?.cancel()
         let work = DispatchWorkItem { [weak self, weak tab] in
             guard let self, let tab, tab === self.selected, let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
-            for i in [index - 1, index + 1] where self.tabs.indices.contains(i) {
-                let neighbour = self.tabs[i]
-                guard neighbour.webView == nil, !neighbour.warmedUnseen else { continue }
-                self.warm(neighbour)
-                neighbour.warmedUnseen = neighbour.webView != nil
+            // Each on a turn of its own: making a web view and starting its
+            // load holds the main thread a few milliseconds, two in a row twice that.
+            let neighbours = [index - 1, index + 1].filter { self.tabs.indices.contains($0) }.map { self.tabs[$0] }
+            for (n, neighbour) in neighbours.enumerated() {
+                let wake = { [weak self, weak neighbour, weak tab] in
+                    guard let self, let neighbour, let tab, tab === self.selected,
+                          neighbour.webView == nil, !neighbour.warmedUnseen else { return }
+                    self.warm(neighbour)
+                    neighbour.warmedUnseen = neighbour.webView != nil
+                }
+                if n == 0 { wake() } else { Frame.afterCommit(wake) }
             }
         }
         neighbourWarming = work
