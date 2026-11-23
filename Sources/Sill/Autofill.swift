@@ -80,7 +80,7 @@ enum Autofill {
         return item
     }
 
-    private static func show(_ menu: NSMenu, under field: LoginField, in webView: WKWebView, top: CGFloat) {
+    private static func show(_ menu: NSMenu, under field: LoginField, in webView: SillWebView, top: CGFloat) {
         let zoom = webView.pageZoom * webView.magnification
         var point = NSPoint(x: field.rect.minX * zoom, y: top + field.rect.maxY * zoom + 4)
         if !webView.isFlipped { point.y = webView.bounds.height - point.y }
@@ -88,12 +88,12 @@ enum Autofill {
         menu.popUp(positioning: nil, at: point, in: webView)
     }
 
-    private static func fill(user: String, password: String, in webView: WKWebView) {
+    private static func fill(user: String, password: String, in webView: SillWebView) {
         webView.callAsyncJavaScript("return window.__sillFill(user, password)", arguments: ["user": user, "password": password],
                                     in: nil, in: Web.world) { _ in }
     }
 
-    private static func fillCode(_ code: String, in webView: WKWebView) {
+    private static func fillCode(_ code: String, in webView: SillWebView) {
         webView.callAsyncJavaScript("return window.__sillFillCode(code)", arguments: ["code": code],
                                     in: nil, in: Web.world) { _ in }
     }

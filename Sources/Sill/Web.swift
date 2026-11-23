@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+@_exported import SillEngine
 
 /// What every page shares: one content controller with Sill's scripts, run
 /// in a world of their own the page can't see or tamper with, and one router
@@ -182,42 +183,17 @@ enum Web {
         for feature in smoothFeatures { call(preferences, set, true, feature) }
     }
 
+    /// What a page view is made with: on Chromium only whether it's private
+    /// counts. Two kept, made once, so no WebKit machinery starts for them.
     static func configuration(private isPrivate: Bool) -> WKWebViewConfiguration {
-        let configuration = WKWebViewConfiguration()
-        configuration.processPool = pool
-        configuration.userContentController = controller
-        configuration.websiteDataStore = isPrivate ? privateStore : .default()
-        configuration.applicationNameForUserAgent = applicationName
-        configuration.preferences.isElementFullscreenEnabled = true
-        smoothScrolling(configuration.preferences)
-        configuration.preferences.isFraudulentWebsiteWarningEnabled = true
-        configuration.preferences.isTextInteractionEnabled = true
-        configuration.allowsAirPlayForMediaPlayback = true
-        configuration.defaultWebpagePreferences.preferredContentMode = .desktop
-        // A page opens windows when you click, not on its own.
-        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
-        // Pages out of sight are left to WebKit's default, which suspends a
-        // page once it is idle and in no window: a tab behind another costs
-        // nothing. A page playing sound or video, or still loading, isn't
-        // idle, so background audio and picture in picture carry on.
-        PictureInPicture.allow(configuration.preferences)
-        backspaceStays(configuration.preferences)
-        // A page out of sight has its timers held to one tick a second; this
-        // lets the gap grow the longer it stays hidden, as Safari does. Each
-        // tick that touches the page otherwise wakes the app to draw nothing.
-        set(configuration.preferences, "_setHiddenPageDOMTimerThrottlingAutoIncreases:", true)
-        // A page's own hints (<link rel="dns-prefetch">, which sites use for
-        // the servers their images and scripts come from) and the sites its
-        // links go to are looked up ahead, so neither waits on a name lookup.
-        // Off in WebKit unless asked for; kept off in private windows, where
-        // a page shouldn't learn the network anything it wasn't asked for.
-        if !isPrivate { set(configuration.preferences, "_setDNSPrefetchingEnabled:", true) }
-        // WebKit's own wait for a page put back in the window to draw is
-        // left on: without it a page that hasn't drawn since it was away
-        // showed its empty (black) layer, and a still page might not draw
-        // again. The page being left stays on top until then (placePages).
-        return configuration
+        isPrivate ? privateMarker : normalMarker
     }
+    private static let normalMarker = WKWebViewConfiguration()
+    private static let privateMarker: WKWebViewConfiguration = {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        return configuration
+    }()
 
     /// A WebKit setting outside the public framework, if this WebKit has it.
     private static func set(_ preferences: WKPreferences, _ name: String, _ value: Bool) {
@@ -229,274 +205,174 @@ enum Web {
 }
 
 /// The web view, knowing which tab it belongs to.
-final class SillWebView: WKWebView {
+/// A tab's page: Chromium (SillEngine) behind the members Sill used on
+/// WebKit's view, so the rest of Sill reads the same. What WebKit needed
+/// help with and Chromium does itself (a first frame held back, pages drawn
+/// ahead, a hung process ended by hand) is kept as no-ops.
+final class SillWebView: SEWebView {
     weak var tab: Tab?
 
-    /// Clicking into one half of a split brings that half's tab to the front.
-    override func becomeFirstResponder() -> Bool {
-        let became = super.becomeFirstResponder()
-        if became, let tab, let host = tab.host as? BrowserWindowController { host.paneFocused(tab) }
-        return became
+    /// Made for a WebKit configuration, as before: only whether it's private counts now.
+    convenience init(frame: NSRect, configuration: WKWebViewConfiguration) {
+        self.init(frame: frame, private: !configuration.websiteDataStore.isPersistent)
     }
 
-    /// False once WebKit has found the page's process isn't answering
-    /// (a script that never ends).
-    var processIsResponsive: Bool {
-        let selector = NSSelectorFromString("_webProcessIsResponsive")
-        guard responds(to: selector) else { return true }
-        typealias Getter = @convention(c) (AnyObject, Selector) -> Bool
-        return unsafeBitCast(method(for: selector), to: Getter.self)(self, selector)
-    }
-
-    /// Ends the page's process, as a crash would. By its pid: a process
-    /// that isn't answering doesn't take WebKit's own request to stop.
-    func endProcess() {
-        let selector = NSSelectorFromString("_webProcessIdentifier")
-        guard responds(to: selector) else { return }
-        typealias Getter = @convention(c) (AnyObject, Selector) -> pid_t
-        let pid = unsafeBitCast(method(for: selector), to: Getter.self)(self, selector)
-        if pid > 0 { kill(pid, SIGKILL) }
-    }
-
-    /// A page that isn't answering would swallow ⌘W, ⌘T and ⌘R for good:
-    /// they go to the menu instead.
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard processIsResponsive else { return false }
-        let taken = super.performKeyEquivalent(with: event)
-        unanswered = taken ? event : nil
-        return taken
-    }
-
-    /// The last shortcut handed to the page, which hands it back if it has
-    /// no use for it. A page that hangs never does.
-    private var unanswered: NSEvent?
-
-    /// WebKit has found the page isn't answering: the shortcut it was just
-    /// given (within the few seconds that takes to notice) goes to the menu.
-    func processStoppedAnswering() {
-        guard let event = unanswered else { return }
-        unanswered = nil
-        if ProcessInfo.processInfo.systemUptime - event.timestamp < 10, window?.isKeyWindow == true {
-            NSApp.mainMenu?.performKeyEquivalent(with: event)
-        }
-    }
+    // Chromium answers for its own processes.
+    var processIsResponsive: Bool { true }
+    func endProcess() { reload() }
+    func processStoppedAnswering() {}
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        pageHidden = !isShown
         if isShown { tab?.pageShown() }
     }
-
     override func viewDidUnhide() {
         super.viewDidUnhide()
+        pageHidden = !isShown
         if isShown { tab?.pageShown() }
     }
-
-    /// "New Window" reads "New Tab" here: that's what it does.
-    /// The page's right-click menu is Sill's glass one: WebKit's items, in
-    /// the same order, run as WebKit runs them. Items that open a submenu
-    /// (Share, Services, Speech) aren't offered; the native menu doesn't show.
-    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
-        for item in menu.items {
-            item.title = item.title.replacingOccurrences(of: "New Window", with: "New Tab")
-            if item.identifier?.rawValue == "WKMenuItemIdentifierDownloadLinkedFile" { item.title = "Download Linked File" }
-        }
-        super.willOpenMenu(menu, with: event)
-        guard let window, GlassMenu.isEnabledForPages else { return }
-        let kept = menu.items.filter { $0.isSeparatorItem || ($0.submenu == nil && !$0.isHidden && $0.action != nil) }
-        let copy = NSMenu()
-        for item in kept { menu.removeItem(item); copy.addItem(item) }
-        menu.removeAllItems()
-        // macOS adds its Services item to any menu left: not to this one.
-        menu.allowsContextMenuPlugIns = false
-        let entries = GlassMenu.entries(from: copy, symbols: Self.symbols)
-        guard !entries.isEmpty else { return }
-        let point = event.locationInWindow
-        // After WebKit has finished with its own (now empty) menu.
-        DispatchQueue.main.async { [weak window] in
-            guard let window else { return }
-            withExtendedLifetime(copy) {
-                GlassMenu(title: nil, entries: entries, searchable: entries.count > 8).show(in: window, at: point, from: nil)
-            }
-        }
+    override func viewDidHide() {
+        super.viewDidHide()
+        pageHidden = true
     }
-
-    private static let symbols: [String: String] = [
-        "Open Link in New Tab": "plus.square.on.square", "Open Link": "arrow.up.right.square",
-        "Download Linked File": "arrow.down.circle", "Copy Link": "link", "Copy": "doc.on.doc",
-        "Open Image in New Tab": "photo.on.rectangle", "Save Image As…": "square.and.arrow.down",
-        "Copy Image": "photo", "Copy Image Address": "link", "Back": "chevron.backward", "Forward": "chevron.forward",
-        "Reload": "arrow.clockwise", "Inspect Element": "hammer", "Look Up": "character.book.closed",
-        "Paste": "doc.on.clipboard", "Cut": "scissors", "Select All": "selection.pin.in.out",
-        "Search with Google": "magnifyingglass", "Translate": "translate", "Download Image": "arrow.down.circle",
-        "Download Video": "arrow.down.circle", "Copy Video Address": "link", "Show Controls": "slider.horizontal.below.rectangle",
-        "Enter Full Screen": "arrow.up.left.and.arrow.down.right", "Enter Picture in Picture": "pip.enter",
-    ]
 
     /// The page being left stays over the one coming in until that has drawn;
     /// for that moment it is only a picture, and clicks go to the new page.
     var outgoing = false
-    override func hitTest(_ point: NSPoint) -> NSView? { outgoing || drawingAhead ? nil : super.hitTest(point) }
+    override func hitTest(_ point: NSPoint) -> NSView? { outgoing ? nil : super.hitTest(point) }
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
         outgoing = false
     }
 
-    /// On screen: in a window and not put aside (see `park`), and not only
-    /// drawing out of sight under the page in front (see `drawingAhead`).
-    var isShown: Bool { window != nil && !isHidden && !drawingAhead }
+    var isShown: Bool { window != nil && !isHidden }
 
-    /// Put aside where it is, hidden, rather than taken out of the window.
-    /// WebKit blanks a page that comes back into a window until it has drawn
-    /// again, and holds the app still for that drawing; a page that was only
-    /// hidden still has its last frame and is simply shown.
+    /// Put aside where it is, hidden: Chromium stops drawing it.
     func park() {
-        drawingAhead = false
         guard !isHidden else { return }
         isHidden = true
         outgoing = false
-        // Not resized with the window while it's away; sized when shown.
         autoresizingMask = []
     }
 
-    // MARK: the first frame
-
-    /// A web view that has never drawn is opaque white: a flash of it between
-    /// opening a tab and the page arriving, worst in a dark window. So a fresh
-    /// view starts unseen, over the window's own colour, and comes in once
-    /// WebKit says there is something on it worth seeing.
-    private var held = false
-    /// Has been in a window before, so it has a page to draw the moment it's back.
     var shownBefore = false
-    /// Laid out a page while in no window (loaded behind another tab, ahead
-    /// in the palette, or claude.ai kept ready): it has something to draw but
-    /// hasn't drawn it, which takes WebKit a few frames once it's in the
-    /// window (50 to 150 ms measured for BBC News and Wikipedia). Its first
-    /// showing comes in under the page being left, as a page shown before
-    /// does (placePages), rather than blank until then.
     var laidOutUnseen = false
-
-    // MARK: drawn ahead
-
-    /// In the window under the page in front, so WebKit draws it, though
-    /// no one sees it (BrowserWindowController.drawAhead): a page put back
-    /// later has that frame and is up in a frame or two, where one never
-    /// drawn took 100 to 200 ms (measured, median of three, after ten
-    /// seconds away: Wikipedia 113 against 66, GitHub 164 against 41,
-    /// apple.com 148 against 29). Not shown for anything else: its dialogs
-    /// wait, and it takes no clicks.
     private(set) var drawingAhead = false
-    /// Its sound and video held back since it went into the window unseen.
-    /// A page in a window may start media and one in none can't, so a page
-    /// never looked at would otherwise be heard, or have its video run on,
-    /// from behind the one in front. Muted alone, a video ran on silently
-    /// (5.8 s in by the time it was shown); suspended as well, it hadn't
-    /// started, and started at once when shown (measured).
-    private var mediaHeld = false
-    private var mutedBefore: UInt = 0
-
-    /// Into the window unseen: media held, out of reach of clicks and dialogs.
-    func startDrawingAhead() {
-        drawingAhead = true
-        holdMedia()
-    }
-
-    /// Being shown now: whatever it held back since it was drawn ahead goes on.
-    func cameIntoView() {
-        let wasAhead = drawingAhead
-        drawingAhead = false
-        // Dialogs it asked for while unseen: it was already in the window.
-        if wasAhead, isShown { tab?.pageShown() }
-        guard mediaHeld else { return }
-        mediaHeld = false
-        setAllMediaPlaybackSuspended(false, completionHandler: nil)
-        if let (get, set) = Self.mutedState(in: self), get(self) & 1 != 0, mutedBefore & 1 == 0 {
-            set(self, get(self) & ~1)
-        }
-    }
-
-    private func holdMedia() {
-        guard !mediaHeld else { return }
-        mediaHeld = true
-        setAllMediaPlaybackSuspended(true, completionHandler: nil)
-        // Muted too, for sound that isn't a media element's (Web Audio).
-        // WebKit's own mute is outside the public framework: only as found,
-        // a number out and a number in, or not at all.
-        guard let (get, set) = Self.mutedState(in: self) else { return }
-        mutedBefore = get(self)
-        if mutedBefore & 1 == 0 { set(self, mutedBefore | 1) }  // _WKMediaAudioMuted
-    }
-
-    private static func mutedState(in view: WKWebView) -> ((WKWebView) -> UInt, (WKWebView, UInt) -> Void)? {
-        let get = NSSelectorFromString("_mediaMutedState"), set = NSSelectorFromString("_setPageMuted:")
-        func shape(_ selector: Selector) -> String? {
-            class_getInstanceMethod(WKWebView.self, selector).flatMap { method_getTypeEncoding($0) }.map { String(cString: $0) }
-        }
-        guard view.responds(to: get), view.responds(to: set), shape(get) == "Q16@0:8", shape(set) == "v24@0:8Q16" else { return nil }
-        typealias Getter = @convention(c) (AnyObject, Selector) -> UInt
-        typealias Setter = @convention(c) (AnyObject, Selector, UInt) -> Void
-        let getter = unsafeBitCast(view.method(for: get), to: Getter.self)
-        let setter = unsafeBitCast(view.method(for: set), to: Setter.self)
-        return ({ getter($0, get) }, { setter($0, set, $1) })
-    }
-
-    /// Runs once the view's next frame is in the window, or after `within`
-    /// seconds if WebKit never says.
+    func startDrawingAhead() {}
+    func cameIntoView() { if isShown { tab?.pageShown() } }
     func afterNextFrame(within limit: TimeInterval = 0.25, _ run: @escaping () -> Void) {
-        let presented = NSSelectorFromString("_doAfterNextPresentationUpdate:")
-        guard responds(to: presented) else { return run() }
-        var done = false
-        let once = { if !done { done = true; run() } }
-        DispatchQueue.main.asyncAfter(deadline: .now() + limit) { once() }
-        typealias After = @convention(c) (AnyObject, Selector, @escaping @convention(block) () -> Void) -> Void
-        unsafeBitCast(method(for: presented), to: After.self)(self, presented) { DispatchQueue.main.async { once() } }
+        DispatchQueue.main.async(execute: run)
     }
-    private var presenting = false
-
-    /// Fully opaque now: not held unseen for its first frame or fading in.
-    var isFullyIn: Bool { !held && alphaValue >= 1 && (layer?.presentation()?.opacity ?? 1) >= 1 }
-
-    /// _WKRenderingProgressEventFirstVisuallyNonEmptyLayout, the moment
-    /// Safari shows a page that is coming in.
+    var isFullyIn: Bool { true }
     static let firstFrame: UInt = 1 << 1
+    func holdForFirstFrame() {}
+    func showFirstFrame(laidOut: Bool = true) {}
 
-    /// WebKit tells of the first frame only through names outside the public
-    /// framework, so it's asked whether it knows them first; one that doesn't
-    /// shows the view straight away, as before.
-    func holdForFirstFrame() {
-        let observe = NSSelectorFromString("_setObservedRenderingProgressEvents:")
-        guard responds(to: observe) else { return }
-        typealias Setter = @convention(c) (AnyObject, Selector, UInt) -> Void
-        unsafeBitCast(method(for: observe), to: Setter.self)(self, observe, Self.firstFrame)
-        held = true
-        alphaValue = 0
-        // A web process that dies before it draws never says so: in after a second regardless.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.showFirstFrame(laidOut: false) }
+    // MARK: WebKit's names, on Chromium
+
+    var allowsBackForwardNavigationGestures = true
+    var allowsMagnification = true
+    var allowsLinkPreview = true
+    var isInspectable = true
+    var magnification: CGFloat {
+        get { CGFloat(pageZoom) }
+        set { pageZoom = Double(newValue) }
+    }
+    var interactionState: Any? {
+        get { nil }
+        set {}
+    }
+    var fullscreenState: WKWebView.FullscreenState { .notInFullscreen }
+    var cameraCaptureState: WKMediaCaptureState { .none }
+    var microphoneCaptureState: WKMediaCaptureState { .none }
+
+    @discardableResult
+    func load(_ request: URLRequest) -> Any? {
+        if let url = request.url { loadURL(url) }
+        return nil
     }
 
-    /// In, quickly, once that frame has reached the window: WebKit reports
-    /// it a few frames before, and fading in then still shows the white.
-    /// Measured from WebKit's report to the frame being in the window: 14 to
-    /// 81 ms, about 35 typically (Wikipedia, BBC News, apple.com, Hacker
-    /// News). The fade after it is kept short, 60 ms where it was 120: the
-    /// page is fully in some 95 ms after the report rather than 155.
-    /// `laidOut`: WebKit said there's a page to see (not a time limit, or a failure).
-    func showFirstFrame(laidOut: Bool = true) {
-        if laidOut, window == nil { laidOutUnseen = true }
-        guard held, !presenting else { return }
-        presenting = true
-        let fadeIn = { [weak self] in
-            guard let self, self.held else { return }
-            self.held = false
-            self.presenting = false
-            Motion.animate(0.06) { self.animator().alphaValue = 1 }
+    func evaluateJavaScript(_ script: String, in frame: WKFrameInfo?, in world: WKContentWorld,
+                            completionHandler: ((Result<Any, Error>) -> Void)? = nil) {
+        evaluateJavaScript(script, completion: { value, error in
+            if let error { completionHandler?(.failure(error)) } else { completionHandler?(.success(value ?? NSNull())) }
+        })
+    }
+
+    /// `body` runs as an async function's, its arguments named as given.
+    func callAsyncJavaScript(_ body: String, arguments: [String: Any] = [:], in frame: WKFrameInfo?, in world: WKContentWorld,
+                             completionHandler: ((Result<Any, Error>) -> Void)? = nil) {
+        let names = arguments.keys.sorted()
+        let values = names.map { name -> String in
+            guard let value = arguments[name], JSONSerialization.isValidJSONObject([value]),
+                  let data = try? JSONSerialization.data(withJSONObject: [value]),
+                  let text = String(data: data, encoding: .utf8) else { return "null" }
+            return String(text.dropFirst().dropLast())
         }
-        let presented = NSSelectorFromString("_doAfterNextPresentationUpdate:")
-        guard responds(to: presented) else { return fadeIn() }
-        var done = false
-        let once = { if !done { done = true; fadeIn() } }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { once() }
-        typealias After = @convention(c) (AnyObject, Selector, @escaping @convention(block) () -> Void) -> Void
-        unsafeBitCast(method(for: presented), to: After.self)(self, presented) { DispatchQueue.main.async { once() } }
+        let script = "(async (\(names.joined(separator: ", "))) => {\n\(body)\n})(\(values.joined(separator: ", ")))"
+        evaluateJavaScript(script, in: frame, in: world, completionHandler: completionHandler)
+    }
+
+    func callAsyncJavaScript(_ body: String, arguments: [String: Any] = [:], contentWorld: WKContentWorld) async throws -> Any? {
+        try await withCheckedThrowingContinuation { done in
+            callAsyncJavaScript(body, arguments: arguments, in: nil, in: contentWorld) { result in
+                switch result {
+                case .success(let value): done.resume(returning: value is NSNull ? nil : value)
+                case .failure(let error): done.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    func takeSnapshot(with configuration: WKSnapshotConfiguration?, completionHandler: @escaping (NSImage?, Error?) -> Void) {
+        let width = configuration?.snapshotWidth.map { CGFloat(truncating: $0) } ?? bounds.width
+        takeSnapshot(withWidth: width) { image in completionHandler(image, nil) }
+    }
+
+    func takeSnapshot(configuration: WKSnapshotConfiguration?) async throws -> NSImage {
+        try await withCheckedThrowingContinuation { done in
+            takeSnapshot(with: configuration) { image, _ in
+                if let image { done.resume(returning: image) } else { done.resume(throwing: CocoaError(.featureUnsupported)) }
+            }
+        }
+    }
+
+    func pauseAllMediaPlayback(completionHandler: (() -> Void)? = nil) {
+        evaluateJavaScript("document.querySelectorAll('video, audio').forEach(m => m.pause())", completion: { _, _ in completionHandler?() })
+    }
+    func closeAllMediaPresentations(completionHandler: (() -> Void)? = nil) {
+        evaluateJavaScript("document.pictureInPictureElement && document.exitPictureInPicture()", completion: { _, _ in completionHandler?() })
+    }
+    /// Symbols for the right-click menu's items, by their titles.
+    static let menuSymbols: [String: String] = [
+        "Open link in new tab": "plus.square.on.square", "Open Link in New Tab": "plus.square.on.square",
+        "Copy link address": "link", "Copy Link Address": "link", "Copy": "doc.on.doc", "Paste": "doc.on.clipboard",
+        "Cut": "scissors", "Select all": "selection.pin.in.out", "Select All": "selection.pin.in.out",
+        "Back": "chevron.backward", "Forward": "chevron.forward", "Reload": "arrow.clockwise",
+        "Inspect": "hammer", "Inspect Element": "hammer", "Save as…": "square.and.arrow.down", "Print…": "printer",
+        "Copy image": "photo", "Copy Image": "photo", "Save image as…": "square.and.arrow.down",
+        "Open image in new tab": "photo.on.rectangle", "Copy image address": "link", "View page source": "doc.text",
+        "View Source": "doc.text", "Undo": "arrow.uturn.backward", "Redo": "arrow.uturn.forward",
+    ]
+
+    /// Finding in the page, as WebKit's find did: the next match is selected
+    /// and scrolled to; whether there was one comes back.
+    struct FindResult { let matchFound: Bool }
+    func find(_ string: String, configuration: WKFindConfiguration? = nil, completionHandler: @escaping (FindResult) -> Void) {
+        let backwards = configuration?.backwards ?? false
+        let args = (try? JSONSerialization.data(withJSONObject: [string])).flatMap { String(data: $0, encoding: .utf8) } ?? "[\"\"]"
+        evaluateJavaScript("window.find(\(args)[0], false, \(backwards), true, false, false, false)", completion: { value, _ in
+            completionHandler(FindResult(matchFound: (value as? Bool) ?? false))
+        })
+    }
+    func find(_ string: String, configuration: WKFindConfiguration? = nil) async -> FindResult {
+        await withCheckedContinuation { done in find(string, configuration: configuration) { done.resume(returning: $0) } }
+    }
+
+    func setAllMediaPlaybackSuspended(_ suspended: Bool, completionHandler: (() -> Void)? = nil) {
+        audioMuted = suspended
+        completionHandler?()
     }
 }
 

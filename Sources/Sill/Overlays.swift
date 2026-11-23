@@ -116,7 +116,7 @@ final class FindBar: NSObject, NSSearchFieldDelegate {
         }
     }
 
-    private weak var searching: WKWebView?
+    private weak var searching: SillWebView?
     private var stale = false
     private var began: CFTimeInterval = 0
     @objc private func stepped() { find(backwards: arrows.selectedSegment == 0) }

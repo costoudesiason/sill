@@ -411,7 +411,7 @@ enum AgentCommands {
 
     // MARK: helpers
 
-    private static func evaluate(_ body: String, in view: WKWebView, world: WKContentWorld,
+    private static func evaluate(_ body: String, in view: SillWebView, world: WKContentWorld,
                                  arguments: [String: Any] = [:]) async throws -> Any? {
         try await withCheckedThrowingContinuation { continuation in
             view.callAsyncJavaScript(body, arguments: arguments, in: nil, in: world) { result in
@@ -441,7 +441,7 @@ enum AgentCommands {
         throw AgentError("Timed out after \(Int(timeout)) s waiting for the page to load.")
     }
 
-    private static func waitFor(selector: String?, text: String?, in view: WKWebView, timeout: Double) async throws {
+    private static func waitFor(selector: String?, text: String?, in view: SillWebView, timeout: Double) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let found = try? await evaluate("return window.__sillAgent.present(selector, text)", in: view, world: Web.world,
@@ -454,7 +454,7 @@ enum AgentCommands {
 
     /// The element named by ref, CSS selector or visible text, scrolled into
     /// view, with its centre in the web view's coordinates.
-    private static func locate(_ args: [String: Any], in view: WKWebView) async throws -> (ref: String, point: NSPoint) {
+    private static func locate(_ args: [String: Any], in view: SillWebView) async throws -> (ref: String, point: NSPoint) {
         let found = try await evaluate("return window.__sillAgent.locate(ref, selector, text)", in: view, world: Web.world, arguments: [
             "ref": args["ref"] as? String ?? NSNull(), "selector": args["selector"] as? String ?? NSNull(),
             "text": args["text"] as? String ?? NSNull(),
@@ -464,12 +464,12 @@ enum AgentCommands {
         }
         let zoom = view.pageZoom * view.magnification
         let x = CGFloat((found["x"] as? Double) ?? 0) * zoom
-        let y = CGFloat((found["y"] as? Double) ?? 0) * zoom + view.obscuredContentInsets.top
+        let y = CGFloat((found["y"] as? Double) ?? 0) * zoom
         return (ref, NSPoint(x: x, y: view.isFlipped ? y : view.bounds.height - y))
     }
 
     /// A real click, as a hand would make it: pages see trusted events.
-    private static func realClick(at point: NSPoint, in view: WKWebView, double: Bool) {
+    private static func realClick(at point: NSPoint, in view: SillWebView, double: Bool) {
         guard let window = view.window else { return }
         let location = view.convert(point, to: nil)
         for count in 1...(double ? 2 : 1) {
@@ -485,7 +485,7 @@ enum AgentCommands {
     }
 
     @discardableResult
-    private static func press(_ key: String, in view: WKWebView) -> Bool {
+    private static func press(_ key: String, in view: SillWebView) -> Bool {
         let keys: [String: (UInt16, String)] = [
             "enter": (36, "\r"), "return": (36, "\r"), "tab": (48, "\t"), "escape": (53, "\u{1b}"), "esc": (53, "\u{1b}"),
             "backspace": (51, "\u{7f}"), "delete": (117, String(UnicodeScalar(NSDeleteFunctionKey)!)), "space": (49, " "),

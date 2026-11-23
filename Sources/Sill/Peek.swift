@@ -86,8 +86,6 @@ final class Peek: NSView, WKNavigationDelegate, WKUIDelegate {
         configuration.mediaTypesRequiringUserActionForPlayback = .all
         let pageFrame = NSRect(x: 0, y: 0, width: Self.size.width, height: Self.size.height - Self.foot)
         let view = SillWebView(frame: pageFrame, configuration: configuration)
-        view.navigationDelegate = self
-        view.uiDelegate = self
         // Half size: a desktop-width page in a card.
         view.pageZoom = 0.5
         view.holdForFirstFrame()
@@ -126,8 +124,7 @@ final class Peek: NSView, WKNavigationDelegate, WKUIDelegate {
         guard let page else { return }
         self.page = nil
         page.stopLoading()
-        page.navigationDelegate = nil
-        page.uiDelegate = nil
+        page.closePage()
         Motion.animate(0.1, { animator().alphaValue = 0 }, completion: { [weak self] in
             page.removeFromSuperview()
             if self?.link == nil { self?.isHidden = true }

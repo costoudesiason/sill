@@ -225,14 +225,17 @@ final class Preferences: ObservableObject {
 enum Places {
     static let support: URL = {
         let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Sill", isDirectory: true)
+            .appendingPathComponent(folder, isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
 
+    /// Sill on Chromium keeps its own: both can run side by side.
+    static let folder = "Sill Chromium"
+
     static let caches: URL = {
         let url = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Sill", isDirectory: true)
+            .appendingPathComponent(folder, isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()

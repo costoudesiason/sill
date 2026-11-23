@@ -174,9 +174,15 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
         Motion.animate(0.14) { glass.animator().alphaValue = 1 }
     }
 
+    /// Runs once the menu has gone, picked from or not.
+    var onDismiss: (() -> Void)?
+
     func dismiss(animated: Bool = true) {
         guard Self.current === self else { return }
         Self.current = nil
+        let gone = onDismiss
+        onDismiss = nil
+        gone?()
         if let source { Self.lastClosed = (source, Date()) }
         let overlay = self.overlay
         overlay.onOutsideClick = nil

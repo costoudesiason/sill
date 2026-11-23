@@ -66,13 +66,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         WarmSite.shared.warm(after: 4)
         // Only if some site was allowed to notify before: else nothing is set up.
         if SitePermissions.shared.keepsNotifications { PageNotifications.shared.install() }
-        if Preferences.shared.restoresTabs, restoreSession() {
-            return
-        }
-        if browsers.isEmpty {
-            let browser = makeBrowser(isPrivate: false)
-            browser.showWindow(nil)
-            browser.showPalette(.newTab)
+        // Pages only once Chromium is ready for them.
+        SEEngine.whenReady { [self] in
+            if Preferences.shared.restoresTabs, restoreSession() { return }
+            if browsers.isEmpty {
+                let browser = makeBrowser(isPrivate: false)
+                browser.showWindow(nil)
+                browser.showPalette(.newTab)
+            }
         }
     }
 

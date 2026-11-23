@@ -135,7 +135,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// be built before the page can start loading.
     private var spare: SillWebView?
     /// The page whose video is still on its way out to Picture in Picture.
-    private weak var leaving: WKWebView?
+    private weak var leaving: SillWebView?
     private var expected = Set<String>()
     private var connectAheadTimer: Timer?
     private var connectedAhead: [String: Date] = [:]
@@ -476,13 +476,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     }
 
     @discardableResult
-    func addTab(url: URL?, configuration: WKWebViewConfiguration? = nil, at index: Int? = nil,
+    func addTab(url: URL?, configuration: WKWebViewConfiguration? = nil, adopting popupView: SillWebView? = nil, at index: Int? = nil,
                 select shouldSelect: Bool = true, opener: Tab? = nil, typed: Bool = false, state: Any? = nil) -> Tab {
         let tab = Tab(url: nil, isPrivate: isPrivate)
         tab.host = self
         tab.opener = opener
         tabs.insert(tab, at: min(index ?? tabs.count, tabs.count))
-        if let configuration {
+        if let popupView {
+            tab.adopt(popupView, popup: true)
+        } else if let configuration {
             tab.materialize(with: configuration)
         } else if let url, state == nil, !isPrivate, let view = WarmSite.shared.claim(url) {
             // claude.ai, already running out of sight: it only changes route.
@@ -519,7 +521,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // one, until its video has floated off into Picture in Picture: a
         // page taken out of the window first would have it cancelled. Only
         // a page playing something is asked; any other leaves at once.
-        var keep: WKWebView?
+        var keep: SillWebView?
         let sideBySide = split?.contains(previous) == true && split?.contains(tab) == true
         if previous !== tab, let previous, let old = previous.webView, Preferences.shared.autoPictureInPicture,
            !sideBySide, previous.playingVideo || Self.isPlayingAudio(old) {
@@ -706,7 +708,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
                 guard let self, self.spare == nil, self.window?.isVisible == true else { return }
                 self.spare = SillWebView(frame: self.pageBounds, configuration: Web.configuration(private: self.isPrivate))
                 // Starts its web process now, not at Return: no page is loaded.
-                self.spare?.evaluateJavaScript("")
+                self.spare?.evaluateJavaScript("", completion: nil)
                 self.expect(Preferences.shared.engine.search(""))
             }
         } else {
@@ -801,7 +803,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     // MARK: - Window
 
     /// WebKit knows whether a page is making sound; it just doesn't say so publicly.
-    private static func isPlayingAudio(_ webView: WKWebView) -> Bool {
+    private static func isPlayingAudio(_ webView: SillWebView) -> Bool {
         let key = "_isPlayingAudio"
         guard webView.responds(to: NSSelectorFromString(key)) else { return true }
         return (webView.value(forKey: key) as? Bool) ?? true
@@ -860,8 +862,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         view.removeFromSuperview()
         // Unloaded a moment later, once the pause has landed.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak view] in
-            view?.stopLoading()
-            view?.loadHTMLString("", baseURL: nil)
+            view?.closePage()
         }
     }
 
@@ -1084,7 +1085,7 @@ extension BrowserWindowController: TabHost {
         return addTab(url: url, configuration: configuration, at: index, select: !background, opener: tab)
     }
 
-    func openPopup(from tab: Tab, configuration: WKWebViewConfiguration, size: NSSize) -> Tab? {
+    func openPopup(from tab: Tab, size: NSSize) -> SillWebView? {
         let popup = AppDelegate.shared.makeBrowser(isPrivate: isPrivate, popup: true)
         guard let window = popup.window, let parent = self.window else { return nil }
         let content = NSSize(width: max(360, min(size.width, 1000)), height: max(320, min(size.height, 900)) + TopBar.height)
@@ -1097,9 +1098,11 @@ extension BrowserWindowController: TabHost {
             frame.origin.y -= 24
         }
         window.setFrame(frame, display: false)
-        let made = popup.addTab(url: nil, configuration: configuration, opener: tab)
+        // Chromium puts the page that asked for the window in this view, opener and all.
+        let view = SillWebView(forPopupWithFrame: popup.pageBounds, private: isPrivate)
+        popup.addTab(url: nil, adopting: view, opener: tab)
         popup.showWindow(nil)
-        return made
+        return view
     }
 
     func closeRequested(_ tab: Tab) { closeNow(tab) }
@@ -1298,7 +1301,7 @@ enum Pasteboard {
 
 extension BrowserWindowController {
     /// The page area: the one tab in front, or both halves of its split.
-    fileprivate func placePages(keep: WKWebView?) {
+    fileprivate func placePages(keep: SillWebView?) {
         guard let selected else { return }
         // A page's question goes where its page now is.
         defer { placePrompts() }

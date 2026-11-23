@@ -10,7 +10,7 @@ import WebKit
 /// for the next link. One for the whole app, never for private windows, and
 /// given back when memory runs short.
 @MainActor
-final class WarmSite: NSObject, WKNavigationDelegate {
+final class WarmSite: NSObject, SEWebViewDelegate {
     static let shared = WarmSite()
 
     /// Your recent chats: a page with no text box. The unseen page never opens
@@ -61,7 +61,7 @@ final class WarmSite: NSObject, WKNavigationDelegate {
         putOff = 0
         let page = view ?? SillWebView(frame: NSRect(x: 0, y: 0, width: 1280, height: 800),
                                        configuration: Web.configuration(private: false))
-        page.navigationDelegate = self
+        page.pageDelegate = self
         view = page
         ready = false
         Shield.shared.whenReady { [weak self, weak page] in
@@ -87,7 +87,7 @@ final class WarmSite: NSObject, WKNavigationDelegate {
         }
         self.view = nil
         ready = false
-        view.navigationDelegate = nil
+        view.pageDelegate = nil
         Self.route(view, to: url)
         warm(after: 8)
         return view
@@ -120,31 +120,24 @@ final class WarmSite: NSObject, WKNavigationDelegate {
         }
     }
 
-    // MARK: WKNavigationDelegate (only while the page waits, unseen)
+    // MARK: the page's events (only while it waits, unseen)
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    func webViewDidFinish(_ webView: SEWebView) {
         guard webView === view else { return }
         ready = Self.usable(webView.url)
         loadedAt = Date()
     }
 
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+    func webView(_ webView: SEWebView, didFailWithCode code: Int, description text: String, url: URL) {
         if webView === view { ready = false }
     }
 
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        if webView === view { ready = false }
-    }
-
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+    func webViewProcessEnded(_ webView: SEWebView) {
         guard webView === view else { return }
         drop()
         warm(after: 30)
     }
 
-    /// Nothing unseen opens windows or downloads.
-    func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
-                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        decisionHandler(response.canShowMIMEType ? .allow : .cancel)
-    }
+    /// Nothing unseen downloads.
+    func webView(_ webView: SEWebView, downloadNamed name: String) -> URL? { nil }
 }
