@@ -613,7 +613,14 @@ extension Tab: WKNavigationDelegate {
         (webView as? SillWebView)?.showFirstFrame()
         guard let status = statusToCheck, let url = webView.url else { return }
         statusToCheck = nil
-        let empty = "!document.body || (!document.body.childElementCount && !document.body.textContent.trim())"
+        // (An SVG or XML answer has no body, and isn't empty for that.)
+        let empty = """
+        (function () {
+          var b = document.body, root = document.documentElement;
+          if (!b) return !root || (!root.childElementCount && !root.textContent.trim());
+          return !b.childElementCount && !b.textContent.trim();
+        })()
+        """
         webView.evaluateJavaScript(empty, in: nil, in: Web.world) { [weak self, weak webView] result in
             guard let self, let webView, self.webView === webView, webView.url == url, (try? result.get()) as? Bool == true else { return }
             // The empty page stays in the back/forward list, behind Sill's:
