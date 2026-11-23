@@ -46,14 +46,16 @@ final class History {
         if let read = Self.early.read {
             read.wait()
             visits = Self.early.takeVisits() ?? Self.read()
+            making = Self.early.making
+            Self.early.making = nil
         } else {
             visits = Self.read()
         }
         Self.made = self
-        adoptPrepared()
+        if let making, making.work?.wait(timeout: .now()) == .success { finish(making) }
     }
 
-    // MARK: - ready at launch
+    // MARK: - made in the background
 
     /// Reading six thousand entries took some 35 ms, and working out what
     /// searching needs of each (the shelf, below) 65 ms more, with another
@@ -63,17 +65,13 @@ final class History {
     /// starts (main.swift).
     nonisolated static func preload() {
         let early = early
-        let prepare = DispatchWorkItem(qos: .utility) {
-            guard let visits = early.visitsToPrepare() else { return }
-            early.put(prepared: Prepared(visits))
-            DispatchQueue.main.async { MainActor.assumeIsolated { History.made?.adoptPrepared() } }
-        }
+        let making = Making { early.visitsToPrepare() }
         let read = DispatchWorkItem(qos: .userInitiated) {
             early.put(visits: History.read())
-            DispatchQueue.global(qos: .utility).async(execute: prepare)
+            making.start()
         }
         early.read = read
-        early.prepare = prepare
+        early.making = making
         DispatchQueue.global(qos: .userInitiated).async(execute: read)
     }
 
@@ -86,28 +84,55 @@ final class History {
     /// The one made, once it is: the background work hands it what it made.
     private static weak var made: History?
 
-    /// What preload made, waiting to be taken, behind a lock.
+    /// What preload read, waiting for History's init, behind a lock.
     private final class Early: @unchecked Sendable {
         private let lock = NSLock()
-        /// Set once, on the main thread, before the app runs; `prepare` is
-        /// let go on the main thread once what it made has been taken.
+        /// Both set once, on the main thread, before the app runs.
         var read: DispatchWorkItem?
-        var prepare: DispatchWorkItem?
+        var making: Making?
         private var visits: [String: Visit]?
         private var forPreparing: [String: Visit]?
-        private var prepared: Prepared?
         func put(visits: [String: Visit]) { lock.withLock { self.visits = visits; forPreparing = visits } }
         func takeVisits() -> [String: Visit]? { lock.withLock { defer { visits = nil }; return visits } }
         func visitsToPrepare() -> [String: Visit]? { lock.withLock { defer { forPreparing = nil }; return forPreparing } }
-        func put(prepared: Prepared) { lock.withLock { self.prepared = prepared } }
-        func takePrepared() -> Prepared? { lock.withLock { defer { prepared = nil }; return prepared } }
     }
     nonisolated private static let early = Early()
 
+    /// The shelf and the rest being made from a copy of the visits, off the
+    /// main thread. What it made is read on the main thread once its work
+    /// has finished (waited for, or told of), never while it runs.
+    private final class Making: @unchecked Sendable {
+        private(set) var work: DispatchWorkItem?
+        private(set) var prepared: Prepared?
+        private let source: @Sendable () -> [String: Visit]?
+        private let at: Int
+
+        /// `at`: how many changes there had been to the visits when copied.
+        init(at: Int = 0, _ source: @escaping @Sendable () -> [String: Visit]?) {
+            self.source = source
+            self.at = at
+        }
+
+        /// Once, from the thread that made it, or the one reading at launch.
+        func start() {
+            let work = DispatchWorkItem(qos: .utility) { [weak self] in
+                guard let self, let visits = self.source() else { return }
+                self.prepared = Prepared(visits, at: self.at)
+            }
+            self.work = work
+            work.notify(queue: .main) { [weak self] in
+                MainActor.assumeIsolated { if let self { History.made?.finish(self) } }
+            }
+            DispatchQueue.global(qos: .utility).async(execute: work)
+        }
+    }
+    private var making: Making?
+
     /// Everything searching and the palette work out from history, made
-    /// from the visits as they were read.
+    /// from the visits as they were when copied.
     private struct Prepared: @unchecked Sendable {
         let visits: [String: Visit]
+        let at: Int
         let shelf: [(Visit, Reading)]
         let places: [String: Int]
         let readings: [String: Reading]
@@ -115,8 +140,9 @@ final class History {
         let knownHosts: Set<String>
         let recent: [Visit]
 
-        init(_ visits: [String: Visit]) {
+        init(_ visits: [String: Visit], at: Int) {
             self.visits = visits
+            self.at = at
             let shelf = visits.values.map { ($0, History.makeReading($0)) }
             self.shelf = shelf
             places = Dictionary(uniqueKeysWithValues: shelf.enumerated().map { ($1.0.url, $0) })
@@ -134,16 +160,26 @@ final class History {
     /// The palette's list of recent sites asks for this many.
     nonisolated static let recentLimit = 40
 
-    /// Takes what preload prepared, unless what it stands for has been built
-    /// here already. Changes made since it was read are put on top of it;
-    /// if any entry it holds has gone since (removed, cleared, trimmed) it
-    /// is let go and made again when wanted, as before.
-    private func adoptPrepared() {
-        guard let prepared = Self.early.takePrepared() else { return }
-        Self.early.prepare = nil
-        // Nothing changed since they were read (the usual case): no entry to compare.
-        let same = changes == 0
-        guard shelf == nil, same || !prepared.visits.keys.contains(where: { visits[$0] == nil }) else { return }
+    /// Made again in the background after a change to many entries at once
+    /// (trimmed, merged from Safari, one removed): the next letter typed
+    /// would otherwise make it all again on the main thread.
+    private func makeAgain() {
+        let making = Making(at: changes) { [visits] in visits }
+        self.making = making
+        making.start()
+    }
+
+    /// Takes what was made in the background, unless something newer is on
+    /// its way or the shelf has been made here already. Changes made since
+    /// the copy are put on top of it; if any entry it holds has gone since,
+    /// it is let go and made again when wanted.
+    private func finish(_ done: Making) {
+        guard done === making else { return }
+        making = nil
+        guard let prepared = done.prepared, shelf == nil else { return }
+        // Nothing changed since the copy (the usual case): no entry to compare.
+        let same = changes == prepared.at
+        guard same || !prepared.visits.keys.contains(where: { visits[$0] == nil }) else { return }
         readings = prepared.readings
         places = prepared.places
         shelf = prepared.shelf
@@ -156,9 +192,9 @@ final class History {
     /// Asked for before the background has finished (a letter typed in the
     /// first moment after launch): waiting for it beats making it twice.
     private func awaitPrepared() {
-        guard shelf == nil, let prepare = Self.early.prepare else { return }
-        prepare.wait()
-        adoptPrepared()
+        guard shelf == nil, let making, let work = making.work else { return }
+        work.wait()
+        finish(making)
     }
 
     static func key(_ url: URL) -> String? {
@@ -192,7 +228,10 @@ final class History {
     }
 
     /// Forgets everything worked out from the entries: for a change to many of them at once.
-    private func changed() { knownHosts = nil; shelf = nil; flat = nil; latest = nil }
+    private func changed() {
+        knownHosts = nil; shelf = nil; flat = nil; latest = nil
+        makeAgain()
+    }
 
     /// One entry is new, or has a later visit or another title: what is kept
     /// about all of them is brought up to date for that one, where making it
