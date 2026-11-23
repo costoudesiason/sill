@@ -584,6 +584,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         prerenderTimer?.invalidate()
         guard let url, paletteOpen, palette.mode == .newTab, !isPrivate, !WarmSite.handles(url) || !Preferences.shared.keepsClaudeReady,
               let host = url.host(), History.shared.knows(host: host) else { return }
+        // Never a plain-HTTP page that is asked about first: the spare view asks nothing.
+        guard url.scheme == "https" || !SitePermissions.asksBeforeHTTP(host) else { return }
         if let prerendered, Self.samePage(prerendered, url) { return }
         prerenderTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
