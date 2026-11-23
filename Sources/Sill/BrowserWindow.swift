@@ -181,8 +181,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // The Find bar is built once the window has settled, not on the first
         // ⌘F: building it there cost that keypress two or three frames.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self, self.madeFindBar == nil, self.window != nil else { return }
-            self.findBar.ready(in: self.stage, top: self.topInset)
+            guard let self, self.window != nil else { return }
+            if self.madeFindBar == nil { self.findBar.ready(in: self.stage, top: self.topInset) }
+            // The palette too, on a turn of its own: the first ⌘T only shows it.
+            guard !popup else { return }
+            Frame.afterCommit { [weak self] in
+                guard let self, self.window?.isVisible == true else { return }
+                self.palette.ready(in: self.stage)
+            }
         }
 
         bar.back.target = self
@@ -565,8 +571,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         endPeek()
         palette.open(mode, in: stage)
         if mode == .newTab, spare == nil {
-            // On the next turn, so the palette is on screen first.
-            DispatchQueue.main.async { [weak self] in
+            // Once the palette's first frame is committed: made on the next
+            // turn instead, a web view (5 to 75 ms, its process started with
+            // it) ran before that frame and held the palette back.
+            Frame.afterCommit { [weak self] in
                 guard let self, self.spare == nil, self.window?.isVisible == true else { return }
                 self.spare = SillWebView(frame: self.pageBounds, configuration: Web.configuration(private: self.isPrivate))
                 // Starts its web process now, not at Return: no page is loaded.
