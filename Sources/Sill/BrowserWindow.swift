@@ -928,7 +928,7 @@ extension BrowserWindowController: TabHost {
     func promptsChanged(_ tab: Tab) { placePrompts() }
 
     /// The tab in front, or the other half of its split.
-    private func isInFront(_ tab: Tab) -> Bool {
+    func isInFront(_ tab: Tab) -> Bool {
         tab === selected || (split?.contains(tab) == true && split?.contains(selected) == true)
     }
 
