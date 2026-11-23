@@ -99,24 +99,45 @@ enum Web {
 
     /// WebKit keeps the process of a page that has gone (its tab closed or
     /// put to sleep) for the site's next page, for half an hour, with some
-    /// of what the page had allocated still in it: tens of megabytes each,
-    /// over a hundred for a heavy site. They are let go once tabs have stopped
-    /// going for half a minute, not sooner: while tabs are still being closed
-    /// and opened the kept processes are what the next pages start in. The
-    /// process kept started for the next page is not one of them. A site's
-    /// service worker outlives its page by some seconds and only then is its
-    /// process kept, hence the second pass.
-    static func releaseIdleProcesses() {
+    /// of what the page had allocated still in it. Measured: five tabs
+    /// closed (Wikipedia, BBC News, apple.com, GitHub, the New York Times)
+    /// left 594 MB in their kept processes, 45 to 235 MB each, against
+    /// 1,270 MB while open; going back to a site in its kept process loads
+    /// the page about a fifth sooner (cacheAsABrowser).
+    ///
+    /// After a tab is closed they're kept for three minutes from when tabs
+    /// stopped going: time for ⇧⌘T, or the same site again from the palette
+    /// or a link, to start in one. A tab put to sleep or a window closed is
+    /// Sill giving memory back, so then they go after half a minute, and a
+    /// close doesn't put that off. The Mac short of memory lets them go at
+    /// once (App.swift). The process started for the next page is not one
+    /// of them. A site's service worker outlives its page by some seconds
+    /// and only then is its process kept, hence the second pass.
+    static func releaseIdleProcesses(soon: Bool = true) {
         let clear = NSSelectorFromString("_clearWebProcessCache")
         guard pool.responds(to: clear) else { return }
+        if !soon, let soonDue, soonDue > Date() { return }
         releases.forEach { $0.cancel() }
-        releases = [30, 50].map { delay in
+        soonDue = soon ? Date().addingTimeInterval(30) : nil
+        releases = (soon ? [30, 50] : [180, 200]).map { delay in
             let work = DispatchWorkItem { pool.perform(clear) }
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
             return work
         }
     }
     private static var releases: [DispatchWorkItem] = []
+    /// When a release asked for by a sleep or a window closing is due.
+    private static var soonDue: Date?
+
+    /// The Mac is short of memory: every kept process goes now.
+    static func releaseIdleProcessesNow() {
+        let clear = NSSelectorFromString("_clearWebProcessCache")
+        guard pool.responds(to: clear) else { return }
+        releases.forEach { $0.cancel() }
+        releases = []
+        soonDue = nil
+        pool.perform(clear)
+    }
 
     /// Private windows share one cookie jar for as long as Sill runs, and it is never written down.
     static let privateStore = WKWebsiteDataStore.nonPersistent()

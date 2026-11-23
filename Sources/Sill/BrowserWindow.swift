@@ -570,7 +570,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // playing from a tab that's gone.
         if pictured === tab { pictured = nil }
         Self.silence(tab)
-        Web.releaseIdleProcesses()
+        Web.releaseIdleProcesses(soon: false)
         if tabs.isEmpty {
             selected = nil
             window?.close()

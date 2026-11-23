@@ -56,6 +56,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let critical = self.pressure.data.contains(.critical)
                 for browser in self.browsers { browser.napIdleTabs(olderThan: critical ? 0 : 300) }
                 WarmSite.shared.drop()
+                // The processes of closed tabs, kept for minutes for their sites' next pages.
+                Web.releaseIdleProcessesNow()
             }
         }
         pressure.activate()
