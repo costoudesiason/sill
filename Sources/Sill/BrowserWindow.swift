@@ -1111,7 +1111,12 @@ extension BrowserWindowController {
         neighbourWarming?.cancel()
         let work = DispatchWorkItem { [weak self, weak tab] in
             guard let self, let tab, tab === self.selected, let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
-            for i in [index - 1, index + 1] where self.tabs.indices.contains(i) { self.warm(self.tabs[i]) }
+            for i in [index - 1, index + 1] where self.tabs.indices.contains(i) {
+                let neighbour = self.tabs[i]
+                guard neighbour.webView == nil, !neighbour.warmedUnseen else { continue }
+                self.warm(neighbour)
+                neighbour.warmedUnseen = neighbour.webView != nil
+            }
         }
         neighbourWarming = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)

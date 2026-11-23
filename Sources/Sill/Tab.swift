@@ -52,7 +52,11 @@ final class Tab: NSObject {
     private(set) var isScrolled = false
     /// Whether a video is playing in the page, as its script last said.
     private(set) var playingVideo = false
-    var lastShown = Date()
+    var lastShown = Date() { didSet { warmedUnseen = false } }
+    /// Woken ahead for being next to the tab in front, and not looked at
+    /// since: once it has slept again it isn't woken that way a second time,
+    /// or each switch next door would load it afresh only for it to sleep.
+    var warmedUnseen = false
     /// Opened by an agent through Sill's agent socket.
     var openedByAgent = false
 
