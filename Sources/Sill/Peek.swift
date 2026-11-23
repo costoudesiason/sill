@@ -143,7 +143,7 @@ final class Peek: NSView, WKNavigationDelegate, WKUIDelegate {
         // Plain HTTP out on the internet is asked about first, in a tab: a look doesn't ask.
         if action.targetFrame?.isMainFrame != false, scheme == "http", let site = action.request.url?.host(),
            SitePermissions.asksBeforeHTTP(site),
-           SitePermissions.shared.allowed([.insecure], at: Domains.registrable(site), private: isPrivate) != true { return .cancel }
+           !SitePermissions.shared.continuesOverHTTP(to: site, private: isPrivate) { return .cancel }
         return .allow
     }
 

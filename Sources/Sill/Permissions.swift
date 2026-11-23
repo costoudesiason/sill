@@ -109,6 +109,19 @@ final class SitePermissions {
         return answers
     }
 
+    /// Whether you chose to carry on to `host` over plain HTTP, or to a
+    /// site it is a subdomain of (one that hops between its subdomains
+    /// asks once). Never by a guess at where the registered name ends:
+    /// two unrelated sites under one suffix don't share an answer.
+    func continuesOverHTTP(to host: String, private isPrivate: Bool) -> Bool {
+        var labels = host.lowercased().split(separator: ".")[...]
+        while labels.count >= 2 {
+            if allowed([.insecure], at: labels.joined(separator: "."), private: isPrivate) == true { return true }
+            labels = labels.dropFirst()
+        }
+        return false
+    }
+
     /// Plain HTTP to this host is something to ask about. Not this Mac, an
     /// address by number, or a name on the local network: those loaded
     /// before without a word, and there is no certificate they could have.

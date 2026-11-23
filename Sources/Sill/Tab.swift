@@ -522,10 +522,9 @@ extension Tab: WKNavigationDelegate {
         // (Sill's own "wasn't opened" page for that address goes up unasked, once.)
         let sillsOwn = url == notOpened
         notOpened = nil
-        // (The whole site: one that hops between its subdomains asks once.)
         if scheme == "http", let name = url.host(), SitePermissions.asksBeforeHTTP(name), !sillsOwn,
-           case let site = Domains.registrable(name),
-           SitePermissions.shared.allowed([.insecure], at: site, private: isPrivate) != true {
+           case let site = name.lowercased(),
+           !SitePermissions.shared.continuesOverHTTP(to: site, private: isPrivate) {
             let isPrivate = isPrivate
             ask(SiteAsk(symbol: "lock.open", title: "\(Domains.bare(name)) isn’t secure",
                         detail: "It uses plain HTTP: what you read and send there can be seen or changed on the way.",
