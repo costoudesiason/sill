@@ -62,6 +62,8 @@ final class Tab: NSObject {
     private(set) var isScrolled = false
     /// Whether a video is playing in the page, as its script last said.
     private(set) var playingVideo = false
+    /// A sign-in sent and not yet known to have gone through.
+    var pendingSignIn: (host: String, user: String, password: String, at: Date)?
     var lastShown = Date() { didSet { warmedUnseen = false; seenAt = lastShown } }
     /// When it was last in front, kept across a relaunch in the session, for
     /// which restored tabs to load ahead. Not lastShown, which starts afresh
@@ -500,6 +502,49 @@ final class Tab: NSObject {
 // MARK: - The page's events (Chromium, through SillEngine)
 
 extension Tab {
+    /// A sign-in the page script saw being sent. Sill offers to keep it once
+    /// it went through: the page moved on, or the password box went away.
+    func signedIn(user: String, password: String) {
+        guard !isPrivate, let url = webView?.url, let host = url.host(), url.scheme == "https" || Self.isLocal(host) else { return }
+        pendingSignIn = (host, user, password, Date())
+        // A sign-in that doesn't load a new page: is the password box still there?
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            guard let self, let pending = self.pendingSignIn, pending.host == host else { return }
+            self.webView?.evaluateJavaScript(
+                "[...document.querySelectorAll('input[type=password]')].some(i => i.value && i.getBoundingClientRect().width > 0)",
+                completion: { [weak self] value, _ in
+                    MainActor.assumeIsolated {
+                        if (value as? Bool) == false { self?.offerToKeepSignIn() }
+                    }
+                })
+        }
+    }
+
+    /// This Mac (a site being built on it): passwords are kept there over plain HTTP too, as in Chrome.
+    static func isLocal(_ host: String) -> Bool { host == "localhost" || host == "127.0.0.1" || host.hasSuffix(".localhost") }
+
+    /// After a page commits: a sign-in sent in the minute before went through.
+    func signInWentThrough() {
+        guard let pending = pendingSignIn, Date().timeIntervalSince(pending.at) < 60 else { pendingSignIn = nil; return }
+        offerToKeepSignIn()
+    }
+
+    private func offerToKeepSignIn() {
+        guard let pending = pendingSignIn else { return }
+        pendingSignIn = nil
+        Task { @MainActor in
+            let state = await SavedPasswords.state(pending.password, user: pending.user, host: pending.host)
+            guard state != .same else { return }
+            let site = Domains.bare(pending.host)
+            let update = state == .updated
+            ask(SiteAsk(symbol: "key.fill", title: update ? "Update your password for \(site)?" : "Save your password for \(site)?",
+                        detail: pending.user.isEmpty ? nil : pending.user, choices: ["Not Now", update ? "Update" : "Save"]) { choice, picked in
+                guard picked, choice == 1 else { return }
+                Task { await SavedPasswords.save(pending.password, user: pending.user, host: pending.host) }
+            })
+        }
+    }
+
     /// Sill's page script, on Chromium: its messages as WebKit's handler took them.
     func webView(_ view: SEWebView, message json: String) {
         guard view === webView, let data = json.data(using: .utf8),
@@ -554,6 +599,7 @@ extension Tab: SEWebViewDelegate {
     }
 
     func webViewDidCommit(_ view: SEWebView) {
+        signInWentThrough()
         scrolled(false)
         playingVideo = false
         asked = nil

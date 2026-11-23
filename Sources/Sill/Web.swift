@@ -424,6 +424,9 @@ final class MessageRouter: NSObject, WKScriptMessageHandler {
         case "pipReturn":
             // Back from the floating window: to its tab, its window, to the front.
             tab.host?.bringBack(tab)
+        case "credentials":
+            guard let password = body["password"] as? String, !password.isEmpty else { return }
+            tab.signedIn(user: (body["user"] as? String) ?? "", password: password)
         case "icon":
             if let href = body["href"] as? String, let url = URL(string: href) { tab.found(icon: url) }
         case "field":
@@ -594,6 +597,37 @@ enum PageScripts {
         if (pw && password != null) pw.focus();
         return !!(u || pw);
       };
+      // A sign-in being sent: the name and password typed, for Sill to offer
+      // to keep (it asks only once the sign-in has gone through). Only what
+      // the person did (trusted events); once a page. A name asked for on a
+      // step before the password's is remembered for the step after.
+      let sent = false;
+      const signingIn = (root) => {
+        if (sent) return;
+        const area = root && root.querySelectorAll ? root : document;
+        const pw = [...area.querySelectorAll('input[type=password]')].find((i) => i.value && shown(i) && i.autocomplete !== 'one-time-code');
+        if (!pw) {
+          const u = [...area.querySelectorAll('input')].find((i) => isUser(i) && i.value && shown(i));
+          if (u) try { sessionStorage.setItem('__sillUser', u.value); } catch (_) {}
+          return;
+        }
+        const inputs = [...scope(pw).querySelectorAll('input')].filter(shown);
+        let user = '';
+        for (let j = inputs.indexOf(pw) - 1; j >= 0; j--) if (textual(inputs[j]) && inputs[j].value) { user = inputs[j].value; break; }
+        if (!user) { const u = inputs.find((i) => isUser(i) && i.value); if (u) user = u.value; }
+        if (!user) try { user = sessionStorage.getItem('__sillUser') || ''; } catch (_) {}
+        sent = true;
+        post({ t: 'credentials', user, password: pw.value });
+      };
+      document.addEventListener('submit', (e) => { if (e.isTrusted) signingIn(e.target); }, true);
+      document.addEventListener('click', (e) => {
+        const b = e.isTrusted && e.target.closest ? e.target.closest('button, input[type=submit], [role=button]') : null;
+        if (b) setTimeout(() => signingIn(scope(b)), 0);
+      }, true);
+      document.addEventListener('keydown', (e) => {
+        if (e.isTrusted && e.key === 'Enter' && e.target instanceof HTMLInputElement) signingIn(scope(e.target));
+      }, true);
+
       window.__sillFillCode = (code) => {
         const el = document.activeElement;
         if (!(el instanceof HTMLInputElement)) return false;

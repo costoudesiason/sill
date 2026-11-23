@@ -1,0 +1,217 @@
+import AppKit
+import CommonCrypto
+import Foundation
+import Security
+import SQLite3
+
+/// Passwords Sill keeps, as Chrome keeps its own: one Keychain item per
+/// account and site, in your login keychain (encrypted by macOS, readable by
+/// Sill without asking again once allowed). Sill never writes a password to
+/// a file of its own.
+///
+/// Items are internet passwords for the site's host, marked as Sill's with
+/// the creator code 'SILL', so they show in Keychain Access as "Sill: host".
+enum SavedPasswords {
+    struct Login: Hashable {
+        let host: String
+        let user: String
+    }
+
+    private static let creator = FourCharCode(0x5349_4C4C)  // 'SILL'
+
+    private static func base(_ host: String, _ user: String) -> [String: Any] {
+        [kSecClass as String: kSecClassInternetPassword,
+         kSecAttrServer as String: host,
+         kSecAttrAccount as String: user,
+         kSecAttrProtocol as String: kSecAttrProtocolHTTPS,
+         kSecAttrCreator as String: creator]
+    }
+
+    /// Every account Sill has for `host` or its site (accounts.google.com
+    /// matches google.com), exact host first. Names only: no password is read.
+    static func logins(for host: String) async -> [Login] {
+        let site = Domains.registrable(host)
+        return await Task.detached(priority: .userInitiated) { () -> [Login] in
+            let query: [String: Any] = [kSecClass as String: kSecClassInternetPassword,
+                                        kSecAttrCreator as String: creator,
+                                        kSecMatchLimit as String: kSecMatchLimitAll,
+                                        kSecReturnAttributes as String: true]
+            var found: CFTypeRef?
+            guard SecItemCopyMatching(query as CFDictionary, &found) == errSecSuccess,
+                  let items = found as? [[String: Any]] else { return [] }
+            let all = items.compactMap { item -> Login? in
+                guard let server = item[kSecAttrServer as String] as? String,
+                      let user = item[kSecAttrAccount as String] as? String else { return nil }
+                return Login(host: server, user: user)
+            }
+            let mine = all.filter { $0.host == host || Domains.registrable($0.host) == site }
+            return mine.sorted { ($0.host == host ? 0 : 1, $0.user) < ($1.host == host ? 0 : 1, $1.user) }
+        }.value
+    }
+
+    /// The password of one account, read only when it's being filled.
+    static func password(for login: Login) async -> String? {
+        await Task.detached(priority: .userInitiated) { () -> String? in
+            var query = base(login.host, login.user)
+            query[kSecReturnData as String] = true
+            query[kSecMatchLimit as String] = kSecMatchLimitOne
+            var found: CFTypeRef?
+            guard SecItemCopyMatching(query as CFDictionary, &found) == errSecSuccess,
+                  let data = found as? Data else { return nil }
+            return String(data: data, encoding: .utf8)
+        }.value
+    }
+
+    enum Saved { case added, updated, same, failed }
+
+    /// Keeps `password` for `user` at `host`: a new item, or the existing one updated.
+    @discardableResult
+    static func save(_ password: String, user: String, host: String) async -> Saved {
+        await Task.detached(priority: .userInitiated) { () -> Saved in
+            store(password, user: user, host: host)
+        }.value
+    }
+
+    fileprivate static func store(_ password: String, user: String, host: String) -> Saved {
+        let data = Data(password.utf8)
+        var read = base(host, user)
+        read[kSecReturnData as String] = true
+        var existing: CFTypeRef?
+        let status = SecItemCopyMatching(read as CFDictionary, &existing)
+        if status == errSecSuccess {
+            if (existing as? Data) == data { return .same }
+            let changed = SecItemUpdate(base(host, user) as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+            return changed == errSecSuccess ? .updated : .failed
+        }
+        var add = base(host, user)
+        add[kSecValueData as String] = data
+        add[kSecAttrLabel as String] = "Sill: \(host)"
+        add[kSecAttrComment as String] = "Saved by Sill"
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess ? .added : .failed
+    }
+
+    /// Whether `password` is already what Sill has for `user` at `host`
+    /// (nothing to ask), different (asks to update), or not saved (asks to save).
+    static func state(_ password: String, user: String, host: String) async -> Saved {
+        await Task.detached(priority: .userInitiated) { () -> Saved in
+            var read = base(host, user)
+            read[kSecReturnData as String] = true
+            var existing: CFTypeRef?
+            guard SecItemCopyMatching(read as CFDictionary, &existing) == errSecSuccess else { return .added }
+            return (existing as? Data) == Data(password.utf8) ? .same : .updated
+        }.value
+    }
+}
+
+// MARK: - Import from Dia
+
+/// Dia's saved passwords into Sill. Dia keeps them as Chrome does: in a
+/// SQLite file in its profile, each password encrypted (AES-128-CBC) with a
+/// key derived from a secret in your login keychain, "Dia Safe Storage".
+/// macOS asks you once whether Sill may read that secret. Everything happens
+/// in Sill, in memory; the decrypted passwords go straight into the Keychain.
+enum DiaImport {
+    private static let profile = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Dia/User Data/Default")
+
+    static var available: Bool {
+        FileManager.default.fileExists(atPath: profile.appendingPathComponent("Login Data").path)
+    }
+
+    enum Outcome { case imported(added: Int, updated: Int, skipped: Int), noAccess, nothing, failed(String) }
+
+    static func run() async -> Outcome {
+        await Task.detached(priority: .userInitiated) { () -> Outcome in
+            guard let key = safeStorageKey() else { return .noAccess }
+            var rows: [(url: String, user: String, blob: Data)] = []
+            for name in ["Login Data", "Login Data For Account"] {
+                rows += read(profile.appendingPathComponent(name))
+            }
+            guard !rows.isEmpty else { return .nothing }
+            var added = 0, updated = 0, skipped = 0
+            var seen = Set<String>()
+            for row in rows {
+                guard let host = URL(string: row.url)?.host(), let password = decrypt(row.blob, key: key), !password.isEmpty,
+                      seen.insert("\(host)\u{0}\(row.user)").inserted else { skipped += 1; continue }
+                switch SavedPasswords.store(password, user: row.user, host: host) {
+                case .added: added += 1
+                case .updated: updated += 1
+                case .same: skipped += 1
+                case .failed: skipped += 1
+                }
+            }
+            return .imported(added: added, updated: updated, skipped: skipped)
+        }.value
+    }
+
+    /// The secret Dia encrypts with; reading it is what macOS asks you about.
+    private static func safeStorageKey() -> Data? {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: "Dia Safe Storage",
+                                    kSecAttrAccount as String: "Dia",
+                                    kSecReturnData as String: true,
+                                    kSecMatchLimit as String: kSecMatchLimitOne]
+        var found: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &found) == errSecSuccess, let secret = found as? Data else { return nil }
+        // Chrome's key: PBKDF2-HMAC-SHA1 of the secret, salt "saltysalt", 1003 rounds, 16 bytes.
+        var key = Data(count: kCCKeySizeAES128)
+        let salt = Data("saltysalt".utf8)
+        let status = key.withUnsafeMutableBytes { out in
+            secret.withUnsafeBytes { pass in
+                salt.withUnsafeBytes { s in
+                    CCKeyDerivationPBKDF(CCPBKDFAlgorithm(kCCPBKDF2), pass.baseAddress?.assumingMemoryBound(to: CChar.self), secret.count,
+                                         s.baseAddress?.assumingMemoryBound(to: UInt8.self), salt.count,
+                                         CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1), 1003,
+                                         out.baseAddress?.assumingMemoryBound(to: UInt8.self), kCCKeySizeAES128)
+                }
+            }
+        }
+        return status == kCCSuccess ? key : nil
+    }
+
+    /// Its logins table, read from a copy (Dia holds the file open while it runs).
+    private static func read(_ file: URL) -> [(url: String, user: String, blob: Data)] {
+        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        let copy = FileManager.default.temporaryDirectory.appendingPathComponent("sill-dia-\(UUID().uuidString).db")
+        guard (try? FileManager.default.copyItem(at: file, to: copy)) != nil else { return [] }
+        defer { try? FileManager.default.removeItem(at: copy) }
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(copy.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        let sql = "SELECT origin_url, username_value, password_value FROM logins WHERE blacklisted_by_user = 0"
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(statement) }
+        var out: [(String, String, Data)] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let url = sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? ""
+            let user = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? ""
+            let length = Int(sqlite3_column_bytes(statement, 2))
+            guard length > 0, let bytes = sqlite3_column_blob(statement, 2) else { continue }
+            out.append((url, user, Data(bytes: bytes, count: length)))
+        }
+        return out
+    }
+
+    /// "v10" + AES-128-CBC, IV of 16 spaces, PKCS#7 padding.
+    private static func decrypt(_ blob: Data, key: Data) -> String? {
+        guard blob.count > 3, blob.prefix(3) == Data("v10".utf8) else { return nil }
+        let cipher = blob.dropFirst(3)
+        let iv = Data(repeating: 0x20, count: kCCBlockSizeAES128)
+        var plain = Data(count: cipher.count + kCCBlockSizeAES128)
+        var written = 0
+        let status = plain.withUnsafeMutableBytes { out in
+            cipher.withUnsafeBytes { input in
+                key.withUnsafeBytes { k in
+                    iv.withUnsafeBytes { v in
+                        CCCrypt(CCOperation(kCCDecrypt), CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionPKCS7Padding),
+                                k.baseAddress, key.count, v.baseAddress, input.baseAddress, cipher.count,
+                                out.baseAddress, out.count, &written)
+                    }
+                }
+            }
+        }
+        guard status == kCCSuccess else { return nil }
+        return String(data: plain.prefix(written), encoding: .utf8)
+    }
+}

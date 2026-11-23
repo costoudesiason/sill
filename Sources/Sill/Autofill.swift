@@ -12,6 +12,29 @@ enum Autofill {
     private static var offeredPairing: Set<String> = []
 
     static func offer(for field: LoginField, in tab: Tab, webView: SillWebView, top: CGFloat) {
+        // Passwords Sill keeps (saved here, or brought over from Dia) come first.
+        guard field.kind == .username || field.kind == .password, let host = webView.url?.host(),
+              webView.url?.scheme == "https" || Tab.isLocal(host) else { return offerApple(for: field, in: tab, webView: webView, top: top) }
+        Task {
+            let saved = await SavedPasswords.logins(for: host)
+            guard !saved.isEmpty else { return offerApple(for: field, in: tab, webView: webView, top: top) }
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            menu.addItem(header("Passwords"))
+            for login in saved.prefix(8) {
+                menu.addItem(item(login.user.isEmpty ? "(no name)" : login.user, subtitle: Domains.bare(login.host), symbol: "key.fill") {
+                    Task {
+                        guard let password = await SavedPasswords.password(for: login) else { return }
+                        fill(user: login.user, password: password, in: webView)
+                    }
+                })
+            }
+            guard tab.webView === webView, webView.window?.isKeyWindow == true else { return }
+            show(menu, under: field, in: webView, top: top)
+        }
+    }
+
+    private static func offerApple(for field: LoginField, in tab: Tab, webView: SillWebView, top: CGFloat) {
         guard field.kind != .newPassword, Preferences.shared.applePasswords,
               let host = ApplePasswords.offers(on: webView.url, privateTab: tab.isPrivate) else { return }
         let passwords = ApplePasswords.shared

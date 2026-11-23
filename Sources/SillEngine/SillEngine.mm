@@ -584,6 +584,18 @@ class SEApp : public CefApp, public CefBrowserProcessHandler {
   void OnContextInitialized() override {
     CefRequestContextSettings settings;  // no cache path: kept in memory, gone when Sill quits
     gPrivateContext = CefRequestContext::CreateContext(settings, nullptr);
+    // Sign-in boxes are Sill's (its own glass menu and the Keychain): none of
+    // Chromium's form history, address or card suggestions, or password saving.
+    for (CefRefPtr<CefRequestContext> context : {CefRequestContext::GetGlobalContext(), gPrivateContext}) {
+      for (const char* name : {"autofill.profile_enabled", "autofill.credit_card_enabled", "autofill.enabled",
+                               "credentials_enable_service", "credentials_enable_autosignin"}) {
+        if (!context->HasPreference(name)) continue;
+        CefRefPtr<CefValue> off = CefValue::Create();
+        off->SetBool(false);
+        CefString error;
+        context->SetPreference(name, off, error);
+      }
+    }
     ready_ = true;
     for (void (^b)(void) in waiting_) b();
     [waiting_ removeAllObjects];

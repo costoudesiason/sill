@@ -418,12 +418,31 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
                     NSWorkspace.shared.openApplication(at: app, configuration: .init())
                 }
             }),
+            .item(.init(title: "Import Passwords from Dia…", symbol: "square.and.arrow.down", isEnabled: DiaImport.available) { [weak self] in
+                self?.importFromDia()
+            }),
             .separator,
             .item(.init(title: "Settings…", symbol: "gearshape", keys: ["⌘", ","]) { AppDelegate.shared.showSettings(nil) }),
         ]
         let anchor = bar.convert(bar.profileRect, to: nil)
         GlassMenu(title: Profile.name, entries: entries, searchable: false)
             .show(in: window, at: NSPoint(x: anchor.maxX, y: anchor.minY - 6), alignRight: true, from: bar.profile)
+    }
+
+    /// Dia's saved passwords into Sill's. macOS asks first whether Sill may
+    /// read the key Dia keeps them under.
+    func importFromDia() {
+        toast("Importing passwords from Dia…")
+        Task { @MainActor in
+            switch await DiaImport.run() {
+            case let .imported(added, updated, _):
+                let total = added + updated
+                toast(total == 0 ? "Your Dia passwords are already in Sill" : "Imported \(total) password\(total == 1 ? "" : "s") from Dia")
+            case .noAccess: toast("Sill wasn’t allowed to read Dia’s passwords")
+            case .nothing: toast("Dia has no saved passwords")
+            case .failed(let why): toast("Couldn’t import from Dia: \(why)")
+            }
+        }
     }
 
     @objc func showAllTabs(_ sender: Any?) {
@@ -1259,7 +1278,8 @@ extension BrowserWindowController: TabHost {
 
     func focused(_ tab: Tab, field: LoginField) {
         guard tab === selected, let webView = tab.webView else { return }
-        Autofill.offer(for: field, in: tab, webView: webView, top: topInset)
+        // On Chromium the page starts below the bar: field positions are the page's own.
+        Autofill.offer(for: field, in: tab, webView: webView, top: 0)
     }
 }
 

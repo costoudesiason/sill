@@ -44,9 +44,16 @@ for kind in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
 <key>LSMinimumSystemVersion</key><string>26.0</string><key>NSSupportsAutomaticGraphicsSwitching</key><true/>
 </dict></plist>
 P
-  codesign -s - --force "$HA" >/dev/null 2>&1
 done
 rm -f build/chromium-helper
-codesign -s - --force "$APP/Contents/Helpers/sill-mcp" >/dev/null 2>&1
-codesign -s - --force "$APP/Contents/MacOS/Sill" >/dev/null 2>&1
-echo "Built $APP"
+# Signed as the same app from build to build (Developer ID if there is one),
+# inside out: the engine, its helpers, the agent tool, then the app. macOS
+# then knows it across builds: the Keychain's "always allow" holds, and
+# saved passwords open without asking again.
+IDENTITY="${SILL_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | grep -m1 -o '"Developer ID Application[^"]*"' | tr -d '"' || true)}"
+[ -z "$IDENTITY" ] && IDENTITY="-"
+codesign --force -s "$IDENTITY" "$APP/Contents/Frameworks/Chromium Embedded Framework.framework" >/dev/null 2>&1
+for HA in "$APP"/Contents/Frameworks/*Helper*.app; do codesign --force -s "$IDENTITY" "$HA" >/dev/null 2>&1; done
+codesign --force -s "$IDENTITY" "$APP/Contents/Helpers/sill-mcp" >/dev/null 2>&1
+codesign --force -s "$IDENTITY" "$APP" >/dev/null 2>&1
+echo "Built $APP (signed: $IDENTITY)"
