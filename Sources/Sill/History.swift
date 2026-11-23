@@ -159,6 +159,8 @@ final class History {
         visit.typed += 1
         visits[key] = visit
         noted(visit)
+        // Not a write of its own: it goes with the next one, or at quit.
+        edits += 1
     }
 
     func clear() {
@@ -410,9 +412,28 @@ final class History {
         changed()
     }
 
+    /// How many changes there have been, and how many of them are on disk.
+    private var edits = 0
+    private var saved = 0
+
     private func persist() {
-        saver.save { [weak self] in self.map { Array($0.visits.values) } ?? [] }
+        edits += 1
+        var held = 0
+        saver.save({ [weak self] in
+            guard let self else { return [] }
+            held = self.edits
+            return Array(self.visits.values)
+        }, written: { [weak self] in
+            guard let self else { return }
+            self.saved = max(self.saved, held)
+        })
     }
 
-    func flush() { saver.flush(Array(visits.values)) }
+    /// At quit. Nothing to write when the file already holds every change:
+    /// encoding all of history is the larger part of quitting.
+    func flush() {
+        guard saved != edits else { return }
+        saver.flush(Array(visits.values))
+        saved = edits
+    }
 }

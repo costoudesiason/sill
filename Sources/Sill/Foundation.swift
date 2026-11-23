@@ -231,13 +231,15 @@ final class Saver<Value: Encodable> {
         self.delay = delay
     }
 
-    func save(_ make: @escaping () -> Value) {
+    /// `written` is called on the main thread once the value made is on disk.
+    func save(_ make: @escaping () -> Value, written: (@MainActor () -> Void)? = nil) {
         pending?.cancel()
         let work = DispatchWorkItem { [url, queue] in
             let value = make()
             queue.async {
                 guard let data = try? JSONEncoder().encode(value) else { return }
-                try? data.write(to: url, options: .atomic)
+                guard (try? data.write(to: url, options: .atomic)) != nil, let written else { return }
+                DispatchQueue.main.async { MainActor.assumeIsolated(written) }
             }
         }
         pending = work
