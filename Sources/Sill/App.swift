@@ -19,7 +19,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private(set) var browsers: [BrowserWindowController] = []
     weak var lastBrowser: BrowserWindowController?
-    private var settings: NSWindowController?
     private let session = Saver<[SessionWindow]>(Places.support.appendingPathComponent("session.json"), delay: 0.8)
     private var openedURLsAtLaunch = false
     private var launched = false
@@ -192,10 +191,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let current, current.window?.isVisible == true { current.openLocation(sender) } else { newWindow(sender) }
     }
 
+    /// ⌘,: the settings live in the palette of the window in front.
     @objc func showSettings(_ sender: Any?) {
-        if settings == nil { settings = SettingsWindow.make() }
-        settings?.showWindow(nil)
-        settings?.window?.makeKeyAndOrderFront(nil)
+        let browser = current(isPrivate: false) ?? current(isPrivate: true) ?? {
+            let made = makeBrowser(isPrivate: false)
+            made.showWindow(nil)
+            return made
+        }()
+        browser.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+        browser.showSettings()
     }
 
     @objc func clearHistory(_ sender: Any?) {

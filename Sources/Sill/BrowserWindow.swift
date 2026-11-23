@@ -135,9 +135,21 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         window.isOpaque = true
         window.backgroundColor = .windowBackgroundColor
         if isPrivate { window.appearance = NSAppearance(named: .darkAqua) }
-        // No traffic lights: ⌘W, ⇧⌘W, ⌘M and full screen stay in the menus.
-        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            window.standardWindowButton(kind)?.isHidden = true
+        if popup {
+            // A small window a page opened ("Sign in with…") has its traffic
+            // lights, as any panel does: there's no tab row to close it from.
+            // An empty unified toolbar makes the title bar the bar's height,
+            // so macOS centres them in it.
+            let toolbar = NSToolbar(identifier: "popup")
+            toolbar.showsBaselineSeparator = false
+            toolbar.allowsUserCustomization = false
+            window.toolbar = toolbar
+            window.toolbarStyle = .unified
+        } else {
+            // No traffic lights: ⌘W, ⇧⌘W, ⌘M and full screen stay in the menus.
+            for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                window.standardWindowButton(kind)?.isHidden = true
+            }
         }
         super.init(window: window)
         window.delegate = self
@@ -175,6 +187,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         updateNavigation()
         applyLooks()
         // Settings apply as they change, to every window.
+        // Only what a change touches is redone: a switch for the ad blocker
+        // doesn't recompute the window's shadow or lay the tabs out again.
         watchingPrefs = Preferences.shared.objectWillChange.sink { [weak self] in
             DispatchQueue.main.async { self?.applyLooks() }
         }
@@ -191,9 +205,32 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     // MARK: - Looks
 
+    /// What the window's look depends on, to tell which parts a change of
+    /// settings touched.
+    private struct Looks: Equatable {
+        var theme: Theme, glassWash: Double, glassBar: Bool
+        var roundCorners: Bool, cornerRadius: Double
+        var tabWidth: TabWidth, closeButtons: CloseButtons, tabPreviews: Bool
+        init(_ p: Preferences) {
+            theme = p.theme; glassWash = p.glassWash; glassBar = p.glassBar
+            roundCorners = p.roundCorners; cornerRadius = p.cornerRadius
+            tabWidth = p.tabWidth; closeButtons = p.closeButtons; tabPreviews = p.showsTabPreviews
+        }
+    }
+
     private func applyLooks() {
         let prefs = Preferences.shared
-        if !isPrivate { window?.appearance = prefs.theme.appearance }
+        let looks = Looks(prefs)
+        let before = appliedLooks
+        guard looks != before else { return }
+        appliedLooks = looks
+        if before?.theme != looks.theme, !isPrivate { window?.appearance = prefs.theme.appearance }
+        if before?.tabWidth != looks.tabWidth || before?.closeButtons != looks.closeButtons || before?.tabPreviews != looks.tabPreviews {
+            strip.prefsChanged()
+        }
+        guard before?.glassWash != looks.glassWash || before?.glassBar != looks.glassBar
+            || before?.roundCorners != looks.roundCorners || before?.cornerRadius != looks.cornerRadius
+            || before?.theme != looks.theme else { return }
         let amount = CGFloat(prefs.glassWash)
         wash.effectiveAppearance.performAsCurrentDrawingAppearance {
             wash.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(amount).cgColor
@@ -215,9 +252,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         stage.layer?.backgroundColor = round && !prefs.glassBar ? NSColor.windowBackgroundColor.cgColor : nil
         Self.clip(top, radius: radius, corners: .top)
         Self.clip(pageHost, radius: radius, corners: .bottom)
-        window?.invalidateShadow()
-        strip.prefsChanged()
+        if before?.roundCorners != looks.roundCorners || before?.cornerRadius != looks.cornerRadius {
+            window?.invalidateShadow()
+        }
     }
+    private var appliedLooks: Looks?
 
     private enum Edge { case top, bottom }
 
@@ -279,6 +318,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     var topInset: CGFloat { TopBar.height }
 
     private func stageLaidOut() {
+        // Back and forward start after the traffic lights where there are some.
+        if isPopup, let window, let zoom = window.standardWindowButton(.zoomButton), !zoom.isHidden,
+           !window.styleMask.contains(.fullScreen) {
+            bar.leadingInset = zoom.convert(zoom.bounds, to: nil).maxX + 6
+        } else {
+            bar.leadingInset = 0
+        }
         top.frame = NSRect(x: 0, y: 0, width: stage.bounds.width, height: TopBar.height)
         bar.frame = top.bounds
         // The page starts below the bar: nothing goes behind the glass.
@@ -375,6 +421,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         let webView = tab.materialize()
         placePages(keep: keep)
         tab.reloadIfCrashed()
+        tab.loadIfEmpty()
         // Back from picture in picture: WebKit puts a video back in its page
         // only once that page is in the window, so after it is.
         if tab === pictured {
@@ -457,6 +504,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private func changed() { onChange?() }
 
     // MARK: - Palette
+
+    /// The palette, turned to its settings.
+    func showSettings() {
+        if !paletteOpen { showPalette(.newTab); palette.showSettings(true, animated: false) } else { palette.showSettings(true) }
+    }
 
     func showPalette(_ mode: Palette.Mode) {
         hidePreview(animated: false)
@@ -904,6 +956,53 @@ final class BrowserNSWindow: NSWindow {
     /// Esc anywhere puts the palette or the find bar away.
     override func cancelOperation(_ sender: Any?) {
         (windowController as? BrowserWindowController)?.escape()
+    }
+
+    /// The shortcuts worth holding down. The menu bar flashes its title for every repeat and
+    /// sleeps the main thread some 50 ms each time to do it, so a held key steps at a third of
+    /// the repeat rate with nothing drawn in between. The repeats go straight to the action;
+    /// the first press still goes through the menu.
+    private static let held: Set<Selector> = [
+        #selector(BrowserWindowController.nextTab(_:)), #selector(BrowserWindowController.previousTab(_:)),
+        #selector(BrowserWindowController.findNext(_:)), #selector(BrowserWindowController.findPrevious(_:)),
+        #selector(BrowserWindowController.zoomIn(_:)), #selector(BrowserWindowController.zoomOut(_:)),
+        #selector(BrowserWindowController.goBack(_:)), #selector(BrowserWindowController.goForward(_:)),
+    ]
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // A page in front takes Control-Tab for itself and the menu never hears of it.
+        if event.type == .keyDown, event.keyCode == 48,
+           let controller = windowController as? BrowserWindowController {
+            switch event.modifierFlags.intersection([.command, .shift, .control, .option]) {
+            case .control: controller.nextTab(nil); return true
+            case [.control, .shift]: controller.previousTab(nil); return true
+            default: break
+            }
+        }
+        if super.performKeyEquivalent(with: event) { return true }
+        guard event.type == .keyDown, event.isARepeat,
+              let controller = windowController as? BrowserWindowController,
+              let key = event.characters(byApplyingModifiers: .command), !key.isEmpty,
+              let item = Self.item(for: key, event.modifierFlags.intersection([.command, .shift, .control, .option]),
+                                   in: NSApp.mainMenu) else { return false }
+        if controller.validateMenuItem(item), let action = item.action {
+            NSApp.sendAction(action, to: controller, from: item)
+        }
+        return true
+    }
+
+    private static func item(for key: String, _ modifiers: NSEvent.ModifierFlags, in menu: NSMenu?) -> NSMenuItem? {
+        for item in menu?.items ?? [] {
+            if let found = Self.item(for: key, modifiers, in: item.submenu) { return found }
+            guard let action = item.action, held.contains(action) else { continue }
+            // "+" is the key "=" with Shift, and is reached without it too.
+            let plus = item.keyEquivalent == "+"
+            if (plus ? "=" : item.keyEquivalent) == key,
+               item.keyEquivalentModifierMask == modifiers || (plus && item.keyEquivalentModifierMask.union(.shift) == modifiers) {
+                return item
+            }
+        }
+        return nil
     }
 }
 

@@ -154,7 +154,7 @@ final class TabStripView: NSView {
     }
 
     func prefsChanged() {
-        items.forEach { $0.needsLayout = true }
+        items.forEach { $0.refresh() }
         layoutItems(animated: true)
     }
 
