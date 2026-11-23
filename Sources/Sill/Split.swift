@@ -51,6 +51,19 @@ final class PageSplitView: NSSplitView, NSSplitViewDelegate {
         applying = false
     }
 
+    /// Dragged near the middle, the divider settles exactly there, with a
+    /// tick under the fingers, as the system's own snapping does.
+    private var snapped = false
+    func splitView(_ splitView: NSSplitView, constrainSplitPosition proposed: CGFloat, ofSubviewAt index: Int) -> CGFloat {
+        let middle = round(bounds.width / 2)
+        let near = abs(proposed - middle) < 8
+        if near != snapped {
+            snapped = near
+            if near, !applying { NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now) }
+        }
+        return near ? middle : proposed
+    }
+
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposed: CGFloat, ofSubviewAt index: Int) -> CGFloat {
         max(proposed, 320)
     }

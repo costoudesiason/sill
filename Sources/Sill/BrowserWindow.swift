@@ -81,6 +81,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private lazy var peek: Peek = { let peek = Peek(); stage.addSubview(peek); return peek }()
     /// The card over a tab the pointer rests on (TabPreview.swift).
     private lazy var preview = TabPreview()
+    /// The thin line between the bar and the page while the page loads.
+    private let loadingLine = LoadingLine()
     private var previewWait: DispatchWorkItem?
     private var previewLeave: DispatchWorkItem?
     private var previewRefresh: Timer?
@@ -318,6 +320,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     var topInset: CGFloat { TopBar.height }
 
     private func stageLaidOut() {
+        if loadingLine.superview !== stage { stage.addSubview(loadingLine) }
+        loadingLine.frame = NSRect(x: 0, y: TopBar.height - LoadingLine.thickness, width: stage.bounds.width, height: LoadingLine.thickness)
         // Back and forward start after the traffic lights where there are some.
         if isPopup, let window, let zoom = window.standardWindowButton(.zoomButton), !zoom.isHidden,
            !window.styleMask.contains(.fullScreen) {
@@ -420,6 +424,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         tab.lastShown = Date()
         let webView = tab.materialize()
         placePages(keep: keep)
+        loadingLine.show(progress: tab.progress, loading: tab.isLoading, jump: true)
         tab.reloadIfCrashed()
         tab.loadIfEmpty()
         // Back from picture in picture: WebKit puts a video back in its page
@@ -431,7 +436,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // Clicks, ⌘1–9 and ⌃Tab only move the selection; a tab added or
         // closed changes the row.
         if strip.matches(tabs) { strip.select(tab) } else { strip.sync(animated: animated) }
-        strip.markPaired(split?.contains(tab) == true ? split?.other(than: tab) : nil)
+        strip.showPair(split?.left, split?.right)
         warmNeighbours(of: tab)
         window?.title = tab.displayTitle
         updateNavigation()
@@ -451,7 +456,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
         tabs.remove(at: index)
         // A split loses one side: the page left over has the window to itself.
-        if let split, split.contains(tab) { self.split = nil; strip.markPaired(nil) }
+        if let split, split.contains(tab) { self.split = nil; strip.showPair(nil, nil) }
         // Its sound and video go with it, floating or not: nothing keeps
         // playing from a tab that's gone.
         if pictured === tab { pictured = nil }
@@ -810,6 +815,9 @@ extension BrowserWindowController: TabHost {
         switch what {
         case .icon, .loading:
             strip.refresh(tab)
+            if what == .loading, tab === selected { loadingLine.show(progress: tab.progress, loading: tab.isLoading) }
+        case .progress:
+            if tab === selected { loadingLine.show(progress: tab.progress, loading: tab.isLoading) }
         case .title:
             // Not a session save: titles are read when it's written, and a
             // page ticking its title would put the save off forever.
@@ -1110,7 +1118,7 @@ extension BrowserWindowController {
         split = onLeft ? SplitPair(left: tab, right: nil) : SplitPair(left: nil, right: tab)
         if selected === tab {
             placePages(keep: nil)
-            strip.markPaired(nil)
+            strip.showPair(nil, nil)
         } else {
             select(tab)
         }
@@ -1119,15 +1127,24 @@ extension BrowserWindowController {
     fileprivate func fillSplit(with tab: Tab) {
         guard let split else { return }
         if split.left == nil { split.left = tab } else { split.right = tab }
+        // The pair sits together in the row, left then right, in one capsule.
+        if let left = split.left, let right = split.right,
+           let l = tabs.firstIndex(where: { $0 === left }), let r = tabs.firstIndex(where: { $0 === right }), r != l + 1 {
+            tabs.remove(at: r)
+            let at = (tabs.firstIndex(where: { $0 === left }) ?? l) + 1
+            tabs.insert(right, at: at)
+            strip.sync(animated: true)
+            changed()
+        }
         select(tab)
         placePages(keep: nil)
-        strip.markPaired(split.other(than: tab))
+        strip.showPair(split.left, split.right)
     }
 
     @objc func unsplit() {
         guard split != nil else { return }
         split = nil
-        strip.markPaired(nil)
+        strip.showPair(nil, nil)
         placePages(keep: nil)
         if let webView = selected?.webView { window?.makeFirstResponder(webView) }
     }
@@ -1237,7 +1254,7 @@ extension BrowserWindowController {
         selected = tab
         tab.lastShown = Date()
         strip.select(tab)
-        strip.markPaired(split.other(than: tab))
+        strip.showPair(split.left, split.right)
         window?.title = tab.displayTitle
         updateNavigation()
         changed()

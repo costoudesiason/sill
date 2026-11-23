@@ -214,9 +214,9 @@ private struct Hairline: View {
 private struct Tile: View {
     let icon: IconKind
     let tint: Color
-    let plays: Int
+    let on: Bool
     var body: some View {
-        HoverIcon(kind: icon, plays: plays, size: 13)
+        HoverIcon(kind: icon, on: on, size: 13)
             .foregroundStyle(.white)
             .frame(width: 24, height: 24)
             .background(tint.gradient, in: RoundedRectangle(cornerRadius: 6.5, style: .continuous))
@@ -229,11 +229,11 @@ private struct RowFrame<Trailing: View>: View {
     let title: String
     var detail: String?
     @ViewBuilder var trailing: Trailing
-    @State private var plays = 0
+    @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 12) {
-            Tile(icon: icon, tint: tint, plays: plays)
+            Tile(icon: icon, tint: tint, on: hovering)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(.system(size: 13)).lineLimit(1)
                 if let detail {
@@ -247,7 +247,7 @@ private struct RowFrame<Trailing: View>: View {
         .padding(.trailing, 14)
         .frame(height: detail == nil ? 42 : 50)
         .contentShape(Rectangle())
-        .onHover { if $0 { plays += 1 } }
+        .onHover { hovering = $0 }
     }
 }
 

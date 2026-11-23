@@ -23,7 +23,7 @@ protocol TabHost: AnyObject {
 /// shown, so restored tabs cost nothing until they're clicked.
 @MainActor
 final class Tab: NSObject {
-    enum Change { case title, url, loading, icon, navigation, scroll }
+    enum Change { case title, url, loading, icon, navigation, scroll, progress }
 
     let id = UUID()
     let isPrivate: Bool
@@ -36,6 +36,8 @@ final class Tab: NSObject {
     /// (TabPreview.swift): a picture while the page runs, let go when the
     /// card goes; squeezed small while the tab sleeps.
     var picture: CGImage?
+    /// How far the page has loaded, 0 to 1, for the line under the bar.
+    var progress: Double = 0
     var pictureTakenAt: CFTimeInterval = 0
     var sleepingPicture: Data?
     /// The tab this one was opened from, for placing and for going back to it.
@@ -184,6 +186,13 @@ final class Tab: NSObject {
                     self.url = url
                     if hostChanged, let icon = Favicons.shared.cached(for: url) { self.favicon = icon; self.host?.tabChanged(self, .icon) }
                     self.host?.tabChanged(self, .url)
+                }
+            },
+            view.observe(\.estimatedProgress, options: [.new]) { [weak self] view, _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.progress = view.estimatedProgress
+                    self.host?.tabChanged(self, .progress)
                 }
             },
             view.observe(\.isLoading, options: [.new]) { [weak self] view, _ in

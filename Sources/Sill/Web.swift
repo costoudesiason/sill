@@ -193,13 +193,45 @@ final class SillWebView: WKWebView {
     }
 
     /// "New Window" reads "New Tab" here: that's what it does.
+    /// The page's right-click menu is Sill's glass one: WebKit's items, in
+    /// the same order, run as WebKit runs them. Items that open a submenu
+    /// (Share, Services, Speech) aren't offered; the native menu doesn't show.
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         for item in menu.items {
             item.title = item.title.replacingOccurrences(of: "New Window", with: "New Tab")
             if item.identifier?.rawValue == "WKMenuItemIdentifierDownloadLinkedFile" { item.title = "Download Linked File" }
         }
         super.willOpenMenu(menu, with: event)
+        guard let window, GlassMenu.isEnabledForPages else { return }
+        let kept = menu.items.filter { $0.isSeparatorItem || ($0.submenu == nil && !$0.isHidden && $0.action != nil) }
+        let copy = NSMenu()
+        for item in kept { menu.removeItem(item); copy.addItem(item) }
+        menu.removeAllItems()
+        // macOS adds its Services item to any menu left: not to this one.
+        menu.allowsContextMenuPlugIns = false
+        let entries = GlassMenu.entries(from: copy, symbols: Self.symbols)
+        guard !entries.isEmpty else { return }
+        let point = event.locationInWindow
+        // After WebKit has finished with its own (now empty) menu.
+        DispatchQueue.main.async { [weak window] in
+            guard let window else { return }
+            withExtendedLifetime(copy) {
+                GlassMenu(title: nil, entries: entries, searchable: entries.count > 8).show(in: window, at: point, from: nil)
+            }
+        }
     }
+
+    private static let symbols: [String: String] = [
+        "Open Link in New Tab": "plus.square.on.square", "Open Link": "arrow.up.right.square",
+        "Download Linked File": "arrow.down.circle", "Copy Link": "link", "Copy": "doc.on.doc",
+        "Open Image in New Tab": "photo.on.rectangle", "Save Image As…": "square.and.arrow.down",
+        "Copy Image": "photo", "Copy Image Address": "link", "Back": "chevron.backward", "Forward": "chevron.forward",
+        "Reload": "arrow.clockwise", "Inspect Element": "hammer", "Look Up": "character.book.closed",
+        "Paste": "doc.on.clipboard", "Cut": "scissors", "Select All": "selection.pin.in.out",
+        "Search with Google": "magnifyingglass", "Translate": "translate", "Download Image": "arrow.down.circle",
+        "Download Video": "arrow.down.circle", "Copy Video Address": "link", "Show Controls": "slider.horizontal.below.rectangle",
+        "Enter Full Screen": "arrow.up.left.and.arrow.down.right", "Enter Picture in Picture": "pip.enter",
+    ]
 
     /// The page being left stays over the one coming in until that has drawn;
     /// for that moment it is only a picture, and clicks go to the new page.

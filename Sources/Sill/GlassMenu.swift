@@ -28,6 +28,9 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
         case separator
     }
 
+    /// Pages' right-click menus use the glass menu (Web.swift).
+    static var isEnabledForPages = true
+
     /// The one on screen; showing another puts it away.
     private static var current: GlassMenu?
     /// What opened the menu that just closed, and when: a click on the same
