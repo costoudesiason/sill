@@ -96,6 +96,11 @@ final class LoadingLine: NSView {
         tiring.duration = 9
         tiring.timingFunction = CAMediaTimingFunction(controlPoints: 0.1, 0.5, 0.3, 1)
         tiring.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
+        // Held at its end too: taken off when done, the arrival still held
+        // under it showed through, and the line fell back to where it had
+        // arrived (a load stalled for nine seconds; seen in a probe).
+        tiring.fillMode = .forwards
+        tiring.isRemovedOnCompletion = false
         bar.add(tiring, forKey: "creep")
     }
 

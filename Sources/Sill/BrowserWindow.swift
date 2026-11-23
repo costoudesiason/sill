@@ -1272,6 +1272,13 @@ extension BrowserWindowController {
         // A page's question goes where its page now is.
         defer { placePrompts() }
         if let keep { leaving = keep }
+        // A page only drawing ahead (drawAhead) is under the page in front
+        // and seen by no one. Aside before anything moves, unless it's the
+        // one coming in: the page over it may be about to go into a split's
+        // half, and it would be left on top of the pair.
+        for case let page as SillWebView in pageHost.subviews where page.drawingAhead && page !== selected.webView {
+            page.park()
+        }
         if let split, split.contains(selected) {
             // As for one page below: the pair comes back under the page being left.
             let shown = selected.webView as? SillWebView
