@@ -229,7 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// ⌘,: the settings live in the palette of the window in front.
     @objc func showSettings(_ sender: Any?) {
-        let browser = current(isPrivate: false) ?? current(isPrivate: true) ?? {
+        let browser = current(isPrivate: current?.isPrivate == true) ?? current(isPrivate: false) ?? current(isPrivate: true) ?? {
             let made = makeBrowser(isPrivate: false)
             made.showWindow(nil)
             return made
