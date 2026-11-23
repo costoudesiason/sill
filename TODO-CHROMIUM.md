@@ -14,46 +14,20 @@ House rules, from the owner:
 
 Order of value, highest first.
 
-## 1. Extensions button and panel
+## Done since this list was written
 
-A button on the right side of the bar, in the actions capsule with Downloads / New Tab /
-Show All Tabs (`TopBar.swift`, `actionsGlass`), SF Symbol `puzzlepiece.extension`.
-
-- Click opens a panel in the same glass popover style as Downloads
-  (`BrowserWindowController.showDownloads`): each installed extension with its icon,
-  name, version and an on/off switch, and a row to open its settings page.
-- Today the only extension is uBlock Origin Lite, shipped in
-  `Contents/Resources/Extensions` and loaded with `--load-extension` (see
-  `InstallExtensions` in `SillEngine.mm`). Its ID is derived from its folder path
-  (currently `flohjepcfceloadfphbicnlbebfnalch`).
-- uBlock Origin Lite's own popup (`chrome-extension://<id>/popup.html`) sets the
-  filtering mode for the current site. Try showing it inside the panel in an `SEWebView`.
-  Its script asks `chrome.tabs.query({active: true, currentWindow: true})`, which may not
-  know Alloy-style browsers; if it can't see the tab, give the panel a native per-site
-  control instead (off / basic / optimal / complete), applied through the extension's
-  messaging or its settings storage.
-- Its dashboard (`chrome-extension://<id>/dashboard.html`) opens in a tab from the panel.
-- Switching an extension off: CEF Alloy has no extension-management API; simplest is to
-  leave it out of `--load-extension` and ask to relaunch, or remove its DNR rules at
-  runtime if a supported way exists.
-- Private windows use an in-memory request context (`gPrivateContext`) and get no
-  extensions today; make uBlock Origin Lite run there too if CEF allows, otherwise say so
-  in the panel.
-
-## 2. Profile button
-
-Beside the extensions button (or at the left of the actions capsule): the user's picture
-from macOS (Contacts "Me" card / account picture), else initials, in a small circle.
-
-- Click opens a `GlassMenu` (`GlassMenu.swift`): the name at the top, then New Private
-  Window, History (⌘Y), Downloads, Passwords, Settings, and the profile list.
-- Profiles = separate browsing data (cookies, history, sessions). In CEF each profile is a
-  `CefRequestContext` with its own `cache_path` under
-  `~/Library/Application Support/Sill Chromium/Profiles/<name>`; each window belongs to
-  one profile and shows its picture in the button. "New Profile…" asks for a name. Keep a
-  single default profile until the user makes another.
-- Sill's own stores (history, session, downloads, site permissions) need a per-profile
-  folder too.
+- Extensions button and panel (`Extensions.swift`): uBlock Origin Lite's per-site mode
+  set natively through its `getFilteringMode`/`setFilteringMode` messages (its own popup
+  can't see Sill's tabs).
+- Profile button and menu (your Mac account picture).
+- Sill's page script and the agents' script run in Chromium pages (handed over at page
+  creation, run by the helper at document start; messages via `__sillPost`). Agent
+  snapshots/clicks work. Gap: on Chromium they share the page's JavaScript world, where
+  WebKit had a private one.
+- Passwords (`SavedPasswords.swift`): Keychain storage, glass fill menu, save/update card
+  after a sign-in, Import from Dia in the profile menu. Chromium's own autofill is off.
+  Still to do: a place in Sill to see, edit and delete saved passwords (today they're in
+  Keychain Access as "Sill: <site>"), and "never for this site".
 
 ## 3. Video formats and DRM
 
@@ -88,15 +62,9 @@ and whether the CEF build has PGO (it should when built per `ENGINE.md` with
 
 ## 6. Smaller things already found
 
-- Agent control on Chromium: `page.click` / `page.snapshot` fail because Sill's
-  `AgentScript` isn't injected into Chromium pages. Inject it at document end (CEF has no
-  user-script API in Alloy; do it from the render process handler in
-  `Tools/chromium-helper.mm`, or by `Runtime.addScriptToEvaluateOnNewDocument` over the
-  DevTools protocol).
-- Sill's page scripts (`PageScripts.main`: media state, autofill, link hover) aren't
-  injected either, same fix. Then `Tab.playingVideo` works, and
-  `BrowserWindowController.isPlayingAudio` no longer has to answer "yes" for every page
-  (which makes every tab switch run the picture-in-picture check).
+- `Tab.playingVideo` now comes from the page script on Chromium, so
+  `BrowserWindowController.isPlayingAudio` can stop answering "yes" for every page
+  (it makes every tab switch run the picture-in-picture check).
 - Camera, microphone and location prompts: route `CefPermissionHandler` to Sill's
   existing permission card (`Permissions.swift`).
 - Downloads list UI on Chromium, `beforeunload` ("leave page?") via `mayClose`.
