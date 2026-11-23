@@ -84,18 +84,19 @@ final class History {
     private func noted(_ visit: Visit) {
         if knownHosts != nil, let host = visit.address?.host() { knownHosts?.insert(Domains.bare(host)) }
         if let limit = latest?.limit {
-            // Only as long as the list holds every entry or is full: a retitled
-            // entry too old to be in it stays out.
-            if let at = latest?.visits.firstIndex(where: { $0.url == visit.url }) {
-                if latest?.visits[at].last == visit.last {
-                    latest?.visits[at] = visit
-                } else {
-                    latest?.visits.remove(at: at)
-                    latest?.visits.insert(visit, at: 0)
-                }
+            // The list is newest first. A retitle keeps an entry where it is;
+            // a visit now goes to the front. Anything else that could belong
+            // part-way down (the clock went back, an entry dated ahead) has
+            // the list made again.
+            let at = latest?.visits.firstIndex(where: { $0.url == visit.url })
+            if let at, latest?.visits[at].last == visit.last {
+                latest?.visits[at] = visit
             } else if let newest = latest?.visits.first, visit.last < newest.last {
-                if (latest?.visits.count ?? 0) < limit { latest = nil }
+                let full = (latest?.visits.count ?? 0) >= limit
+                let oldest = latest?.visits.last?.last ?? visit.last
+                if at != nil || !full || visit.last > oldest { latest = nil }
             } else {
+                if let at { latest?.visits.remove(at: at) }
                 latest?.visits.insert(visit, at: 0)
                 if (latest?.visits.count ?? 0) > limit { latest?.visits.removeLast() }
             }
