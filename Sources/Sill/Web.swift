@@ -99,6 +99,27 @@ enum Web {
         unsafeBitCast(preferences.method(for: set), to: Setter.self)(preferences, set, false)
     }
 
+    /// Scrolling that glides, as Chromium's does: a mouse wheel's steps and
+    /// the arrow, space and page keys animate instead of jumping. WebKit
+    /// has both (its "Scroll animator" and smooth keyboard scrolling) but
+    /// leaves them off; trackpads keep the system's own momentum either way.
+    /// The features are asked for by name; a WebKit without them is as before.
+    private static let smoothFeatures: [NSObject] = {
+        let list = NSSelectorFromString("_features")
+        guard WKPreferences.responds(to: list),
+              let all = WKPreferences.perform(list)?.takeUnretainedValue() as? [NSObject] else { return [] }
+        let wanted: Set<String> = ["ScrollAnimatorEnabled", "EventHandlerDrivenSmoothKeyboardScrollingEnabled"]
+        return all.filter { ($0.value(forKey: "key") as? String).map(wanted.contains) ?? false }
+    }()
+
+    static func smoothScrolling(_ preferences: WKPreferences) {
+        let set = NSSelectorFromString("_setEnabled:forFeature:")
+        guard preferences.responds(to: set) else { return }
+        typealias Setter = @convention(c) (AnyObject, Selector, Bool, AnyObject) -> Void
+        let call = unsafeBitCast(preferences.method(for: set), to: Setter.self)
+        for feature in smoothFeatures { call(preferences, set, true, feature) }
+    }
+
     static func configuration(private isPrivate: Bool) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
         configuration.processPool = pool
@@ -106,6 +127,7 @@ enum Web {
         configuration.websiteDataStore = isPrivate ? privateStore : .default()
         configuration.applicationNameForUserAgent = applicationName
         configuration.preferences.isElementFullscreenEnabled = true
+        smoothScrolling(configuration.preferences)
         configuration.preferences.isFraudulentWebsiteWarningEnabled = true
         configuration.preferences.isTextInteractionEnabled = true
         configuration.allowsAirPlayForMediaPlayback = true
