@@ -91,7 +91,10 @@ final class SplitChooser: NSView {
     private let list = FlippedView()
     private let cancel = NSButton(title: "Cancel", target: nil, action: nil)
     private let empty = NSTextField(labelWithString: "No other tabs are open.")
-    private var rows: [ChoiceRow] = []
+    private var tabs: [Tab] = []
+    /// Only the rows in view, by place in the list: a hundred open tabs
+    /// are a screenful of views, and the rest are made as they scroll in.
+    private var rows: [Int: ChoiceRow] = [:]
 
     override var isFlipped: Bool { true }
 
@@ -116,18 +119,17 @@ final class SplitChooser: NSView {
         cancel.target = self
         cancel.action = #selector(cancelled)
         body.addSubview(cancel)
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(scrolled), name: NSView.boundsDidChangeNotification,
+                                               object: scroll.contentView)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func offer(_ tabs: [Tab]) {
-        rows.forEach { $0.removeFromSuperview() }
-        rows = tabs.map { tab in
-            let row = ChoiceRow(tab: tab)
-            row.onClick = { [weak self] in self?.onPick?(tab) }
-            list.addSubview(row)
-            return row
-        }
+        rows.values.forEach { $0.removeFromSuperview() }
+        rows = [:]
+        self.tabs = tabs
         empty.isHidden = !tabs.isEmpty
         needsLayout = true
     }
@@ -137,21 +139,44 @@ final class SplitChooser: NSView {
     override func layout() {
         super.layout()
         let width = min(420, bounds.width - 48)
-        let listHeight = min(CGFloat(max(rows.count, 1)) * Self.rowHeight, bounds.height - 200)
+        let listHeight = min(CGFloat(max(tabs.count, 1)) * Self.rowHeight, bounds.height - 200)
         let height = 44 + max(listHeight, 40) + 64
         glass.frame = NSRect(x: (bounds.width - width) / 2, y: max(24, (bounds.height - height) / 2), width: width, height: height)
         body.frame = glass.bounds
         title.sizeToFit()
         title.frame.origin = NSPoint(x: 20, y: 18)
         scroll.frame = NSRect(x: 0, y: 44, width: width, height: max(listHeight, 40))
-        list.frame = NSRect(x: 0, y: 0, width: width, height: CGFloat(rows.count) * Self.rowHeight)
-        for (i, row) in rows.enumerated() {
-            row.frame = NSRect(x: 8, y: CGFloat(i) * Self.rowHeight, width: width - 16, height: Self.rowHeight)
-        }
+        list.frame = NSRect(x: 0, y: 0, width: width, height: CGFloat(tabs.count) * Self.rowHeight)
+        fill()
         empty.frame = NSRect(x: 0, y: 56, width: width, height: 18)
         cancel.sizeToFit()
         cancel.frame.origin = NSPoint(x: (width - cancel.frame.width) / 2, y: height - cancel.frame.height - 16)
     }
+
+    /// Makes and places the rows in view and a few either side; lets go of the rest.
+    private func fill() {
+        let visible = scroll.contentView.bounds
+        let first = max(0, Int(visible.minY / Self.rowHeight) - 4)
+        let last = min(tabs.count - 1, Int(visible.maxY / Self.rowHeight) + 4)
+        for (i, row) in rows where i < first || i > last {
+            row.removeFromSuperview()
+            rows[i] = nil
+        }
+        guard first <= last else { return }
+        for i in first...last {
+            let row = rows[i] ?? {
+                let tab = tabs[i]
+                let row = ChoiceRow(tab: tab)
+                row.onClick = { [weak self] in self?.onPick?(tab) }
+                list.addSubview(row)
+                rows[i] = row
+                return row
+            }()
+            row.frame = NSRect(x: 8, y: CGFloat(i) * Self.rowHeight, width: list.frame.width - 16, height: Self.rowHeight)
+        }
+    }
+
+    @objc private func scrolled() { fill() }
 
     @objc private func cancelled() { onCancel?() }
 }
