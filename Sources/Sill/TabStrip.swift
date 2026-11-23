@@ -296,9 +296,19 @@ final class TabItemView: NSView {
     var isLeaving = false
     /// While a tab grows in or collapses out, its contents stay laid out at
     /// this width and the frame clips them.
-    var layoutWidth: CGFloat? { didSet { if layoutWidth != oldValue { Motion.still { layoutContents() } } } }
+    var layoutWidth: CGFloat? { didSet { if layoutWidth != oldValue { clips(); Motion.still { layoutContents() } } } }
     var isPaired = false { didSet { if isPaired != oldValue { needsDisplay = true } } }
-    var isFront = false { didSet { if isFront != oldValue { wearGlass(isFront); restyle() } } }
+    var isFront = false { didSet { if isFront != oldValue { wearGlass(isFront); clips(); restyle() } } }
+
+    /// Clipped only while it needs it: growing in or folding away (laid out
+    /// wider than it is), or wearing glass. A rounded clip renders the tab
+    /// offscreen each time the row is drawn, and a row of them made every
+    /// frame of a tab opening or closing cost a pass per tab. The others'
+    /// contents sit inside them, and their fill rounds itself.
+    private func clips() {
+        let clip = isFront || layoutWidth != nil
+        if layer?.masksToBounds != clip { layer?.masksToBounds = clip }
+    }
 
     private func wearGlass(_ on: Bool) {
         Motion.still {
@@ -355,7 +365,6 @@ final class TabItemView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerCurve = .continuous
-        layer?.masksToBounds = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
         glass.effectIsInteractive = true
         addSubview(content)
@@ -368,7 +377,7 @@ final class TabItemView: NSView {
         spinner.isDisplayedWhenStopped = false
         content.addSubview(spinner)
 
-        label.font = .systemFont(ofSize: 13)
+        label.font = Self.font
         label.lineBreakMode = .byClipping
         label.cell?.truncatesLastVisibleLine = false
         label.wantsLayer = true
@@ -427,11 +436,15 @@ final class TabItemView: NSView {
     /// The icon a page without one of its own gets: made once, not per refresh.
     private static let globe = NSImage(systemSymbolName: "globe", accessibilityDescription: nil)?
         .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
+    private static let font = NSFont.systemFont(ofSize: 13)
+    private static let frontFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
     private static let privateIcon = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: nil)?
         .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
 
     func refresh() {
-        label.stringValue = tab.displayTitle
+        // Only what changed: a new title or font sets the label measuring
+        // and redrawing its text, and a load refreshes a tab several times.
+        if label.stringValue != tab.displayTitle { label.stringValue = tab.displayTitle }
         // The preview card says the same and more; a tooltip would sit on it.
         toolTip = Preferences.shared.showsTabPreviews ? nil
             : tab.url.map { "\(tab.displayTitle)\n\(Address.display($0))" } ?? tab.displayTitle
@@ -450,8 +463,10 @@ final class TabItemView: NSView {
     }
 
     private func restyle() {
-        label.textColor = isFront ? .labelColor : .secondaryLabelColor
-        label.font = .systemFont(ofSize: 13, weight: isFront ? .semibold : .regular)
+        let color: NSColor = isFront ? .labelColor : .secondaryLabelColor
+        if label.textColor != color { label.textColor = color }
+        let font = isFront ? Self.frontFont : Self.font
+        if label.font != font { label.font = font }
         setAccessibilityValue(isFront)
         needsDisplay = true
         needsLayout = true
