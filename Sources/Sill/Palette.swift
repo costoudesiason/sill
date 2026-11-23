@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// ⌘T and ⌘L: one glass panel over the page with a field and a list, the
 /// way Spotlight floats over the desktop. ⌘T opens what you pick in a new
@@ -42,6 +43,10 @@ final class Palette: NSObject {
     private let footerContent = FlippedView()
     private let pill = FooterPill()
     private let settingsButton = NSButton()
+    /// Settings in the card, in place of the field, list and footer.
+    private var settingsHost: NSHostingView<PaletteSettingsView>?
+    private(set) var showingSettings = false
+    private var arrivals = 0
 
     private(set) var isOpen = false
     private(set) var mode: Mode = .newTab
@@ -171,6 +176,8 @@ final class Palette: NSObject {
             stage.addSubview(catcher)
             stage.addSubview(card)
         }
+        // Always opens on the search, whatever it was left showing.
+        if showingSettings { showSettings(false, animated: false) }
         let initial: String
         switch mode {
         case .newTab, .tabs: initial = ""
@@ -266,6 +273,7 @@ final class Palette: NSObject {
         scroll.frame = NSRect(x: 0, y: Self.fieldHeight, width: w, height: height - Self.fieldHeight - Self.footerHeight)
         footer.frame = NSRect(x: 0, y: height - Self.footerHeight, width: w, height: Self.footerHeight)
         layoutFooter()
+        if showingSettings { settingsHost?.frame = content.bounds }
     }
 
     func stageResized(_ stage: NSView) {
@@ -491,9 +499,57 @@ final class Palette: NSObject {
 
     // MARK: - acting
 
-    @objc private func openSettings() {
-        close()
-        AppDelegate.shared.showSettings(nil)
+    @objc private func openSettings() { showSettings(true) }
+
+    /// The card turns to its settings (or back): what's there fades out as
+    /// the other slides in from the side it lives on, at the same size.
+    func showSettings(_ on: Bool, animated: Bool = true) {
+        guard on != showingSettings else { return }
+        showingSettings = on
+        let searchParts: [NSView] = [searchIcon, field, scroll, footer]
+        let shift: CGFloat = Motion.reduced || !animated ? 0 : 18
+        if on {
+            arrivals += 1
+            let view = PaletteSettingsView(onBack: { [weak self] in self?.showSettings(false) },
+                                           onAll: { [weak self] in
+                                               self?.close()
+                                               AppDelegate.shared.showSettings(nil)
+                                           },
+                                           arrival: arrivals)
+            let host = settingsHost ?? NSHostingView(rootView: view)
+            host.rootView = view
+            settingsHost = host
+            let rest = content.bounds
+            Motion.still {
+                host.frame = rest.offsetBy(dx: shift, dy: 0)
+                host.alphaValue = 0
+            }
+            if host.superview !== content { content.addSubview(host) }
+            host.isHidden = false
+            // Keys go to the settings, never to the hidden field (Esc is the X's).
+            if content.window?.makeFirstResponder(host) != true { content.window?.makeFirstResponder(nil) }
+            Motion.animate(animated ? 0.22 : 0, {
+                host.animator().frame = rest
+                host.animator().alphaValue = 1
+                searchParts.forEach { $0.animator().alphaValue = 0 }
+            }, completion: { [weak self] in
+                guard let self, self.showingSettings else { return }
+                searchParts.forEach { $0.isHidden = true }
+            })
+        } else {
+            guard let host = settingsHost else { return }
+            searchParts.forEach { $0.isHidden = false }
+            content.window?.makeFirstResponder(field)
+            if let editor = field.currentEditor() { editor.selectedRange = NSRange(location: (field.stringValue as NSString).length, length: 0) }
+            Motion.animate(animated ? 0.22 : 0, {
+                host.animator().frame = content.bounds.offsetBy(dx: shift, dy: 0)
+                host.animator().alphaValue = 0
+                searchParts.forEach { $0.animator().alphaValue = 1 }
+            }, completion: { [weak self] in
+                guard let self, !self.showingSettings else { return }
+                host.removeFromSuperview()
+            })
+        }
     }
 
     /// ⌘K or the pill's Actions: what else can be done with the chosen row.
