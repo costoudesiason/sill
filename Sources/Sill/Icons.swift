@@ -6,7 +6,7 @@ import SwiftUI
 enum IconKind {
     case search, appearance, corners, reopen, previews, pip, sleep, claude
     case shield, key, link, connected, history, trash, globe, importing
-    case terminal, copy, code
+    case terminal, copy, code, permissions
 }
 
 /// Built only from Apple's SF Symbols; where an icon has parts, each part is
@@ -163,6 +163,12 @@ private struct Parts: View {
                     .offset(x: (on ? 2.8 : 1.8) * u, y: (on ? 2.2 : 1.4) * u)
                     .animation(ease(delay: 0.05), value: on)
             }
+        case .permissions:
+            // The hand goes up.
+            sf("hand.raised.fill", 0.95)
+                .rotationEffect(.degrees(on ? -12 : 0), anchor: .bottom)
+                .offset(y: on ? -1.2 * u : 0)
+                .animation(ease(), value: on)
         case .code:
             // The brackets open.
             ZStack {

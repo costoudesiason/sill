@@ -51,7 +51,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private var neighbourWarming: DispatchWorkItem?
     private lazy var splitView: PageSplitView = {
         let view = PageSplitView()
-        view.onResize = { [weak self] fraction in self?.split?.fraction = fraction }
+        view.onResize = { [weak self] fraction in
+            self?.split?.fraction = fraction
+            self?.placePrompts()
+        }
         return view
     }()
     private lazy var chooser: SplitChooser = {
@@ -341,6 +344,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if let findBar = madeFindBar, findBar.isOpen { findBar.place(in: stage, top: topInset) }
         status.place(in: stage)
         if let toast = madeToast, !toast.isHidden { toast.place(in: stage) }
+        placePrompts()
     }
 
     func windowDidResize(_ notification: Notification) {
@@ -447,8 +451,38 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         changed()
     }
 
+    /// Closes `tab`, once its page has had its say: one with something
+    /// unsaved asks first, and stays if you say so.
     func close(_ tab: Tab) {
+        tab.mayClose { [weak self] may in
+            if may { self?.closeNow(tab) }
+        }
+    }
+
+    /// Asks every page in turn whether it may go; `done` may run before this returns.
+    func mayCloseAll(_ done: @escaping (Bool) -> Void) {
+        var waiting = tabs[...]
+        func next() {
+            guard let tab = waiting.popFirst() else { return done(true) }
+            tab.mayClose { $0 ? next() : done(false) }
+        }
+        next()
+    }
+
+    /// The window's close button, or Close Window: as for closing each tab.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        var answer: Bool?
+        var returned = false
+        mayCloseAll { [weak self] may in
+            if returned { if may { self?.window?.close() } } else { answer = may }
+        }
+        returned = true
+        return answer ?? false
+    }
+
+    func closeNow(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
+        tab.dropAsks()
         hidePreview(animated: false)
         if let url = tab.webView?.url ?? tab.url, !isPrivate {
             closed.append((url, tab.displayTitle, index, tab.interactionState))
@@ -555,6 +589,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         prerenderTimer?.invalidate()
         guard let url, paletteOpen, palette.mode == .newTab, !isPrivate, !WarmSite.handles(url) || !Preferences.shared.keepsClaudeReady,
               let host = url.host(), History.shared.knows(host: host) else { return }
+        // Never a plain-HTTP page that is asked about first: the spare view asks nothing.
+        guard url.scheme == "https" || !SitePermissions.asksBeforeHTTP(host) else { return }
         if let prerendered, Self.samePage(prerendered, url) { return }
         prerenderTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -649,6 +685,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     }
 
     func windowWillClose(_ notification: Notification) {
+        for tab in tabs { tab.dropAsks() }
         for tab in tabs { Self.silence(tab) }
         napTimer?.invalidate()
         spare = nil
@@ -883,7 +920,33 @@ extension BrowserWindowController: TabHost {
         return made
     }
 
-    func closeRequested(_ tab: Tab) { close(tab) }
+    func closeRequested(_ tab: Tab) { closeNow(tab) }
+
+    func promptsChanged(_ tab: Tab) { placePrompts() }
+
+    func isInFront(_ tab: Tab) -> Bool {
+        tab === selected || (split?.contains(tab) == true && split?.contains(selected) == true)
+    }
+
+    /// The card of each page that has a question, top right of that page
+    /// while it is in front (either half of a split), and off otherwise.
+    func placePrompts() {
+        for tab in tabs {
+            guard let ask = tab.asking else {
+                tab.card?.removeFromSuperview()
+                tab.card = nil
+                continue
+            }
+            guard isInFront(tab), let view = tab.webView, view.window != nil else {
+                tab.card?.removeFromSuperview()
+                continue
+            }
+            let card = tab.card ?? SitePrompt()
+            tab.card = card
+            if card.ask !== ask { card.show(ask) { [weak tab] in tab?.answer($0) } }
+            card.place(over: stage.convert(view.bounds, from: view), in: stage, down: madeFindBar?.isOpen == true ? 54 : 0)
+        }
+    }
 
     func bringBack(_ tab: Tab) {
         select(tab, animated: true)
@@ -1047,6 +1110,8 @@ extension BrowserWindowController {
     /// The page area: the one tab in front, or both halves of its split.
     fileprivate func placePages(keep: WKWebView?) {
         guard let selected else { return }
+        // A page's question goes where its page now is.
+        defer { placePrompts() }
         if let keep { leaving = keep }
         if let split, split.contains(selected) {
             // As for one page below: the pair comes back under the page being left.

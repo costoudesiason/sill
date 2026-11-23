@@ -70,6 +70,10 @@ struct PaletteSettingsView: View {
                             passwordsRow
                         }
                         Hairline()
+                        ActionRow(icon: .permissions, tint: .blue, title: "Reset website permissions…") {
+                            AppDelegate.shared.resetSitePermissions(nil)
+                        }
+                        Hairline()
                         ActionRow(icon: .history, tint: .gray, title: "Clear history…") { AppDelegate.shared.clearHistory(nil) }
                         Hairline()
                         ActionRow(icon: .trash, tint: .red, title: "Clear cookies and website data…",
