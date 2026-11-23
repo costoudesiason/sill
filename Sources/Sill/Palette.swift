@@ -364,8 +364,12 @@ final class Palette: NSObject {
         let current: Int? = mode == .tabs && text.isEmpty
             ? rows.firstIndex { if case .item(.tab(let tab)) = $0 { return tab === browser.selected }; return false }
             : nil
+        // Nothing typed, nothing chosen: Return on an empty palette must not
+        // jump to whatever happens to be first (a tab, a recent site). The
+        // arrows choose; typing gives the top hit. The tab list still starts
+        // on the tab in front.
         let index = previous.flatMap { key in rows.firstIndex { $0.item.map(Self.key) == key } }
-            ?? current ?? rows.firstIndex { $0.item != nil }
+            ?? current ?? (text.isEmpty && mode != .tabs ? nil : rows.firstIndex { $0.item != nil })
         select(index)
     }
 
