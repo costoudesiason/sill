@@ -772,16 +772,18 @@ extension BrowserWindowController: TabHost {
     /// under way before the click. A connection only: nothing is requested.
     private func connectAhead(to url: URL?, from tab: Tab) {
         connectAheadTimer?.invalidate()
-        guard let url, url.scheme == "https", let host = url.host(), let view = tab.webView,
-              host != view.url?.host(), connectedAhead[host].map({ Date().timeIntervalSince($0) > 30 }) ?? true
-        else { return }
+        guard let url, url.scheme == "https", let host = url.host(), let view = tab.webView else { return }
         let site = url.port.map { "\(host):\($0)" } ?? host
+        let here = view.url.flatMap { page in page.host().map { name in page.port.map { "\(name):\($0)" } ?? name } }
+        guard site != here || view.url?.scheme != "https",
+              connectedAhead[site].map({ Date().timeIntervalSince($0) > 30 }) ?? true
+        else { return }
         connectAheadTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: false) { [weak self, weak view] _ in
             MainActor.assumeIsolated {
                 let connect = NSSelectorFromString("_preconnectToServer:")
                 guard let self, let view, view.responds(to: connect), let root = URL(string: "https://\(site)/") else { return }
                 if self.connectedAhead.count > 64 { self.connectedAhead = [:] }
-                self.connectedAhead[host] = Date()
+                self.connectedAhead[site] = Date()
                 view.perform(connect, with: root)
             }
         }
