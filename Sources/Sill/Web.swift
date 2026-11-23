@@ -412,12 +412,9 @@ enum PageScripts {
         post({ t: 'open', href: a.href, shift: e.shiftKey });
       }, true);
 
-      // Away from the top, for the toolbar's edge.
-      let away = false;
-      addEventListener('scroll', () => {
-        const now = (document.scrollingElement || document.documentElement).scrollTop > 0;
-        if (now !== away) { away = now; post({ t: 'scroll', v: now }); }
-      }, { passive: true });
+      // Nothing here reads the page's scroll position: read in a scroll
+      // event, after the page's own handlers have changed the page, it can
+      // make the page lay itself out an extra time on every frame of a scroll.
 
       // Whether a video is playing, so switching tabs asks only pages that
       // have one to float it. Media events don't bubble; capture sees them.
