@@ -17,6 +17,8 @@ enum Web {
         // Sill's own world where pages can't see or change it.
         controller.addUserScript(WKUserScript(source: AgentScript.source, injectionTime: .atDocumentEnd,
                                               forMainFrameOnly: true, in: world))
+        controller.addUserScript(WKUserScript(source: SiteTuning.script, injectionTime: .atDocumentStart,
+                                              forMainFrameOnly: true, in: world))
         controller.add(router, contentWorld: world, name: "sill")
         return controller
     }()
@@ -782,3 +784,22 @@ enum PictureInPicture {
     }
 }
 
+/// Small fixes for heavy sites that WebKit lays out slower than Chromium.
+///
+/// claude.ai renders a long answer as thousands of elements (one maths
+/// answer measured 20,600, with 454 formulas), and each new message or
+/// older turn put in above makes WebKit lay all of it out again. Telling
+/// it the blocks off screen can be skipped (content-visibility) took a
+/// full layout of that page from 3 to 11 ms down to about 1 ms. List items
+/// are left out: the rule clips what's drawn outside them, their bullets.
+enum SiteTuning {
+    static let script = """
+    (function () {
+      if (location.hostname !== 'claude.ai') return;
+      const style = document.createElement('style');
+      style.textContent = '[data-transcript-engine-root] :is(p, pre, table, blockquote, h1, h2, h3, h4, .katex-display, hr)'
+        + ' { content-visibility: auto; contain-intrinsic-size: auto 28px; }';
+      (document.head || document.documentElement).appendChild(style);
+    })();
+    """
+}
