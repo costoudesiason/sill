@@ -93,7 +93,21 @@ final class FindBar: NSObject, NSSearchFieldDelegate {
     }
 
     @objc private func closeClicked() { close() }
-    @objc private func search() { find(backwards: false) }
+    /// Typing searches for what is in the field once the search before it
+    /// has answered, not once per key: on a very long page each one walks
+    /// the whole document, and a word typed quickly queued a dozen of them.
+    @objc private func search() {
+        // A search that never answers (its page crashed) must not hold the next one back for good.
+        if let searching, searching === browser?.selected?.webView, CACurrentMediaTime() - began < 5 {
+            stale = true
+        } else {
+            find(backwards: false)
+        }
+    }
+
+    private weak var searching: WKWebView?
+    private var stale = false
+    private var began: CFTimeInterval = 0
     @objc private func stepped() { find(backwards: arrows.selectedSegment == 0) }
 
     func find(backwards: Bool) {
@@ -105,8 +119,17 @@ final class FindBar: NSObject, NSSearchFieldDelegate {
         configuration.backwards = backwards
         configuration.wraps = true
         configuration.caseSensitive = false
-        webView.find(field.stringValue, configuration: configuration) { [weak self] found in
-            self?.result.stringValue = found.matchFound ? "" : "Not found"
+        searching = webView
+        stale = false
+        began = CACurrentMediaTime()
+        webView.find(field.stringValue, configuration: configuration) { [weak self, weak webView] found in
+            guard let self else { return }
+            if self.searching === webView { self.searching = nil }
+            if self.stale, self.browser?.selected?.webView === webView {
+                self.find(backwards: false)
+            } else {
+                self.result.stringValue = found.matchFound ? "" : "Not found"
+            }
         }
     }
 
