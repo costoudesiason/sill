@@ -497,11 +497,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     func paletteClosed() {
         expected = []
         if let webView = selected?.webView { window?.makeFirstResponder(webView) }
-        // A spare nobody took (the palette was cancelled) gives its memory back.
+        // A spare nobody took (the palette was cancelled) gives its page back.
         // Later in the turn, so the Return that closed the palette can claim it.
+        // One with no page stays: its process is the started one the next tab
+        // would have had, and letting it go leaves that tab to start its own.
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.paletteOpen else { return }
             self.prerenderTimer?.invalidate()
+            guard self.prerendered != nil else { return }
             self.spare?.stopLoading()
             self.spare = nil
             self.prerendered = nil
