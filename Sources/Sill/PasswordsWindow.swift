@@ -96,9 +96,10 @@ final class PasswordsModel: ObservableObject {
         shown = await SavedPasswords.password(for: login)
     }
 
-    func copyPassword(_ login: SavedPasswords.Login) async {
+    @discardableResult
+    func copyPassword(_ login: SavedPasswords.Login) async -> Bool {
         guard await unlock("copy your password for \(Domains.bare(login.host))"),
-              let password = await SavedPasswords.password(for: login) else { return }
+              let password = await SavedPasswords.password(for: login) else { return false }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(password, forType: .string)
         // As Safari does: the copied password leaves the clipboard after a while.
@@ -106,6 +107,7 @@ final class PasswordsModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 90) {
             if NSPasteboard.general.changeCount == count { NSPasteboard.general.clearContents() }
         }
+        return true
     }
 
     func delete(_ login: SavedPasswords.Login) async {
@@ -186,9 +188,10 @@ struct PasswordsView: View {
                 LabeledContent("User Name") {
                     HStack(spacing: 6) {
                         Text(login.user.isEmpty ? "—" : login.user).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
-                        RowButton(symbol: "doc.on.doc", help: "Copy User Name") {
+                        RowButton(symbol: "doc.on.doc", help: "Copy User Name", copies: true) {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(login.user, forType: .string)
+                            return true
                         }
                         .disabled(login.user.isEmpty)
                     }
@@ -199,9 +202,10 @@ struct PasswordsView: View {
                             .font(model.shown == nil ? .body : .body.monospaced())
                             .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
                         RowButton(symbol: model.shown == nil ? "eye" : "eye.slash", help: model.shown == nil ? "Show Password" : "Hide Password") {
-                            Task { await model.reveal(login) }
+                            await model.reveal(login)
+                            return true
                         }
-                        RowButton(symbol: "doc.on.doc", help: "Copy Password") { Task { await model.copyPassword(login) } }
+                        RowButton(symbol: "doc.on.doc", help: "Copy Password", copies: true) { await model.copyPassword(login) }
                     }
                 }
                 LabeledContent("Website") {
@@ -214,15 +218,39 @@ struct PasswordsView: View {
 }
 
 /// A small borderless icon button at the end of a row, as Passwords has.
+/// A copy button answers: its icon turns to a checkmark for a moment, with
+/// a light tap of the trackpad, once the copy has happened.
 private struct RowButton: View {
     let symbol: String
     let help: String
-    let action: () -> Void
+    var copies = false
+    let action: () async -> Bool
+    @State private var done = false
+
+    init(symbol: String, help: String, copies: Bool = false, action: @escaping () async -> Bool) {
+        self.symbol = symbol
+        self.help = help
+        self.copies = copies
+        self.action = action
+    }
+
     var body: some View {
-        Button(action: action) { Image(systemName: symbol).frame(width: 18, height: 18) }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.secondary)
-            .help(help)
+        Button {
+            Task {
+                guard await action(), copies else { return }
+                NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+                withAnimation(.snappy) { done = true }
+                try? await Task.sleep(for: .seconds(1.4))
+                withAnimation(.snappy) { done = false }
+            }
+        } label: {
+            Image(systemName: done ? "checkmark" : symbol)
+                .contentTransition(.symbolEffect(.replace))
+                .foregroundStyle(done ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
+                .frame(width: 18, height: 18)
+        }
+        .buttonStyle(.borderless)
+        .help(done ? "Copied" : help)
     }
 }
 
