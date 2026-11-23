@@ -86,6 +86,27 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private lazy var preview = TabPreview()
     /// The thin line between the bar and the page while the page loads.
     private let loadingLine = LoadingLine()
+    /// Below the bar when there's no page (no tab, or a new one with nothing
+    /// in it yet): the bar's own material, so the empty window is glass,
+    /// showing the desktop, not a black page.
+    private lazy var emptyGlass: NSVisualEffectView = {
+        let glass = NSVisualEffectView()
+        glass.material = .sidebar
+        glass.blendingMode = .behindWindow
+        glass.state = .followsWindowActiveState
+        glass.isHidden = true
+        stage.addSubview(glass, positioned: .below, relativeTo: pageHost)
+        return glass
+    }()
+
+    /// Shows the glass under the bar when nothing is there to cover it.
+    private func showEmptyGlass() {
+        let empty = selected == nil || selected?.isBlank == true
+        if empty { emptyGlass.frame = NSRect(x: 0, y: topInset, width: stage.bounds.width, height: max(0, stage.bounds.height - topInset)) }
+        guard emptyGlass.isHidden == empty || pageHost.isHidden != empty else { return }
+        emptyGlass.isHidden = !empty
+        pageHost.isHidden = empty
+    }
     private var previewWait: DispatchWorkItem?
     private var previewLeave: DispatchWorkItem?
     private var previewRefresh: Timer?
@@ -351,6 +372,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // hidden under the page, and no glass is drawn where none is seen.
         ground.frame = NSRect(x: 0, y: 0, width: stage.bounds.width, height: TopBar.height)
         wash.frame = ground.frame
+        showEmptyGlass()
         madePalette?.stageResized(stage)
         if let findBar = madeFindBar, findBar.isOpen { findBar.place(in: stage, top: topInset) }
         status.place(in: stage)
@@ -442,6 +464,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         tab.lastShown = Date()
         let webView = tab.materialize()
         placePages(keep: keep)
+        showEmptyGlass()
         loadingLine.show(progress: tab.progress, loading: tab.isLoading, jump: true)
         tab.reloadIfCrashed()
         tab.loadIfEmpty()
@@ -876,6 +899,7 @@ extension BrowserWindowController: TabHost {
         case .url:
             retitle(tab)
             changed()
+            if tab === selected { showEmptyGlass() }
         case .navigation:
             if tab === selected { updateNavigation() }
         case .scroll:
