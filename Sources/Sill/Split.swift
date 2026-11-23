@@ -134,6 +134,13 @@ final class SplitChooser: NSView {
         needsLayout = true
     }
 
+    /// Off screen it lets go of the tabs it listed: one closed since would
+    /// otherwise stay whole, page and web process, until the next split.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil, !tabs.isEmpty { offer([]) }
+    }
+
     private static let rowHeight: CGFloat = 40
 
     override func layout() {
