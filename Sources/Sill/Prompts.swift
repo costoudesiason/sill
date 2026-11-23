@@ -127,6 +127,7 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
     private var windows: [ObjectIdentifier: NSWindow] = [:]
     private var watchers = 0
     private var ticker: Timer?
+    private let naming = DispatchQueue(label: "app.sill.downloads", qos: .userInitiated)
 
     /// The list is on screen (or gone again): progress bars only move while
     /// someone is looking, ten times a second, all rows in one pass.
@@ -175,21 +176,32 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
                   completionHandler: @escaping (URL?) -> Void) {
         let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
         let name = suggestedFilename.isEmpty ? "Download" : suggestedFilename
-        var url = folder.appendingPathComponent(name)
-        let base = url.deletingPathExtension().lastPathComponent
-        let ext = url.pathExtension
-        var n = 2
-        while FileManager.default.fileExists(atPath: url.path) {
-            url = folder.appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)")
-            n += 1
+        // The folder is opened off the main thread first: the first time,
+        // macOS asks whether Sill may use Downloads, and WebKit handing the
+        // file over would otherwise wait for that answer on the main thread,
+        // with every window frozen behind the question.
+        naming.async {
+            _ = try? FileManager.default.contentsOfDirectory(atPath: folder.path)
+            var url = folder.appendingPathComponent(name)
+            let base = url.deletingPathExtension().lastPathComponent
+            let ext = url.pathExtension
+            var n = 2
+            while FileManager.default.fileExists(atPath: url.path) {
+                url = folder.appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)")
+                n += 1
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if let item = self.item(for: download) {
+                        item.name = url.lastPathComponent
+                        item.url = url
+                    }
+                    completionHandler(url)
+                    let window = self.windows[ObjectIdentifier(download)]
+                    (window?.windowController as? BrowserWindowController)?.toast("Downloading “\(url.lastPathComponent)”")
+                }
+            }
         }
-        if let item = item(for: download) {
-            item.name = url.lastPathComponent
-            item.url = url
-        }
-        completionHandler(url)
-        let window = windows[ObjectIdentifier(download)]
-        (window?.windowController as? BrowserWindowController)?.toast("Downloading “\(url.lastPathComponent)”")
     }
 
     func downloadDidFinish(_ download: WKDownload) {
