@@ -71,7 +71,10 @@ enum Web {
     private static func cacheAsABrowser(_ pool: WKProcessPool) {
         let objectSelector = NSSelectorFromString("_apiObject")
         let everywhere = UnsafeMutableRawPointer(bitPattern: -2)  // RTLD_DEFAULT
+        // (The pool's own object must still come back as a pointer.)
         guard pool.responds(to: objectSelector),
+              let method = class_getInstanceMethod(WKProcessPool.self, objectSelector),
+              let types = method_getTypeEncoding(method), types.pointee == 94,  // "^"
               let setter = dlsym(everywhere, "WKContextSetCacheModel"),
               let getter = dlsym(everywhere, "WKContextGetCacheModel")
         else { return }

@@ -263,7 +263,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // the shadow and rim follow. Measured on a page scrolling itself for
         // five seconds: steady 60 fps, worst frame 22-28 ms rather than
         // 35-490, and a fifth less WindowServer time than clipping it here.
-        if setCornerRadius(round ? prefs.cornerRadius : nil) {
+        // (Square while on a full screen, whatever is set meanwhile.)
+        let full = window?.styleMask.contains(.fullScreen) == true
+        if setCornerRadius(round ? (full ? 0 : prefs.cornerRadius) : nil) {
             window?.isOpaque = true
             window?.backgroundColor = .windowBackgroundColor
             stage.layer?.cornerRadius = 0
@@ -301,7 +303,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// setting lives outside the public framework), and the caller clips.
     private func setCornerRadius(_ radius: Double?) -> Bool {
         let get = NSSelectorFromString("_cornerRadius"), set = NSSelectorFromString("_setCornerRadius:")
-        guard let window, window.responds(to: get), window.responds(to: set) else { return false }
+        // Only as the two were found: a number out, a number in. Either
+        // changed, and they're left alone rather than called the wrong way.
+        guard let window, window.responds(to: get), window.responds(to: set),
+              Self.shape(of: get, in: window) == "d16@0:8", Self.shape(of: set, in: window) == "v24@0:8d16"
+        else { return false }
         typealias Getter = @convention(c) (AnyObject, Selector) -> Double
         typealias Setter = @convention(c) (AnyObject, Selector, Double) -> Void
         let current = unsafeBitCast(window.method(for: get), to: Getter.self)(window, get)
@@ -313,6 +319,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         let wanted = radius ?? systemCornerRadius ?? current
         if current != wanted { unsafeBitCast(window.method(for: set), to: Setter.self)(window, set, wanted) }
         return true
+    }
+
+    /// What a method takes and gives back, as the runtime records it.
+    private static func shape(of selector: Selector, in object: AnyObject) -> String? {
+        guard let method = class_getInstanceMethod(type(of: object), selector),
+              let types = method_getTypeEncoding(method) else { return nil }
+        return String(cString: types)
     }
 
     private enum Edge { case top, bottom }
