@@ -178,6 +178,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         stage.addSubview(status)
         watchForPeek()
         stage.onLayout = { [weak self] in self?.stageLaidOut() }
+        // The Find bar is built once the window has settled, not on the first
+        // ⌘F: building it there cost that keypress two or three frames.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.madeFindBar == nil, self.window != nil else { return }
+            self.findBar.ready(in: self.stage, top: self.topInset)
+        }
 
         bar.back.target = self
         bar.back.action = #selector(goBack(_:))

@@ -15,6 +15,7 @@ final class FindBar: NSObject, NSSearchFieldDelegate {
     private let arrows = NSSegmentedControl()
     private let done = NSButton(title: "Done", target: nil, action: nil)
     private(set) var isOpen = false
+    private var raised = false
     var hasQuery: Bool { !field.stringValue.isEmpty }
 
     private static let size = NSSize(width: 400, height: 44)
@@ -69,8 +70,18 @@ final class FindBar: NSObject, NSSearchFieldDelegate {
         field.frame = NSRect(x: 10, y: (h - 24) / 2, width: result.frame.minX - 14, height: 24)
     }
 
+    /// Puts the bar in the window, hidden and laid out, ahead of its first use.
+    func ready(in stage: NSView, top: CGFloat) {
+        guard glass.superview == nil else { return }
+        stage.addSubview(glass)
+        place(in: stage, top: top)
+        glass.layoutSubtreeIfNeeded()
+    }
+
     func open(in stage: NSView, top: CGFloat) {
-        if glass.superview !== stage { stage.addSubview(glass) }
+        // Above whatever came after it was readied, as when it was made here.
+        if glass.superview !== stage || (!raised && stage.subviews.last !== glass) { stage.addSubview(glass) }
+        raised = true
         place(in: stage, top: top)
         stage.window?.makeFirstResponder(field)
         field.currentEditor()?.selectAll(nil)
