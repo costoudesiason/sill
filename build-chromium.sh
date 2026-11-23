@@ -21,6 +21,13 @@ P=/usr/libexec/PlistBuddy
 $P -c "Set :CFBundleIdentifier com.iasoncostoudes.sill.chromium" "$APP/Contents/Info.plist"
 $P -c "Set :NSPrincipalClass SEApplication" "$APP/Contents/Info.plist"
 cp -Rc "$CEF/Release/Chromium Embedded Framework.framework" "$APP/Contents/Frameworks/"
+# Extensions that come with Sill: uBlock Origin Lite (~/sill-chromium/ubol-<version>, the newest).
+UBOL=$(ls -d "$HOME"/sill-chromium/ubol-2* 2>/dev/null | sort | tail -1)
+if [ -n "$UBOL" ]; then
+  mkdir -p "$APP/Contents/Resources/Extensions"
+  rm -rf "$APP/Contents/Resources/Extensions/uBlock Origin Lite"
+  cp -Rc "$UBOL" "$APP/Contents/Resources/Extensions/uBlock Origin Lite"
+fi
 clang++ -x objective-c++ -arch arm64 -mmacosx-version-min=26.0 -std=c++20 -O2 -fobjc-arc -fno-rtti -fno-exceptions \
   -I"$CEF" Tools/chromium-helper.mm -x none "$HOME/sill-chromium/.cef/libcef_dll_wrapper.a" -framework Cocoa -Wl,-dead_strip -o build/chromium-helper
 for kind in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do

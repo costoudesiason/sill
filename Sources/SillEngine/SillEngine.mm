@@ -82,6 +82,7 @@ static NSHashTable<SEWebView*>* gViews;
 static int gOpenBrowsers = 0;
 static bool gQuitting = false;
 static CefRefPtr<CefRequestContext> gPrivateContext;
+static std::string gExtensions;  // folders of the extensions that come with Sill, comma separated
 
 // MARK: - Menu items
 
@@ -557,7 +558,10 @@ class SEApp : public CefApp, public CefBrowserProcessHandler {
     // floating in picture in picture, kept under the one in front.
     std::string off = line->GetSwitchValue("disable-features").ToString();
     off += off.empty() ? "" : ",";
-    line->AppendSwitchWithValue("disable-features", off + "MacWebContentsOcclusion");
+    // ...and the extensions that come with Sill (uBlock Origin Lite) load
+    // from their folders, as Chromium's own command line loads them.
+    line->AppendSwitchWithValue("disable-features", off + "MacWebContentsOcclusion,DisableLoadExtensionCommandLineSwitch");
+    if (!gExtensions.empty()) line->AppendSwitchWithValue("load-extension", gExtensions);
   }
   void OnContextInitialized() override {
     CefRequestContextSettings settings;  // no cache path: kept in memory, gone when Sill quits
@@ -589,8 +593,38 @@ class CookiesGone : public CefDeleteCookiesCallback {
 
 @implementation SEEngine
 
+// The extensions that come with Sill (Contents/Resources/Extensions), copied
+// into the profile when new or updated: Chromium writes into an extension's
+// folder (its compiled filter lists), and the app's own files stay as signed.
+static std::string InstallExtensions(NSString* profile) {
+  NSFileManager* files = [NSFileManager defaultManager];
+  NSString* shipped = [[NSBundle mainBundle].resourcePath stringByAppendingPathComponent:@"Extensions"];
+  NSString* installed = [profile stringByAppendingPathComponent:@"Extensions"];
+  [files createDirectoryAtPath:installed withIntermediateDirectories:YES attributes:nil error:nil];
+  std::string folders;
+  for (NSString* name in [files contentsOfDirectoryAtPath:shipped error:nil]) {
+    NSString* from = [shipped stringByAppendingPathComponent:name];
+    NSString* to = [installed stringByAppendingPathComponent:name];
+    NSString* (^version)(NSString*) = ^NSString*(NSString* folder) {
+      NSData* data = [NSData dataWithContentsOfFile:[folder stringByAppendingPathComponent:@"manifest.json"]];
+      NSDictionary* manifest = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+      return [manifest isKindOfClass:[NSDictionary class]] ? manifest[@"version"] : nil;
+    };
+    NSString* want = version(from);
+    if (!want) continue;
+    if (![want isEqual:version(to)]) {
+      [files removeItemAtPath:to error:nil];
+      if (![files copyItemAtPath:from toPath:to error:nil]) continue;
+    }
+    if (!folders.empty()) folders += ",";
+    folders += to.UTF8String;
+  }
+  return folders;
+}
+
 + (BOOL)startWithProfile:(NSString*)profile {
   gLibrary = new CefScopedLibraryLoader();
+  gExtensions = InstallExtensions(profile);
   if (!gLibrary->LoadInMain()) return NO;
   gViews = [NSHashTable weakObjectsHashTable];
   CefMainArgs args(*_NSGetArgc(), *_NSGetArgv());
