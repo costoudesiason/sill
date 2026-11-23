@@ -498,10 +498,15 @@ extension Tab: WKNavigationDelegate {
         dropNavigationAsk()
         // Plain HTTP to a site out on the internet: it loads once you've said
         // to carry on, and that holds for the site until Sill quits.
-        if scheme == "http", let site = url.host(), SitePermissions.asksBeforeHTTP(site), url != notOpened,
+        // (Sill's own "wasn't opened" page for that address goes up unasked, once.)
+        let sillsOwn = url == notOpened
+        notOpened = nil
+        // (The whole site: one that hops between its subdomains asks once.)
+        if scheme == "http", let name = url.host(), SitePermissions.asksBeforeHTTP(name), !sillsOwn,
+           case let site = Domains.registrable(name),
            SitePermissions.shared.allowed([.insecure], at: site, private: isPrivate) != true {
             let isPrivate = isPrivate
-            ask(SiteAsk(symbol: "lock.open", title: "\(Domains.bare(site)) isn’t secure",
+            ask(SiteAsk(symbol: "lock.open", title: "\(Domains.bare(name)) isn’t secure",
                         detail: "It uses plain HTTP: what you read and send there can be seen or changed on the way.",
                         choices: ["Cancel", "Continue"], holdsNavigation: true,
                         answer: { [weak self, weak webView] choice, picked in
@@ -512,14 +517,13 @@ extension Tab: WKNavigationDelegate {
                 // Cancelled in a tab with no page yet: it says so, rather than staying blank.
                 if picked, choice == 0, let self, let webView, self.webView === webView, webView.backForwardList.currentItem == nil {
                     let html = ErrorPage.html(title: "This page wasn’t opened",
-                                              detail: "\(Domains.bare(site)) uses plain HTTP, and you chose not to carry on.", url: url)
+                                              detail: "\(Domains.bare(name)) uses plain HTTP, and you chose not to carry on.", url: url)
                     self.notOpened = url
                     self.errorNavigation = webView.loadSimulatedRequest(URLRequest(url: url), responseHTML: html)
                 }
             }))
             return
         }
-        notOpened = nil
         decisionHandler(.allow)
     }
 
