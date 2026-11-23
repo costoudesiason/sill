@@ -125,7 +125,7 @@ final class DownloadItem: ObservableObject, Identifiable {
 
     func cancel() {
         let url = url
-        download?.cancel { _ in Downloads.discard(url) }
+        if let download { download.cancel { _ in Downloads.discard(url) } } else { Downloads.discard(url) }
         failed = true
         Downloads.shared.cancelled(self)
     }
@@ -202,7 +202,12 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
     /// A download that stopped part-way leaves no half file under its real name.
     nonisolated static func discard(_ url: URL?) {
         guard let url else { return }
-        DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: url) }
+        // On the naming queue, and the name freed only after: a new download
+        // can't be given this name and then lose its file to this removal.
+        naming.async {
+            try? FileManager.default.removeItem(at: url)
+            promised.remove(url.path)
+        }
     }
 
     /// Names are picked one at a time, off the main thread: the first look
@@ -264,11 +269,11 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
     /// A cancelled download reports nothing more: its name is free again.
     func cancelled(_ item: DownloadItem) {
         if let download = item.download { windows[ObjectIdentifier(download)] = nil }
-        settled(item)
+        settled(item, freesName: false)
     }
 
-    private func settled(_ item: DownloadItem?) {
-        if let path = item?.url?.path { Self.naming.async { Self.promised.remove(path) } }
+    private func settled(_ item: DownloadItem?, freesName: Bool = true) {
+        if freesName, let path = item?.url?.path { Self.naming.async { Self.promised.remove(path) } }
         if let item, item.isPrivate, !AppDelegate.shared.browsers.contains(where: { $0.isPrivate }) {
             items.removeAll { $0 === item }
         }
