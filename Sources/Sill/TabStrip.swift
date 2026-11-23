@@ -330,6 +330,18 @@ final class TabItemView: NSView {
     override var wantsUpdateLayer: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// A click anywhere on the tab is the tab's (its close button aside):
+    /// its label and glass are see-through views, which AppKit lets drag
+    /// the window, so dragging a tab dragged the window with it.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, let superview, frame.contains(point) else { return nil }
+        let local = convert(point, from: superview)
+        if !closeButton.isHidden, closeButton.frame.contains(closeButton.superview.map { convert(local, to: $0) } ?? local) {
+            return closeButton
+        }
+        return self
+    }
+
     /// The tab in front is a piece of Liquid Glass. Its title and icon live
     /// inside the glass's own content view (a glass view only promises that
     /// view sits inside it; anything beside it gets refracted), so they move
