@@ -652,7 +652,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     func prerenderSoon(_ url: URL?) {
         prerenderTimer?.invalidate()
         guard let url, paletteOpen, palette.mode == .newTab, !isPrivate, !WarmSite.handles(url) || !Preferences.shared.keepsClaudeReady,
-              let host = url.host(), History.shared.knows(host: host) else { return }
+              let host = url.host() else { return }
+        // A site you haven't been to isn't loaded ahead, but the way there is
+        // opened (and to its www., where most bare names send you), so the
+        // lookup and handshake are done by Return. After the same pause.
+        guard History.shared.knows(host: host) else {
+            prerenderTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.paletteOpen else { return }
+                    self.expect(url)
+                    if host.split(separator: ".").count == 2 { self.expect(URL(string: "https://www.\(host)/")) }
+                }
+            }
+            return
+        }
         // Never a plain-HTTP page that is asked about first: the spare view asks nothing.
         guard url.scheme == "https" || !SitePermissions.asksBeforeHTTP(host) else { return }
         if let prerendered, Self.samePage(prerendered, url) { return }
@@ -1232,7 +1245,7 @@ extension BrowserWindowController {
             // being left, which goes once the new one has drawn: nothing
             // waits, and the window never shows through between the two.
             let under = keep == nil && leaving?.superview !== pageHost
-                && webView.shownBefore && !placed
+                && (webView.shownBefore || webView.laidOutUnseen) && !placed
                 && !webView.isDescendant(of: splitView)
                 && pageHost.subviews.contains { ($0 is WKWebView && !$0.isHidden && $0 !== webView) || $0 === splitView }
             if !under { putAside(except: webView, keep) }
@@ -1406,10 +1419,16 @@ extension BrowserWindowController {
 
     /// The tabs either side of the one in front, a moment after it changes:
     /// the next ⌃Tab, or a click next door, finds its page already there.
-    fileprivate func warmNeighbours(of tab: Tab) {
+    fileprivate func warmNeighbours(of tab: Tab, waited: TimeInterval = 0) {
         neighbourWarming?.cancel()
+        let pause: TimeInterval = waited == 0 ? 1.0 : 0.5
         let work = DispatchWorkItem { [weak self, weak tab] in
             guard let self, let tab, tab === self.selected, let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
+            // Not while the page in front is still coming in: two more pages
+            // loading beside it would share its network and processor, and
+            // it's the one being looked at. A page that never settles doesn't
+            // hold them off for more than a few seconds.
+            if tab.isLoading, waited < 6 { return self.warmNeighbours(of: tab, waited: waited + pause) }
             // Each on a turn of its own: making a web view and starting its
             // load holds the main thread a few milliseconds, two in a row twice that.
             let neighbours = [index - 1, index + 1].filter { self.tabs.indices.contains($0) }.map { self.tabs[$0] }
@@ -1424,7 +1443,7 @@ extension BrowserWindowController {
             }
         }
         neighbourWarming = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + pause, execute: work)
     }
 
     /// A click into the other half of a split makes that page the one in

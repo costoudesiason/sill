@@ -30,6 +30,12 @@ enum Web {
     /// The settings are outside the public framework, so each is asked for
     /// by name; without them the pool is an ordinary one.
     static let pool: WKProcessPool = {
+        let pool = makePool()
+        cacheAsABrowser(pool)
+        return pool
+    }()
+
+    private static func makePool() -> WKProcessPool {
         let make = NSSelectorFromString("_initWithConfiguration:")
         guard let settingsClass = NSClassFromString("_WKProcessPoolConfiguration") as? NSObject.Type,
               WKProcessPool.instancesRespond(to: make)
@@ -49,7 +55,36 @@ enum Web {
         let empty = unsafeBitCast(method_getImplementation(allocate), to: Alloc.self)(WKProcessPool.self, alloc)
         let made = unsafeBitCast(method_getImplementation(initialise), to: Init.self)(empty, make, settings)
         return (made?.takeRetainedValue() as? WKProcessPool) ?? WKProcessPool()
-    }()
+    }
+
+    /// WebKit sizes its caches by what kind of app it's in, and an app that
+    /// doesn't say gets a document browser's: a small disk cache for the
+    /// network, small memory caches in each page's process, and no process
+    /// cache at all (the pool's setting above is then ignored: WebKit logs
+    /// "cache model is not PrimaryWebBrowser"). Safari says it is the primary
+    /// web browser, and so does Sill. Measured: a page on a site whose tab
+    /// had just closed loaded in the kept process, a fifth sooner (about 420
+    /// ms against 515, three runs each); the larger caches aren't in that.
+    /// Only WebKit's C interface can say it, so each name is looked up, and
+    /// the model is read back first: anything unexpected leaves it alone.
+    /// Before any page exists, so the process cache is sized with it.
+    private static func cacheAsABrowser(_ pool: WKProcessPool) {
+        let objectSelector = NSSelectorFromString("_apiObject")
+        let everywhere = UnsafeMutableRawPointer(bitPattern: -2)  // RTLD_DEFAULT
+        guard pool.responds(to: objectSelector),
+              let setter = dlsym(everywhere, "WKContextSetCacheModel"),
+              let getter = dlsym(everywhere, "WKContextGetCacheModel")
+        else { return }
+        typealias Object = @convention(c) (AnyObject, Selector) -> UnsafeRawPointer?
+        typealias GetModel = @convention(c) (UnsafeRawPointer) -> UInt32
+        typealias SetModel = @convention(c) (UnsafeRawPointer, UInt32) -> Void
+        guard let context = unsafeBitCast(pool.method(for: objectSelector), to: Object.self)(pool, objectSelector) else { return }
+        // kWKCacheModelDocumentViewer, DocumentBrowser, PrimaryWebBrowser.
+        let primaryWebBrowser: UInt32 = 2
+        let model = unsafeBitCast(getter, to: GetModel.self)(context)
+        guard model < primaryWebBrowser else { return }
+        unsafeBitCast(setter, to: SetModel.self)(context, primaryWebBrowser)
+    }
 
     /// Starts the first web process while the window is still being built,
     /// so the first page doesn't wait for one. The first of a launch is by
@@ -121,16 +156,26 @@ enum Web {
         // A page out of sight has its timers held to one tick a second; this
         // lets the gap grow the longer it stays hidden, as Safari does. Each
         // tick that touches the page otherwise wakes the app to draw nothing.
-        let grows = NSSelectorFromString("_setHiddenPageDOMTimerThrottlingAutoIncreases:")
-        if configuration.preferences.responds(to: grows) {
-            typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
-            unsafeBitCast(configuration.preferences.method(for: grows), to: Setter.self)(configuration.preferences, grows, true)
-        }
+        set(configuration.preferences, "_setHiddenPageDOMTimerThrottlingAutoIncreases:", true)
+        // A page's own hints (<link rel="dns-prefetch">, which sites use for
+        // the servers their images and scripts come from) and the sites its
+        // links go to are looked up ahead, so neither waits on a name lookup.
+        // Off in WebKit unless asked for; kept off in private windows, where
+        // a page shouldn't learn the network anything it wasn't asked for.
+        if !isPrivate { set(configuration.preferences, "_setDNSPrefetchingEnabled:", true) }
         // WebKit's own wait for a page put back in the window to draw is
         // left on: without it a page that hasn't drawn since it was away
         // showed its empty (black) layer, and a still page might not draw
         // again. The page being left stays on top until then (placePages).
         return configuration
+    }
+
+    /// A WebKit setting outside the public framework, if this WebKit has it.
+    private static func set(_ preferences: WKPreferences, _ name: String, _ value: Bool) {
+        let selector = NSSelectorFromString(name)
+        guard preferences.responds(to: selector) else { return }
+        typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
+        unsafeBitCast(preferences.method(for: selector), to: Setter.self)(preferences, selector, value)
     }
 }
 
@@ -271,6 +316,13 @@ final class SillWebView: WKWebView {
     private var held = false
     /// Has been in a window before, so it has a page to draw the moment it's back.
     var shownBefore = false
+    /// Laid out a page while in no window (loaded behind another tab, ahead
+    /// in the palette, or claude.ai kept ready): it has something to draw but
+    /// hasn't drawn it, which takes WebKit a few frames once it's in the
+    /// window (50 to 150 ms measured for BBC News and Wikipedia). Its first
+    /// showing comes in under the page being left, as a page shown before
+    /// does (placePages), rather than blank until then.
+    var laidOutUnseen = false
 
     /// Runs once the view's next frame is in the window, or shortly after
     /// if WebKit never says.
@@ -300,12 +352,14 @@ final class SillWebView: WKWebView {
         held = true
         alphaValue = 0
         // A web process that dies before it draws never says so: in after a second regardless.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.showFirstFrame() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.showFirstFrame(laidOut: false) }
     }
 
     /// In, quickly, once that frame has reached the window: WebKit reports
     /// it a few frames before, and fading in then still shows the white.
-    func showFirstFrame() {
+    /// `laidOut`: WebKit said there's a page to see (not a time limit, or a failure).
+    func showFirstFrame(laidOut: Bool = true) {
+        if laidOut, window == nil { laidOutUnseen = true }
         guard held, !presenting else { return }
         presenting = true
         let fadeIn = { [weak self] in

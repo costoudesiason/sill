@@ -165,6 +165,10 @@ final class Tab: NSObject {
             pending = nil
             savedState = nil
             if let url = shown ?? view.url { self.url = url }
+            // Loaded out of sight (the palette's guess, or claude.ai kept
+            // ready) and likely laid out: it comes in as a page that has been
+            // shown before does, under the one being left until it has drawn.
+            if view.window == nil, view.url != nil, !view.isLoading || view.estimatedProgress >= 0.5 { view.laidOutUnseen = true }
             if let title = view.title, !title.isEmpty { self.title = title }
             if !isPrivate, let url = shown ?? view.url { History.shared.record(url, title: shown == nil ? view.title : nil, typed: true) }
             favicon = Favicons.shared.cached(for: view.url ?? url)
@@ -653,12 +657,12 @@ extension Tab: WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        (webView as? SillWebView)?.showFirstFrame()
+        (webView as? SillWebView)?.showFirstFrame(laidOut: false)
         showError(error, in: webView)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        (webView as? SillWebView)?.showFirstFrame()
+        (webView as? SillWebView)?.showFirstFrame(laidOut: false)
         showError(error, in: webView)
     }
 
