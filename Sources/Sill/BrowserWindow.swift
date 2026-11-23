@@ -904,6 +904,15 @@ final class BrowserNSWindow: NSWindow {
     ]
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // A page in front takes Control-Tab for itself and the menu never hears of it.
+        if event.type == .keyDown, event.keyCode == 48,
+           let controller = windowController as? BrowserWindowController {
+            switch event.modifierFlags.intersection([.command, .shift, .control, .option]) {
+            case .control: controller.nextTab(nil); return true
+            case [.control, .shift]: controller.previousTab(nil); return true
+            default: break
+            }
+        }
         if super.performKeyEquivalent(with: event) { return true }
         guard event.type == .keyDown, event.isARepeat,
               let controller = windowController as? BrowserWindowController,
