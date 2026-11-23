@@ -25,14 +25,18 @@ final class PasswordsWindow: NSWindowController, NSWindowDelegate {
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         window.title = "Passwords"
-        window.titlebarAppearsTransparent = true
         window.toolbarStyle = .unified
+        window.isOpaque = true
+        window.backgroundColor = .windowBackgroundColor
         window.minSize = NSSize(width: 600, height: 380)
         window.isReleasedWhenClosed = false
         window.setFrameAutosaveName("Sill Passwords")
         if window.frame.origin == .zero { window.center() }
         super.init(window: window)
-        window.contentViewController = NSHostingController(rootView: PasswordsView(model: model))
+        let host = NSHostingController(rootView: PasswordsView(model: model))
+        // The view's toolbar (Delete) and title become the window's.
+        host.sceneBridgingOptions = [.toolbars, .title]
+        window.contentViewController = host
         window.delegate = self
         Task { await model.reload() }
     }
@@ -119,16 +123,21 @@ struct PasswordsView: View {
         NavigationSplitView {
             List(selection: Binding(get: { model.selection }, set: { model.selection = $0; model.shown = nil })) {
                 ForEach(model.filtered, id: \.self) { login in
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(Domains.bare(login.host)).lineLimit(1)
-                        Text(login.user.isEmpty ? "No user name" : login.user).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                    HStack(spacing: 10) {
+                        SiteIcon(host: login.host, size: 24)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(Domains.bare(login.host)).lineLimit(1)
+                            Text(login.user.isEmpty ? "No user name" : login.user)
+                                .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                        }
                     }
+                    .padding(.vertical, 2)
                     .tag(login)
                 }
             }
             .listStyle(.sidebar)
-            .searchable(text: $model.search, placement: .sidebar)
-            .navigationSplitViewColumnWidth(min: 220, ideal: 260)
+            .searchable(text: $model.search, placement: .sidebar, prompt: "Search")
+            .navigationSplitViewColumnWidth(min: 230, ideal: 270, max: 360)
             .overlay {
                 if model.logins.isEmpty {
                     ContentUnavailableView("No Passwords", systemImage: "key",
@@ -136,23 +145,48 @@ struct PasswordsView: View {
                 }
             }
         } detail: {
-            if let login = model.selection {
-                detail(login)
-            } else {
-                ContentUnavailableView("No Password Selected", systemImage: "key")
+            Group {
+                if let login = model.selection {
+                    detail(login)
+                } else {
+                    ContentUnavailableView("No Password Selected", systemImage: "key")
+                }
+            }
+            .toolbar {
+                ToolbarItem {
+                    Button(role: .destructive) { confirmingDelete = true } label: { Label("Delete", systemImage: "trash") }
+                        .help("Delete Password")
+                        .disabled(model.selection == nil)
+                }
             }
         }
+        .navigationTitle("Passwords")
         .frame(minWidth: 600, minHeight: 380)
+        .confirmationDialog("Delete the password for \(model.selection.map { Domains.bare($0.host) } ?? "")?",
+                            isPresented: $confirmingDelete) {
+            Button("Delete", role: .destructive) { if let login = model.selection { Task { await model.delete(login) } } }
+        } message: {
+            Text("It's removed from your Keychain. This can't be undone.")
+        }
     }
 
     private func detail(_ login: SavedPasswords.Login) -> some View {
         Form {
             Section {
-                LabeledContent("Website", value: login.host)
+                HStack(spacing: 14) {
+                    SiteIcon(host: login.host, size: 44)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(Domains.bare(login.host)).font(.title2.weight(.semibold))
+                        Text(login.host).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+            Section {
                 LabeledContent("User Name") {
-                    HStack {
-                        Text(login.user.isEmpty ? "—" : login.user).textSelection(.enabled)
-                        Button("Copy") {
+                    HStack(spacing: 6) {
+                        Text(login.user.isEmpty ? "—" : login.user).textSelection(.enabled).lineLimit(1).truncationMode(.middle)
+                        RowButton(symbol: "doc.on.doc", help: "Copy User Name") {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(login.user, forType: .string)
                         }
@@ -160,24 +194,57 @@ struct PasswordsView: View {
                     }
                 }
                 LabeledContent("Password") {
-                    HStack {
-                        Text(model.shown ?? String(repeating: "•", count: 10)).monospaced().textSelection(.enabled)
-                        Button(model.shown == nil ? "Show" : "Hide") { Task { await model.reveal(login) } }
-                        Button("Copy") { Task { await model.copyPassword(login) } }
+                    HStack(spacing: 6) {
+                        Text(model.shown ?? String(repeating: "•", count: 12))
+                            .font(model.shown == nil ? .body : .body.monospaced())
+                            .textSelection(.enabled).lineLimit(1).truncationMode(.middle)
+                        RowButton(symbol: model.shown == nil ? "eye" : "eye.slash", help: model.shown == nil ? "Show Password" : "Hide Password") {
+                            Task { await model.reveal(login) }
+                        }
+                        RowButton(symbol: "doc.on.doc", help: "Copy Password") { Task { await model.copyPassword(login) } }
                     }
                 }
-            } header: {
-                Text(Domains.bare(login.host)).font(.title2.weight(.semibold)).foregroundStyle(.primary)
-            }
-            Section {
-                Button("Delete Password…", role: .destructive) { confirmingDelete = true }
+                LabeledContent("Website") {
+                    Link(login.host, destination: URL(string: "https://\(login.host)/")!)
+                }
             }
         }
         .formStyle(.grouped)
-        .confirmationDialog("Delete the password for \(Domains.bare(login.host))?", isPresented: $confirmingDelete) {
-            Button("Delete", role: .destructive) { Task { await model.delete(login) } }
-        } message: {
-            Text("It's removed from your Keychain. This can't be undone.")
+    }
+}
+
+/// A small borderless icon button at the end of a row, as Passwords has.
+private struct RowButton: View {
+    let symbol: String
+    let help: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) { Image(systemName: symbol).frame(width: 18, height: 18) }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help(help)
+    }
+}
+
+/// The site's icon from Sill's favicon store, else its first letter on a
+/// tile, as Passwords shows a site it has no icon for.
+private struct SiteIcon: View {
+    let host: String
+    let size: CGFloat
+    var body: some View {
+        let image = URL(string: "https://\(host)/").flatMap { Favicons.shared.cached(for: $0) }
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                .fill(image == nil ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.background))
+            if let image {
+                Image(nsImage: image).resizable().interpolation(.high).scaledToFit().padding(size * 0.14)
+            } else {
+                Text(String(Domains.bare(host).prefix(1)).uppercased())
+                    .font(.system(size: size * 0.45, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
         }
+        .frame(width: size, height: size)
+        .overlay(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous).strokeBorder(.separator, lineWidth: 0.5))
     }
 }

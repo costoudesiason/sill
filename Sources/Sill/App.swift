@@ -239,6 +239,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// ⌘,: the settings live in the palette of the window in front.
+    /// ⌥⌘P, as in Safari: the passwords Sill keeps.
+    @objc func showPasswords(_ sender: Any?) { PasswordsWindow.show() }
+
     @objc func showSettings(_ sender: Any?) {
         let browser = current(isPrivate: current?.isPrivate == true) ?? current(isPrivate: false) ?? current(isPrivate: true) ?? {
             let made = makeBrowser(isPrivate: false)
@@ -340,6 +343,7 @@ enum MainMenu {
             .separator(),
             item("Show All Tabs", #selector(BrowserWindowController.showAllTabs(_:)), "\\", [.command, .shift]),
             item("Downloads", #selector(BrowserWindowController.showDownloads(_:)), "l", [.command, .option]),
+            item("Passwords", #selector(AppDelegate.showPasswords(_:)), "p", [.command, .option]),
             .separator(),
             item("Web Inspector", #selector(BrowserWindowController.showInspector(_:)), "i", [.command, .option]),
         ]))
