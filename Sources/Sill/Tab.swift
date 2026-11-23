@@ -300,6 +300,24 @@ final class Tab: NSObject {
     }
 
     /// Shown again after its process died behind another tab.
+    /// Shown, but nothing there: a page whose load was stopped before it
+    /// came (a preloaded page given up halfway) stays white for good. A
+    /// moment after a tab comes to the front, an empty page that isn't
+    /// loading loads its address.
+    func loadIfEmpty() {
+        guard let webView, url != nil else { return }
+        let check = "(function(){ var b = document.body; return location.href === 'about:blank' || !b || (b.childElementCount === 0 && !b.textContent.trim()); })()"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self, weak webView] in
+            guard let self, let webView, self.webView === webView, webView.window != nil, !webView.isLoading else { return }
+            webView.evaluateJavaScript(check, in: nil, in: Web.world) { [weak self, weak webView] result in
+                guard let self, let webView, self.webView === webView, !webView.isLoading,
+                      (try? result.get()) as? Bool == true, let target = webView.url.flatMap({ $0.scheme == "about" ? nil : $0 }) ?? self.url
+                else { return }
+                webView.load(URLRequest(url: target))
+            }
+        }
+    }
+
     func reloadIfCrashed() {
         guard needsReload else { return }
         needsReload = false
