@@ -134,9 +134,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         window.tabbingMode = .disallowed
         window.minSize = NSSize(width: 420, height: 300)
         window.collectionBehavior.insert(.fullScreenPrimary)
-        // See-through: the bar's glass shows the desktop behind the window.
-        // Opaque unless rounder corners are asked for (Settings › Appearance):
-        // a see-through window is composited whole on every frame.
+        // Opaque: the bar's glass shows the desktop behind the window all the
+        // same. Rounder corners (Settings › Appearance) come from the window
+        // server (applyLooks); only without that is the window see-through,
+        // and a see-through window is composited whole on every frame.
         window.isOpaque = true
         window.backgroundColor = .windowBackgroundColor
         if isPrivate { window.appearance = NSAppearance(named: .darkAqua) }
@@ -161,8 +162,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
         strip.browser = self
         stage.wantsLayer = true
-        // Rounder than the system's window corners; the shadow of a
-        // see-through window follows what it draws, so it follows these.
+        // Rounder than the system's window corners where the window server
+        // can't round them; the shadow of a see-through window follows what
+        // it draws, so it follows these.
         stage.layer?.cornerCurve = .continuous
         window.contentView = stage
         ground.material = .sidebar
@@ -247,13 +249,30 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             wash.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(amount).cgColor
         }
         ground.isHidden = !prefs.glassBar
-        wash.isHidden = !prefs.glassBar
-        // Rounder corners need a see-through window, clipped to them; the
-        // system's own corners cost nothing. Only the corners are clipped:
-        // the bar's top two and the page's bottom two. A rounded mask over
-        // the whole window, page and all, made every frame of a scrolling
-        // page or a video go through an extra offscreen pass.
+        // No wash at all is no layer to blend.
+        wash.isHidden = !prefs.glassBar || amount == 0
         let round = prefs.roundCorners
+        // Rounder corners from the window server, as every window's own
+        // corners are: the window stays opaque, nothing in it is clipped, and
+        // the shadow and rim follow. Measured on a page scrolling itself for
+        // five seconds: steady 60 fps, worst frame 22-28 ms rather than
+        // 35-490, and a fifth less WindowServer time than clipping it here.
+        if setCornerRadius(round ? prefs.cornerRadius : nil) {
+            window?.isOpaque = true
+            window?.backgroundColor = .windowBackgroundColor
+            stage.layer?.cornerRadius = 0
+            stage.layer?.backgroundColor = nil
+            Self.clip(top, radius: 0, corners: .top)
+            Self.clip(pageHost, radius: 0, corners: .bottom)
+            if before?.roundCorners != looks.roundCorners || before?.cornerRadius != looks.cornerRadius {
+                window?.invalidateShadow()
+            }
+            return
+        }
+        // Without it: a see-through window, clipped to them. Only the
+        // corners are clipped: the bar's top two and the page's bottom two.
+        // A rounded mask over the whole window, page and all, made every
+        // frame of a scrolling page or a video go through an extra offscreen pass.
         let radius = round ? prefs.cornerRadius : 0
         window?.isOpaque = !round
         window?.backgroundColor = round ? .clear : .windowBackgroundColor
@@ -268,6 +287,27 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
     }
     private var appliedLooks: Looks?
+    /// The system's radius for this window, from before Sill changed it.
+    private var systemCornerRadius: Double?
+
+    /// Asks the window server to round the window at `radius`, or puts the
+    /// system's own corners back for nil. False where it can't be asked (the
+    /// setting lives outside the public framework), and the caller clips.
+    private func setCornerRadius(_ radius: Double?) -> Bool {
+        let get = NSSelectorFromString("_cornerRadius"), set = NSSelectorFromString("_setCornerRadius:")
+        guard let window, window.responds(to: get), window.responds(to: set) else { return false }
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Double
+        typealias Setter = @convention(c) (AnyObject, Selector, Double) -> Void
+        let current = unsafeBitCast(window.method(for: get), to: Getter.self)(window, get)
+        if systemCornerRadius == nil {
+            // Never changed and not asked to be: the system's corners, untouched.
+            guard radius != nil else { return true }
+            systemCornerRadius = current
+        }
+        let wanted = radius ?? systemCornerRadius ?? current
+        if current != wanted { unsafeBitCast(window.method(for: set), to: Setter.self)(window, set, wanted) }
+        return true
+    }
 
     private enum Edge { case top, bottom }
 
@@ -359,6 +399,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     }
     func windowDidEnterFullScreen(_ notification: Notification) { stage.needsLayout = true }
     func windowDidExitFullScreen(_ notification: Notification) { stage.needsLayout = true }
+    // Square on a full screen, as every window is; round again on the way back.
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        if Preferences.shared.roundCorners { _ = setCornerRadius(0) }
+    }
+    func windowWillExitFullScreen(_ notification: Notification) {
+        if Preferences.shared.roundCorners { _ = setCornerRadius(Preferences.shared.cornerRadius) }
+    }
 
     // MARK: - Tabs
 
