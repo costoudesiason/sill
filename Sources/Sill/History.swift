@@ -111,9 +111,13 @@ final class History {
             if !same {
                 // The title's new bytes go on the end; the old ones stay behind, unread.
                 let end = Int32(flat?.bytes.count ?? 0)
+                let old = Int(flat?.spans[(at * Flat.fields + Flat.title) * 2 + 1] ?? 0)
+                flat?.waste += old
                 flat?.spans[(at * Flat.fields + Flat.title) * 2] = end
                 flat?.spans[(at * Flat.fields + Flat.title) * 2 + 1] = Int32(read.titleBytes.count)
                 flat?.bytes.append(contentsOf: read.titleBytes)
+                // Mostly old titles by now: made again, from the shelf, at the next search.
+                if let flat, flat.waste > 65_536, flat.waste > flat.bytes.count / 2 { self.flat = nil }
             }
         } else {
             places[visit.url] = shelf?.count ?? 0
@@ -209,6 +213,8 @@ final class History {
         var spans = ContiguousArray<Int32>()
         /// Three to an entry, what its score is made of: visits counted, when last, how deep.
         var weights = ContiguousArray<Double>()
+        /// Bytes of titles since replaced, still in `bytes` and read by nothing.
+        var waste = 0
 
         mutating func add(_ visit: Visit, _ read: Reading) {
             weights.append(Double(visit.count) + Double(visit.typed) * 2)
