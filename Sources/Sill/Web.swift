@@ -192,6 +192,11 @@ final class SillWebView: WKWebView {
         if window != nil { tab?.pageShown() }
     }
 
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        if window != nil { tab?.pageShown() }
+    }
+
     /// "New Window" reads "New Tab" here: that's what it does.
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         for item in menu.items {

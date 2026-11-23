@@ -747,7 +747,8 @@ final class PaletteField: NSTextField {
     /// space" would turn the end of an address into "site.com." and fail it.
     @objc(textView:shouldChangeTextInRange:replacementString:)
     func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
-        if replacementString == ". ", range.length == 1, (textView.string as NSString).substring(with: range) == " " {
+        if replacementString == ". ", range.length == 1, (textView.string as NSString).substring(with: range) == " ",
+           NSApp.currentEvent?.type == .keyDown, NSApp.currentEvent?.characters == " " {
             textView.insertText(" ", replacementRange: NSRange(location: range.upperBound, length: 0))
             return false
         }
