@@ -121,6 +121,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// What the spare is already loading, guessed from the palette's top hit.
     private var prerendered: URL?
     private var prerenderTimer: Timer?
+    /// Restored tabs to load ahead once the ones next door have, latest seen first.
+    private var warmAfterRestore: [Tab] = []
 
     init(isPrivate: Bool, popup: Bool = false) {
         self.isPrivate = isPrivate
@@ -438,8 +440,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             guard let url = URL(string: state.url) else { return nil }
             let tab = Tab(url: url, title: state.title, isPrivate: isPrivate)
             tab.host = self
+            tab.seenAt = state.shown.map { Date(timeIntervalSince1970: $0) }
             return tab
         }
+        warmAfterRestore = tabs.filter { $0.seenAt != nil }.sorted { $0.seenAt! > $1.seenAt! }
         strip.sync(animated: false)
         if tabs.indices.contains(selectedIndex) { select(tabs[selectedIndex]) } else if let first = tabs.first { select(first) }
     }
@@ -470,7 +474,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
                 let others = !ready && prerendered != nil && url.scheme == "http"
                 spare = nil
                 prerendered = nil
-                if others { tab.materialize() } else { tab.adopt(view, loaded: ready) }
+                if others { view.removeFromSuperview(); tab.materialize() } else { tab.adopt(view, loaded: ready) }
             }
         }
         if shouldSelect { select(tab, animated: true) } else { strip.sync(animated: true) }
@@ -575,7 +579,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // playing from a tab that's gone.
         if pictured === tab { pictured = nil }
         Self.silence(tab)
-        Web.releaseIdleProcesses()
+        Web.releaseIdleProcesses(soon: false)
         if tabs.isEmpty {
             selected = nil
             window?.close()
@@ -700,13 +704,19 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// is already there. A short pause first, so passing letters don't load.
     func prerenderSoon(_ url: URL?) {
         prerenderTimer?.invalidate()
-        guard let url, paletteOpen, palette.mode == .newTab, !isPrivate, !WarmSite.handles(url) || !Preferences.shared.keepsClaudeReady,
-              let host = url.host() else { return }
-        // A site you haven't been to isn't loaded ahead, but the way there is
-        // opened (and to its www., where most bare names send you), so the
-        // lookup and handshake are done by Return. After the same pause.
-        guard History.shared.knows(host: host) else {
-            prerenderTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in
+        guard let url, paletteOpen, palette.mode != .tabs, !isPrivate, let host = url.host() else { return }
+        let newTab = palette.mode == .newTab
+        if newTab, WarmSite.handles(url), Preferences.shared.keepsClaudeReady { return }
+        // A site you haven't been to isn't loaded ahead, nor anything typed
+        // into the address field (⌘L), which replaces the page in front; but
+        // the way there is opened (and to its www., where most bare names
+        // send you), so the lookup and handshake are done by Return. After
+        // the same pause, or a longer one for a name that may be on its way
+        // to another: nytimes.co, typed on the way to nytimes.com.
+        guard newTab, History.shared.knows(host: host) else {
+            let last = host.split(separator: ".").last.map(String.init) ?? ""
+            let unfinished = ["com", "org", "net"].contains { $0.count > last.count && $0.hasPrefix(last) }
+            prerenderTimer = Timer.scheduledTimer(withTimeInterval: unfinished ? 0.4 : 0.08, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self, self.paletteOpen else { return }
                     self.expect(url)
@@ -726,6 +736,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
                 self.prerendered = url
                 view.stopLoading()
                 Shield.shared.whenReady { [weak view] in view?.load(URLRequest(url: url)) }
+                // Drawing as it comes in, under the page in front: Return
+                // shows it as it is, rather than after its first drawing.
+                self.drawAhead(view, live: true)
             }
         }
     }
@@ -749,6 +762,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             self.prerenderTimer?.invalidate()
             guard self.prerendered != nil else { return }
             self.spare?.stopLoading()
+            self.spare?.removeFromSuperview()
             self.spare = nil
             self.prerendered = nil
         }
@@ -771,7 +785,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// floats, or one playing sound or using the camera.
     func napIdleTabs(olderThan: TimeInterval? = nil) {
         // Short of memory, the page kept ready for a new tab goes too.
-        if olderThan != nil, !paletteOpen { spare = nil }
+        if olderThan != nil, !paletteOpen { spare?.removeFromSuperview(); spare = nil }
         guard Preferences.shared.sleepsTabs else { return }
         let after = olderThan ?? TimeInterval(max(5, Preferences.shared.sleepAfterMinutes) * 60)
         // One at a time, a moment apart, each asked again when its turn
@@ -1063,6 +1077,11 @@ extension BrowserWindowController: TabHost {
 
     func promptsChanged(_ tab: Tab) { placePrompts() }
 
+    func loadedUnseen(_ tab: Tab) {
+        guard tab !== selected, tabs.contains(where: { $0 === tab }), let view = tab.webView else { return }
+        drawAhead(view)
+    }
+
     /// The tab in front, or the other half of its split.
     func isInFront(_ tab: Tab) -> Bool {
         tab === selected || (split?.contains(tab) == true && split?.contains(selected) == true)
@@ -1258,7 +1277,7 @@ extension BrowserWindowController {
             let shown = selected.webView as? SillWebView
             let under = keep == nil && leaving?.superview !== pageHost
                 && shown?.shownBefore == true && splitView.superview !== pageHost
-                && pageHost.subviews.contains { $0 is WKWebView && !$0.isHidden }
+                && pageHost.subviews.contains { Self.covers($0) }
             if !under {
                 putAside(except: splitView, keep)
             }
@@ -1280,6 +1299,7 @@ extension BrowserWindowController {
                     let view = tab.materialize()
                     pane.show(view)
                     view.shownBefore = true
+                    view.cameIntoView()
                 } else {
                     chooser.offer(tabs.filter { !split.contains($0) })
                     pane.show(chooser)
@@ -1289,14 +1309,15 @@ extension BrowserWindowController {
             splitView.apply(fraction: split.fraction)
         } else {
             let webView = selected.materialize()
-            let placed = webView.superview === pageHost && !webView.isHidden
+            // One drawing ahead is in the page area but not yet in front.
+            let placed = webView.superview === pageHost && !webView.isHidden && !webView.drawingAhead
             // A page that has been shown before comes back under the one
             // being left, which goes once the new one has drawn: nothing
             // waits, and the window never shows through between the two.
             let under = keep == nil && leaving?.superview !== pageHost
-                && (webView.shownBefore || webView.laidOutUnseen) && !placed
+                && (webView.shownBefore || webView.laidOutUnseen || webView.drawingAhead) && !placed
                 && !webView.isDescendant(of: splitView)
-                && pageHost.subviews.contains { ($0 is WKWebView && !$0.isHidden && $0 !== webView) || $0 === splitView }
+                && pageHost.subviews.contains { ($0 !== webView && Self.covers($0)) || $0 === splitView }
             if !under { putAside(except: webView, keep) }
             if webView.superview !== pageHost {
                 webView.frame = pageHost.bounds
@@ -1310,6 +1331,7 @@ extension BrowserWindowController {
             webView.autoresizingMask = [.width, .height]
             webView.shownBefore = true
             webView.outgoing = false
+            webView.cameIntoView()
             if under {
                 for case let old as SillWebView in pageHost.subviews where old !== webView { old.outgoing = true }
                 webView.afterNextFrame { [weak self, weak webView] in
@@ -1318,6 +1340,39 @@ extension BrowserWindowController {
                     self.putAside(except: webView, self.leaving)
                 }
             }
+        }
+    }
+
+    /// A page in the page area that is in sight: not put aside, and not one
+    /// only drawing ahead under the others.
+    private static func covers(_ view: NSView) -> Bool {
+        view is WKWebView && !view.isHidden && (view as? SillWebView)?.drawingAhead != true
+    }
+
+    /// A page loaded out of sight (a tab next door, one opened behind, the
+    /// palette's guess) goes into the page area under the page in front so
+    /// that WebKit draws it (SillWebView.drawingAhead): shown later it's up
+    /// in a frame or two, rather than after drawing from nothing. Only under
+    /// one page that covers the whole area, fully in, in a window on screen.
+    /// `live`: it stays, drawing as it loads (the palette's guess, until
+    /// Return or the palette goes); else it's put aside once it has drawn.
+    func drawAhead(_ view: SillWebView, live: Bool = false) {
+        guard !view.drawingAhead, view.window == nil || view.superview === pageHost,
+              let window, window.occlusionState.contains(.visible), let selected,
+              split?.contains(selected) != true,
+              let front = selected.webView, front !== view, front.superview === pageHost, front.isShown,
+              front.isFullyIn
+        else { return }
+        view.startDrawingAhead()
+        view.frame = pageHost.bounds
+        view.autoresizingMask = [.width, .height]
+        if view.superview === pageHost { order(view, below: true); view.isHidden = false }
+        else { pageHost.addSubview(view, positioned: .below, relativeTo: nil) }
+        guard !live else { return }
+        // A heavy page takes a few hundred ms to draw the first time (apple.com 815 ms once).
+        view.afterNextFrame(within: 1) { [weak view] in
+            guard let view, view.drawingAhead else { return }
+            view.park()
         }
     }
 
@@ -1490,9 +1545,50 @@ extension BrowserWindowController {
                 }
                 if n == 0 { wake() } else { Frame.afterCommit(wake) }
             }
+            // Once, with the first tab shown after a relaunch.
+            if !self.warmAfterRestore.isEmpty {
+                self.warmRecent(self.warmAfterRestore)
+                self.warmAfterRestore = []
+            }
         }
         neighbourWarming = work
         DispatchQueue.main.asyncAfter(deadline: .now() + pause, execute: work)
+    }
+
+    /// After a relaunch the tabs either side of the one in front aren't the
+    /// only ones likely to be clicked: up to two more are loaded ahead, the
+    /// ones looked at last before quitting, one at a time once nothing in
+    /// the window is loading, and only while the Mac has 3 GB to spare. Each
+    /// is a web process of 100 to 400 MB once loaded (measured: Wikipedia
+    /// 111, apple.com 146, BBC News 402, the New York Times 441), and goes
+    /// back to sleep, as any tab does, if it isn't looked at.
+    private func warmRecent(_ candidates: [Tab], waited: TimeInterval = 0, warmed: Int = 0) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            let left = candidates.filter { tab in tab.webView == nil && !tab.warmedUnseen && self.tabs.contains { $0 === tab } }
+            guard warmed < 2, let next = left.first else { return }
+            if self.tabs.contains(where: { $0.isLoading }) {
+                guard waited < 20 else { return }
+                return self.warmRecent(left, waited: waited + 1, warmed: warmed)
+            }
+            guard Self.memoryToSpare else { return }
+            self.warm(next)
+            next.warmedUnseen = next.webView != nil
+            self.warmRecent(Array(left.dropFirst()), warmed: warmed + 1)
+        }
+    }
+
+    /// Free, inactive and purgeable memory: what the Mac can give a page
+    /// without pushing anything else out.
+    private static var memoryToSpare: Bool {
+        var info = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count) }
+        }
+        guard result == KERN_SUCCESS else { return false }
+        let pages = UInt64(info.free_count) + UInt64(info.inactive_count) + UInt64(info.purgeable_count)
+        return pages * UInt64(getpagesize()) > 3 << 30
     }
 
     /// A click into the other half of a split makes that page the one in

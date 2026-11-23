@@ -99,24 +99,45 @@ enum Web {
 
     /// WebKit keeps the process of a page that has gone (its tab closed or
     /// put to sleep) for the site's next page, for half an hour, with some
-    /// of what the page had allocated still in it: tens of megabytes each,
-    /// over a hundred for a heavy site. They are let go once tabs have stopped
-    /// going for half a minute, not sooner: while tabs are still being closed
-    /// and opened the kept processes are what the next pages start in. The
-    /// process kept started for the next page is not one of them. A site's
-    /// service worker outlives its page by some seconds and only then is its
-    /// process kept, hence the second pass.
-    static func releaseIdleProcesses() {
+    /// of what the page had allocated still in it. Measured: five tabs
+    /// closed (Wikipedia, BBC News, apple.com, GitHub, the New York Times)
+    /// left 594 MB in their kept processes, 45 to 235 MB each, against
+    /// 1,270 MB while open; going back to a site in its kept process loads
+    /// the page about a fifth sooner (cacheAsABrowser).
+    ///
+    /// After a tab is closed they're kept for three minutes from when tabs
+    /// stopped going: time for ⇧⌘T, or the same site again from the palette
+    /// or a link, to start in one. A tab put to sleep or a window closed is
+    /// Sill giving memory back, so then they go after half a minute, and a
+    /// close doesn't put that off. The Mac short of memory lets them go at
+    /// once (App.swift). The process started for the next page is not one
+    /// of them. A site's service worker outlives its page by some seconds
+    /// and only then is its process kept, hence the second pass.
+    static func releaseIdleProcesses(soon: Bool = true) {
         let clear = NSSelectorFromString("_clearWebProcessCache")
         guard pool.responds(to: clear) else { return }
+        if !soon, let soonDue, soonDue > Date() { return }
         releases.forEach { $0.cancel() }
-        releases = [30, 50].map { delay in
+        soonDue = soon ? Date().addingTimeInterval(30) : nil
+        releases = (soon ? [30, 50] : [180, 200]).map { delay in
             let work = DispatchWorkItem { pool.perform(clear) }
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
             return work
         }
     }
     private static var releases: [DispatchWorkItem] = []
+    /// When a release asked for by a sleep or a window closing is due.
+    private static var soonDue: Date?
+
+    /// The Mac is short of memory: every kept process goes now.
+    static func releaseIdleProcessesNow() {
+        let clear = NSSelectorFromString("_clearWebProcessCache")
+        guard pool.responds(to: clear) else { return }
+        releases.forEach { $0.cancel() }
+        releases = []
+        soonDue = nil
+        pool.perform(clear)
+    }
 
     /// Private windows share one cookie jar for as long as Sill runs, and it is never written down.
     static let privateStore = WKWebsiteDataStore.nonPersistent()
@@ -242,7 +263,7 @@ final class SillWebView: WKWebView {
 
     override func viewDidUnhide() {
         super.viewDidUnhide()
-        if window != nil { tab?.pageShown() }
+        if isShown { tab?.pageShown() }
     }
 
     /// "New Window" reads "New Tab" here: that's what it does.
@@ -289,20 +310,22 @@ final class SillWebView: WKWebView {
     /// The page being left stays over the one coming in until that has drawn;
     /// for that moment it is only a picture, and clicks go to the new page.
     var outgoing = false
-    override func hitTest(_ point: NSPoint) -> NSView? { outgoing ? nil : super.hitTest(point) }
+    override func hitTest(_ point: NSPoint) -> NSView? { outgoing || drawingAhead ? nil : super.hitTest(point) }
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
         outgoing = false
     }
 
-    /// On screen: in a window and not put aside (see `park`).
-    var isShown: Bool { window != nil && !isHidden }
+    /// On screen: in a window and not put aside (see `park`), and not only
+    /// drawing out of sight under the page in front (see `drawingAhead`).
+    var isShown: Bool { window != nil && !isHidden && !drawingAhead }
 
     /// Put aside where it is, hidden, rather than taken out of the window.
     /// WebKit blanks a page that comes back into a window until it has drawn
     /// again, and holds the app still for that drawing; a page that was only
     /// hidden still has its last frame and is simply shown.
     func park() {
+        drawingAhead = false
         guard !isHidden else { return }
         isHidden = true
         outgoing = false
@@ -327,18 +350,85 @@ final class SillWebView: WKWebView {
     /// does (placePages), rather than blank until then.
     var laidOutUnseen = false
 
-    /// Runs once the view's next frame is in the window, or shortly after
-    /// if WebKit never says.
-    func afterNextFrame(_ run: @escaping () -> Void) {
+    // MARK: drawn ahead
+
+    /// In the window under the page in front, so WebKit draws it, though
+    /// no one sees it (BrowserWindowController.drawAhead): a page put back
+    /// later has that frame and is up in a frame or two, where one never
+    /// drawn took 100 to 200 ms (measured, median of three, after ten
+    /// seconds away: Wikipedia 113 against 66, GitHub 164 against 41,
+    /// apple.com 148 against 29). Not shown for anything else: its dialogs
+    /// wait, and it takes no clicks.
+    private(set) var drawingAhead = false
+    /// Its sound and video held back since it went into the window unseen.
+    /// A page in a window may start media and one in none can't, so a page
+    /// never looked at would otherwise be heard, or have its video run on,
+    /// from behind the one in front. Muted alone, a video ran on silently
+    /// (5.8 s in by the time it was shown); suspended as well, it hadn't
+    /// started, and started at once when shown (measured).
+    private var mediaHeld = false
+    private var mutedBefore: UInt = 0
+
+    /// Into the window unseen: media held, out of reach of clicks and dialogs.
+    func startDrawingAhead() {
+        drawingAhead = true
+        holdMedia()
+    }
+
+    /// Being shown now: whatever it held back since it was drawn ahead goes on.
+    func cameIntoView() {
+        let wasAhead = drawingAhead
+        drawingAhead = false
+        // Dialogs it asked for while unseen: it was already in the window.
+        if wasAhead, isShown { tab?.pageShown() }
+        guard mediaHeld else { return }
+        mediaHeld = false
+        setAllMediaPlaybackSuspended(false, completionHandler: nil)
+        if let (get, set) = Self.mutedState(in: self), get(self) & 1 != 0, mutedBefore & 1 == 0 {
+            set(self, get(self) & ~1)
+        }
+    }
+
+    private func holdMedia() {
+        guard !mediaHeld else { return }
+        mediaHeld = true
+        setAllMediaPlaybackSuspended(true, completionHandler: nil)
+        // Muted too, for sound that isn't a media element's (Web Audio).
+        // WebKit's own mute is outside the public framework: only as found,
+        // a number out and a number in, or not at all.
+        guard let (get, set) = Self.mutedState(in: self) else { return }
+        mutedBefore = get(self)
+        if mutedBefore & 1 == 0 { set(self, mutedBefore | 1) }  // _WKMediaAudioMuted
+    }
+
+    private static func mutedState(in view: WKWebView) -> ((WKWebView) -> UInt, (WKWebView, UInt) -> Void)? {
+        let get = NSSelectorFromString("_mediaMutedState"), set = NSSelectorFromString("_setPageMuted:")
+        func shape(_ selector: Selector) -> String? {
+            class_getInstanceMethod(WKWebView.self, selector).flatMap { method_getTypeEncoding($0) }.map { String(cString: $0) }
+        }
+        guard view.responds(to: get), view.responds(to: set), shape(get) == "Q16@0:8", shape(set) == "v24@0:8Q16" else { return nil }
+        typealias Getter = @convention(c) (AnyObject, Selector) -> UInt
+        typealias Setter = @convention(c) (AnyObject, Selector, UInt) -> Void
+        let getter = unsafeBitCast(view.method(for: get), to: Getter.self)
+        let setter = unsafeBitCast(view.method(for: set), to: Setter.self)
+        return ({ getter($0, get) }, { setter($0, set, $1) })
+    }
+
+    /// Runs once the view's next frame is in the window, or after `within`
+    /// seconds if WebKit never says.
+    func afterNextFrame(within limit: TimeInterval = 0.25, _ run: @escaping () -> Void) {
         let presented = NSSelectorFromString("_doAfterNextPresentationUpdate:")
         guard responds(to: presented) else { return run() }
         var done = false
         let once = { if !done { done = true; run() } }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { once() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + limit) { once() }
         typealias After = @convention(c) (AnyObject, Selector, @escaping @convention(block) () -> Void) -> Void
         unsafeBitCast(method(for: presented), to: After.self)(self, presented) { DispatchQueue.main.async { once() } }
     }
     private var presenting = false
+
+    /// Fully opaque now: not held unseen for its first frame or fading in.
+    var isFullyIn: Bool { !held && alphaValue >= 1 && (layer?.presentation()?.opacity ?? 1) >= 1 }
 
     /// _WKRenderingProgressEventFirstVisuallyNonEmptyLayout, the moment
     /// Safari shows a page that is coming in.
@@ -360,6 +450,10 @@ final class SillWebView: WKWebView {
 
     /// In, quickly, once that frame has reached the window: WebKit reports
     /// it a few frames before, and fading in then still shows the white.
+    /// Measured from WebKit's report to the frame being in the window: 14 to
+    /// 81 ms, about 35 typically (Wikipedia, BBC News, apple.com, Hacker
+    /// News). The fade after it is kept short, 60 ms where it was 120: the
+    /// page is fully in some 95 ms after the report rather than 155.
     /// `laidOut`: WebKit said there's a page to see (not a time limit, or a failure).
     func showFirstFrame(laidOut: Bool = true) {
         if laidOut, window == nil { laidOutUnseen = true }
@@ -369,7 +463,7 @@ final class SillWebView: WKWebView {
             guard let self, self.held else { return }
             self.held = false
             self.presenting = false
-            Motion.animate(0.12) { self.animator().alphaValue = 1 }
+            Motion.animate(0.06) { self.animator().alphaValue = 1 }
         }
         let presented = NSSelectorFromString("_doAfterNextPresentationUpdate:")
         guard responds(to: presented) else { return fadeIn() }

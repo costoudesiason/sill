@@ -385,8 +385,9 @@ final class Palette: NSObject {
             }
         }
         show(rows, for: text, fresh: fresh)
-        // The top hit, if it's a site: loaded ahead so Return opens it at once.
-        if mode == .newTab, let first = rows.first(where: { $0.item != nil })?.item {
+        // The top hit, if it's a site: loaded ahead so Return opens it at
+        // once (in the address field, only connected to).
+        if mode != .tabs, let first = rows.first(where: { $0.item != nil })?.item {
             switch first {
             case .go(let url): browser.prerenderSoon(url)
             case .visit(let visit): browser.prerenderSoon(visit.address)
