@@ -137,7 +137,8 @@ final class BarButton: NSButton {
 
     override var mouseDownCanMoveWindow: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    /// Set on every tab switch and back/forward change: redrawn only when it changes.
     override var isEnabled: Bool {
-        didSet { contentTintColor = isEnabled ? .labelColor : .tertiaryLabelColor }
+        didSet { if isEnabled != oldValue { contentTintColor = isEnabled ? .labelColor : .tertiaryLabelColor } }
     }
 }
