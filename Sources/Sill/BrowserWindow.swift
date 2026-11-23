@@ -293,7 +293,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if let toast = madeToast, !toast.isHidden { toast.place(in: stage) }
     }
 
-    func windowDidResize(_ notification: Notification) { stage.needsLayout = true }
+    func windowDidResize(_ notification: Notification) {
+        hidePreview(animated: false)
+        stage.needsLayout = true
+    }
     func windowDidEnterFullScreen(_ notification: Notification) { stage.needsLayout = true }
     func windowDidExitFullScreen(_ notification: Notification) { stage.needsLayout = true }
 
@@ -347,8 +350,6 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         madeFindBar?.close()
         let previous = selected
         hidePreview(animated: false)
-        // The page being left, as it looks now: its tab's preview card.
-        if previous !== tab { previous?.capturePicture() }
         // The page being left keeps its place in the window, under the new
         // one, until its video has floated off into Picture in Picture: a
         // page taken out of the window first would have it cancelled. Only
@@ -396,6 +397,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     func close(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
+        hidePreview(animated: false)
         if let url = tab.webView?.url ?? tab.url, !isPrivate {
             closed.append((url, tab.displayTitle, index, tab.interactionState))
             if closed.count > 30 { closed.removeFirst() }
@@ -1031,9 +1033,11 @@ extension BrowserWindowController {
     func tabHovered(_ tab: Tab, in item: NSView) {
         previewLeave?.cancel()
         previewWait?.cancel()
-        guard Preferences.shared.showsTabPreviews, tab !== selected, !paletteOpen,
+        guard Preferences.shared.showsTabPreviews, !paletteOpen,
               window?.isKeyWindow == true, NSEvent.pressedMouseButtons == 0 else { return hidePreview() }
         if preview.isShowing { return showPreview(tab, under: item) }
+        // The picture is taken now, so it's there when the card comes.
+        freshenPicture(of: tab)
         let work = DispatchWorkItem { [weak self, weak item, weak tab] in
             guard let self, let item, let tab, item.window != nil, NSEvent.pressedMouseButtons == 0 else { return }
             self.showPreview(tab, under: item)
@@ -1058,19 +1062,30 @@ extension BrowserWindowController {
         let size = preview.cardSize
         let x = max(8, min(tabFrame.midX - size.width / 2, stage.bounds.width - 8 - size.width))
         preview.present(at: NSPoint(x: x, y: topInset + 4))
-        // Live while it's up, if the page is running.
-        refreshPreview()
-        previewRefresh?.invalidate()
-        previewRefresh = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshPreview() }
+        freshenPicture(of: tab)
+        // Kept up to date only while something on it moves: a video, a page
+        // still coming in. A still page is pictured once.
+        if previewRefresh == nil {
+            previewRefresh = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let tab = self.preview.tab else { return }
+                    if tab.playingVideo || tab.picture == nil { self.freshenPicture(of: tab, within: 0.9) }
+                }
+            }
+            previewRefresh?.tolerance = 0.25
         }
     }
 
-    private func refreshPreview() {
-        guard let tab = preview.tab, tab.webView != nil, !tab.isLoading || tab.picture == nil else { return }
+    /// A new picture of a running page, unless it has one from the last
+    /// `within` seconds or is still loading (it would be half drawn).
+    private func freshenPicture(of tab: Tab, within: CFTimeInterval = 2) {
+        guard tab.webView != nil, !tab.isLoading,
+              tab.picture == nil || CACurrentMediaTime() - tab.pictureTakenAt > within else { return }
         tab.capturePicture { [weak self, weak tab] image in
             guard let self, let tab, let image, self.preview.tab === tab else { return }
+            tab.sleepingPicture = nil
             self.preview.show(image)
+            self.preview.retitle()
         }
     }
 
@@ -1080,6 +1095,9 @@ extension BrowserWindowController {
         previewRefresh?.invalidate()
         previewRefresh = nil
         preview.dismiss(animated: animated)
+        // Pictures of running pages are taken again in a moment when wanted;
+        // none is held between looks. Only a sleeping tab's small one stays.
+        for tab in tabs where tab.picture != nil { tab.picture = nil }
     }
 
     func warm(_ tab: Tab) {

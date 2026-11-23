@@ -32,8 +32,12 @@ final class Tab: NSObject {
     /// times, and whether a showing is waiting its turn.
     var retitled: (CFTimeInterval, CFTimeInterval) = (0, 0)
     var retitling = false
-    /// The page as it was last seen, for the preview card over its tab.
-    var picture: NSImage?
+    /// The page as it was last seen, for the preview card over its tab
+    /// (TabPreview.swift): a picture while the page runs, let go when the
+    /// card goes; squeezed small while the tab sleeps.
+    var picture: CGImage?
+    var pictureTakenAt: CFTimeInterval = 0
+    var sleepingPicture: Data?
     /// The tab this one was opened from, for placing and for going back to it.
     weak var opener: Tab?
 
@@ -205,6 +209,7 @@ final class Tab: NSObject {
         watching = []
         webView.removeFromSuperview()
         self.webView = nil
+        picture = nil
         // Asleep to give memory back: its process isn't kept waiting either.
         Web.releaseIdleProcesses()
     }
@@ -222,7 +227,13 @@ final class Tab: NSObject {
         webView.evaluateJavaScript(typing, in: nil, in: Web.world) { [weak self, weak webView] result in
             // A page that can't be asked (a PDF, say) has nothing typed in it.
             guard let self, let webView, self.webView === webView, (try? result.get()) as? Bool != true else { return }
-            self.sleep()
+            // Its preview keeps the page as it was, kept small while it sleeps.
+            guard Preferences.shared.showsTabPreviews else { return self.sleep() }
+            self.capturePicture { [weak self, weak webView] image in
+                guard let self, let webView, self.webView === webView else { return }
+                if let image { self.keepWhileAsleep(image) }
+                self.sleep()
+            }
         }
     }
 

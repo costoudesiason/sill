@@ -206,6 +206,7 @@ final class TabStripView: NSView {
     /// Follows the pointer from a mouse-down on a tab until it's let go.
     func track(_ item: TabItemView, from event: NSEvent) {
         guard let window else { return }
+        browser?.hidePreview(animated: false)
         let wasFront = item.tab === browser?.selected
         if !wasFront { browser?.select(item.tab) }
         let start = convert(event.locationInWindow, from: nil)
@@ -324,9 +325,6 @@ final class TabItemView: NSView {
         fade.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
         content.addSubview(label)
 
-        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close Tab")?
-            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
-        closeButton.contentTintColor = .secondaryLabelColor
         closeButton.target = self
         closeButton.action = #selector(closeClicked)
         closeButton.toolTip = "Close Tab"
@@ -469,7 +467,8 @@ final class TabItemView: NSView {
         label.isHidden = false
         icon.frame = NSRect(x: 14, y: (h - iconSize) / 2, width: iconSize, height: iconSize)
         spinner.frame = icon.frame
-        closeButton.frame = NSRect(x: w - 30, y: (h - 20) / 2, width: 20, height: 20)
+        // Its centre as far from the right edge as the icon's is from the left.
+        closeButton.frame = NSRect(x: w - 32, y: (h - 20) / 2, width: 20, height: 20)
         let labelX: CGFloat = 38
         let labelRight = showsClose ? w - 34 : w - 14
         let labelHeight = ceil(label.intrinsicContentSize.height)
@@ -523,15 +522,28 @@ final class TabItemView: NSView {
 
 /// A tab's close button: a soft circle under the pointer, a little stronger
 /// while pressed, as Safari's are.
+/// The tab's close button: an X drawn as two strokes at the exact centre
+/// of its circle (a symbol image sits off centre by its alignment insets),
+/// on a circular fill when pointed at or pressed.
 final class TabCloseButton: NSButton {
     private var hovering = false { didSet { needsDisplay = true } }
+    private let cross = CAShapeLayer()
+    private static let arm: CGFloat = 3.6
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         isBordered = false
+        title = ""
+        image = nil
         wantsLayer = true
         setButtonType(.momentaryChange)
+        cross.lineWidth = 1.6
+        cross.lineCap = .round
+        cross.fillColor = nil
+        layer?.addSublayer(cross)
     }
+
+    override var isHighlighted: Bool { didSet { needsDisplay = true } }
 
     required init?(coder: NSCoder) { fatalError() }
 
@@ -552,10 +564,26 @@ final class TabCloseButton: NSButton {
     override func updateLayer() {
         guard let layer else { return }
         layer.cornerRadius = min(bounds.width, bounds.height) / 2
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let mid = CGPoint(x: bounds.midX, y: bounds.midY), a = Self.arm
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: mid.x - a, y: mid.y - a)); path.addLine(to: CGPoint(x: mid.x + a, y: mid.y + a))
+        path.move(to: CGPoint(x: mid.x - a, y: mid.y + a)); path.addLine(to: CGPoint(x: mid.x + a, y: mid.y - a))
+        cross.frame = bounds
+        cross.path = path
+        cross.contentsScale = window?.backingScaleFactor ?? 2
         effectiveAppearance.performAsCurrentDrawingAppearance {
             let alpha: CGFloat = isHighlighted ? 0.2 : hovering ? 0.12 : 0
             layer.backgroundColor = NSColor.labelColor.withAlphaComponent(alpha).cgColor
+            cross.strokeColor = (hovering || isHighlighted ? NSColor.labelColor : NSColor.secondaryLabelColor).cgColor
         }
+        CATransaction.commit()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsDisplay = true
     }
 
     override func viewDidHide() {

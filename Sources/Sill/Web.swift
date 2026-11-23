@@ -124,13 +124,10 @@ enum Web {
             typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
             unsafeBitCast(configuration.preferences.method(for: grows), to: Setter.self)(configuration.preferences, grows, true)
         }
-        // A page put back in the window doesn't hold the app still until it
-        // has drawn; the page it replaces stays under it until then instead.
-        let waits = NSSelectorFromString("_setWaitsForPaintAfterViewDidMoveToWindow:")
-        if configuration.responds(to: waits) {
-            typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
-            unsafeBitCast(configuration.method(for: waits), to: Setter.self)(configuration, waits, false)
-        }
+        // WebKit's own wait for a page put back in the window to draw is
+        // left on: without it a page that hasn't drawn since it was away
+        // showed its empty (black) layer, and a still page might not draw
+        // again. The page being left stays on top until then (placePages).
         return configuration
     }
 }

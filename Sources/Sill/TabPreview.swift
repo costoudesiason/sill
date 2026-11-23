@@ -59,7 +59,9 @@ final class TabPreview: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    var isShowing: Bool { !isHidden && tab != nil }
+    /// Up, or coming up: a card going away is not, even mid-fade.
+    private(set) var isUp = false
+    var isShowing: Bool { isUp && tab != nil }
 
     /// Fills the card for `tab`; `pageSize` gives the picture its shape.
     func fill(_ tab: Tab, pageSize: NSSize) {
@@ -69,15 +71,21 @@ final class TabPreview: NSView {
         addressLabel.stringValue = tab.url.map { Domains.bare($0.host()).isEmpty ? Address.display($0) : Domains.bare($0.host()) } ?? ""
         icon.image = tab.favicon ?? NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
         icon.contentTintColor = tab.favicon == nil ? .secondaryLabelColor : nil
-        show(tab.picture)
+        show(tab.previewPicture)
         needsLayout = true
     }
 
+    /// The tab's title and site as they are now.
+    func retitle() {
+        guard let tab else { return }
+        titleLabel.stringValue = tab.displayTitle
+    }
+
     /// A newer picture of the page shown.
-    func show(_ image: NSImage?) {
+    func show(_ image: CGImage?) {
         Motion.still {
-            if let image, let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                picture.layer?.contents = cg
+            if let image {
+                picture.layer?.contents = image
                 icon.isHidden = true
                 picture.layer?.backgroundColor = nil
             } else {
@@ -109,34 +117,40 @@ final class TabPreview: NSView {
     }
 
     /// Comes in where it's put, or slides there if it's already up.
+    /// Only a card already up for another tab slides to the new one; a
+    /// card coming up appears in place, fading in (from wherever a fade out
+    /// had got to), so nothing travels in from where it last was.
     func present(at origin: NSPoint) {
         let target = NSRect(origin: origin, size: cardSize)
-        if !isHidden, alphaValue > 0 {
-            Motion.animate(0.2) { animator().frame = target }
+        if isUp {
+            if frame.size != target.size { Motion.still { setFrameSize(target.size) }; layoutSubtreeIfNeeded() }
+            if frame.origin != target.origin { Motion.animate(0.2) { animator().setFrameOrigin(target.origin) } }
             return
         }
+        isUp = true
         Motion.still {
-            frame = target.offsetBy(dx: 0, dy: Motion.reduced ? 0 : -6)
-            alphaValue = 0
+            // Hidden, or fading out somewhere else: from clear, where it belongs.
+            if isHidden || frame.origin != target.origin { alphaValue = 0 }
+            frame = target
+            layer?.removeAllAnimations()
         }
         isHidden = false
         layoutSubtreeIfNeeded()
-        Motion.animate(0.18) {
-            animator().frame = target
-            animator().alphaValue = 1
-        }
+        Motion.animate(0.16) { animator().alphaValue = 1 }
     }
 
     func dismiss(animated: Bool = true) {
-        guard !isHidden else { return }
+        guard isUp || !isHidden else { return }
+        isUp = false
         tab = nil
-        guard animated else {
-            alphaValue = 0
+        guard animated, !isHidden else {
+            Motion.still { alphaValue = 0 }
             isHidden = true
+            picture.layer?.contents = nil
             return
         }
         Motion.animate(0.12, { animator().alphaValue = 0 }) { [weak self] in
-            guard let self, self.tab == nil else { return }
+            guard let self, !self.isUp else { return }
             self.isHidden = true
             Motion.still { self.picture.layer?.contents = nil }
         }
@@ -144,16 +158,42 @@ final class TabPreview: NSView {
 }
 
 extension Tab {
-    /// Takes a picture of the page as it is now, kept for the tab's preview
-    /// card; `done` gets it, or nil when the page can't be drawn.
-    func capturePicture(_ done: ((NSImage?) -> Void)? = nil) {
+    /// Takes a picture of the page as it is now, for the tab's preview card;
+    /// `done` gets it, or nil when the page can't be drawn. Small (the card's
+    /// width), and from what's already drawn, without waiting for a frame.
+    func capturePicture(_ done: ((CGImage?) -> Void)? = nil) {
         guard let view = webView, view.bounds.width > 0 else { done?(nil); return }
         let configuration = WKSnapshotConfiguration()
         configuration.snapshotWidth = NSNumber(value: Double(TabPreview.width))
         configuration.afterScreenUpdates = false
         view.takeSnapshot(with: configuration) { [weak self] image, _ in
-            if let image, image.size.width > 0 { self?.picture = image }
-            done?(image)
+            let cg = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            if let self, let cg {
+                self.picture = cg
+                self.pictureTakenAt = CACurrentMediaTime()
+            }
+            done?(cg)
+        }
+    }
+
+    /// The picture the card shows now: the running page's, or the one kept
+    /// from before it slept, unpacked only when wanted.
+    var previewPicture: CGImage? {
+        if let picture { return picture }
+        guard let data = sleepingPicture, let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+    }
+
+    /// Squeezes the picture into a small JPEG (tens of kilobytes rather than
+    /// most of a megabyte), off the main thread, for as long as the tab sleeps.
+    func keepWhileAsleep(_ image: CGImage) {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let data = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return }
+            CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.7] as CFDictionary)
+            guard CGImageDestinationFinalize(destination) else { return }
+            let packed = data as Data
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.sleepingPicture = packed } }
         }
     }
 }
