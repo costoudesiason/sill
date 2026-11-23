@@ -1077,7 +1077,10 @@ final class FooterPill: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    var fittingWidth: CGFloat { 6 + primary.fittingWidth + 2 + actions.fittingWidth + 6 }
+    /// Both halves sit `inset` in from every edge, so each highlight's
+    /// curve runs parallel to the pill's (concentric), the end ones alike.
+    private static let inset: CGFloat = 4
+    var fittingWidth: CGFloat { Self.inset + primary.fittingWidth + 2 + actions.fittingWidth + Self.inset }
     var actionsAnchor: NSRect { convert(actions.frame, from: row) }
 
     override func layout() {
@@ -1085,9 +1088,11 @@ final class FooterPill: NSView {
         glass.frame = bounds
         glass.cornerRadius = bounds.height / 2
         row.frame = glass.bounds
-        let h = bounds.height - 8
-        primary.frame = NSRect(x: 4, y: 4, width: primary.fittingWidth, height: h)
-        actions.frame = NSRect(x: primary.frame.maxX + 2, y: 4, width: actions.fittingWidth, height: h)
+        let i = Self.inset
+        let h = bounds.height - i * 2
+        primary.frame = NSRect(x: i, y: i, width: primary.fittingWidth, height: h)
+        // The last half runs to the same inset from the right end.
+        actions.frame = NSRect(x: primary.frame.maxX + 2, y: i, width: bounds.width - i - (primary.frame.maxX + 2), height: h)
     }
 }
 
