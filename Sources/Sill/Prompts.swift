@@ -83,15 +83,32 @@ final class DownloadItem: ObservableObject, Identifiable {
     @Published var finished = false
     @Published var failed = false
     weak var download: WKDownload?
-    private var watching: NSKeyValueObservation?
 
     init(download: WKDownload) {
         self.download = download
         name = download.originalRequest?.url?.lastPathComponent ?? "Download"
-        watching = download.progress.observe(\.fractionCompleted) { [weak self] progress, _ in
-            let value = progress.fractionCompleted
-            DispatchQueue.main.async { self?.fraction = value }
-        }
+    }
+
+    var active: Bool { !finished && !failed }
+
+    private var drawn: (url: URL?, finished: Bool, image: NSImage)?
+
+    /// The file's icon, looked up when the file is named and again when it
+    /// lands, not on every redraw of the row.
+    var icon: NSImage {
+        if let drawn, drawn.url == url, drawn.finished == finished { return drawn.image }
+        let image = url.map { NSWorkspace.shared.icon(forFile: $0.path) } ?? NSWorkspace.shared.icon(for: .data)
+        drawn = (url, finished, image)
+        return image
+    }
+
+    /// Progress is read when the list asks for it, not pushed for every
+    /// chunk that arrives: twenty downloads otherwise redraw the list
+    /// hundreds of times a second, and cost the main thread even when the
+    /// list is closed.
+    func refresh() {
+        guard active, let value = download?.progress.fractionCompleted, value != fraction else { return }
+        fraction = value
     }
 
     func cancel() {
@@ -108,6 +125,35 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
     static let shared = Downloads()
     @Published private(set) var items: [DownloadItem] = []
     private var windows: [ObjectIdentifier: NSWindow] = [:]
+    private var watchers = 0
+    private var ticker: Timer?
+
+    /// The list is on screen (or gone again): progress bars only move while
+    /// someone is looking, ten times a second, all rows in one pass.
+    func watch(_ watching: Bool) {
+        watchers = max(0, watchers + (watching ? 1 : -1))
+        retime()
+    }
+
+    private func retime() {
+        let wanted = watchers > 0 && items.contains { $0.active }
+        if wanted, ticker == nil {
+            items.forEach { $0.refresh() }
+            let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.items.forEach { $0.refresh() }
+                    self.retime()
+                }
+            }
+            timer.tolerance = 0.02
+            RunLoop.main.add(timer, forMode: .common)
+            ticker = timer
+        } else if !wanted, ticker != nil {
+            ticker?.invalidate()
+            ticker = nil
+        }
+    }
 
     private func item(for download: WKDownload) -> DownloadItem? {
         items.first { $0.download === download }
@@ -118,6 +164,7 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
         windows[ObjectIdentifier(download)] = window
         items.insert(DownloadItem(download: download), at: 0)
         if items.count > 30 { items.removeLast() }
+        retime()
     }
 
     func clear() {
@@ -200,6 +247,8 @@ struct DownloadsView: View {
             }
         }
         .frame(width: 340)
+        .onAppear { downloads.watch(true) }
+        .onDisappear { downloads.watch(false) }
     }
 }
 
@@ -209,7 +258,7 @@ private struct DownloadRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(nsImage: item.url.map { NSWorkspace.shared.icon(forFile: $0.path) } ?? NSWorkspace.shared.icon(for: .data))
+            Image(nsImage: item.icon)
                 .resizable()
                 .frame(width: 32, height: 32)
             VStack(alignment: .leading, spacing: 3) {
