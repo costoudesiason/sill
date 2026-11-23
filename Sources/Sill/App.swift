@@ -45,7 +45,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Favicons.shared.preload()
         launched = true
         _ = ApplePasswords.shared
         NSApp.appearance = Preferences.shared.theme.appearance

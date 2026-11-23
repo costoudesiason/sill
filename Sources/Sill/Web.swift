@@ -438,6 +438,18 @@ final class Favicons {
     private var inflight: [String: [(NSImage?) -> Void]] = [:]
     /// Once every icon on disk is in memory, nothing is read from disk again.
     private var preloaded = false
+    /// Icons the preload has decoded and not yet handed to the main thread:
+    /// a tab restored while it is still running takes its icon from here
+    /// rather than reading and decoding the file itself.
+    private let staged = Staged()
+
+    private final class Staged: @unchecked Sendable {
+        private let lock = NSLock()
+        private var images: [String: NSImage]? = [:]
+        func put(_ key: String, _ image: NSImage) { lock.withLock { images?[key] = image } }
+        func image(_ key: String) -> NSImage? { lock.withLock { images?[key] } }
+        func close() { lock.withLock { images = nil } }
+    }
     private let folder = Places.caches.appendingPathComponent("Icons", isDirectory: true)
     private let session: URLSession = {
         let configuration = URLSessionConfiguration.default
@@ -463,17 +475,20 @@ final class Favicons {
     /// palette rows then never read or decode one on the main thread.
     func preload() {
         let folder = folder
-        DispatchQueue.global(qos: .utility).async {
+        let staged = staged
+        DispatchQueue.global(qos: .userInitiated).async {
             let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
             var found: [(String, NSImage)] = []
             for url in files {
-                guard let data = try? Data(contentsOf: url), let (image, _) = Self.decode(data) else { continue }
+                guard let data = try? Data(contentsOf: url), let (image, _) = Self.decode(data, storing: false) else { continue }
                 found.append((url.lastPathComponent, image))
+                staged.put(url.lastPathComponent, image)
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     for (key, image) in found where self.memory[key] == nil { self.memory[key] = image }
                     self.preloaded = true
+                    staged.close()
                 }
             }
         }
@@ -483,6 +498,10 @@ final class Favicons {
         guard let key = key(page) else { return nil }
         if let image = memory[key] { return image }
         if preloaded || misses.contains(key) { return nil }
+        if let image = staged.image(key.replacingOccurrences(of: "/", with: "_")) {
+            memory[key] = image
+            return image
+        }
         // Asked before the preload has finished: from disk, this once.
         if let data = try? Data(contentsOf: file(key)), let (image, _) = Self.decode(data) {
             memory[key] = image
@@ -525,7 +544,7 @@ final class Favicons {
     /// An icon from whatever a site serves, at no more than 64 px, and what
     /// to keep on disk: a small PNG, or the file itself for what ImageIO
     /// can't read (SVG).
-    nonisolated private static func decode(_ data: Data) -> (NSImage, Data)? {
+    nonisolated private static func decode(_ data: Data, storing: Bool = true) -> (NSImage, Data)? {
         let options = [kCGImageSourceThumbnailMaxPixelSize: 64,
                        kCGImageSourceCreateThumbnailFromImageAlways: true,
                        kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary
@@ -533,7 +552,7 @@ final class Favicons {
            let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options) {
             guard thumbnail.width >= 8 else { return nil }
             let png = NSMutableData()
-            if let destination = CGImageDestinationCreateWithData(png, "public.png" as CFString, 1, nil) {
+            if storing, let destination = CGImageDestinationCreateWithData(png, "public.png" as CFString, 1, nil) {
                 CGImageDestinationAddImage(destination, thumbnail, nil)
                 CGImageDestinationFinalize(destination)
             }
