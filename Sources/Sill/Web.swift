@@ -450,6 +450,10 @@ final class SillWebView: WKWebView {
 
     /// In, quickly, once that frame has reached the window: WebKit reports
     /// it a few frames before, and fading in then still shows the white.
+    /// Measured from WebKit's report to the frame being in the window: 14 to
+    /// 81 ms, about 35 typically (Wikipedia, BBC News, apple.com, Hacker
+    /// News). The fade after it is kept short, 60 ms where it was 120: the
+    /// page is fully in some 95 ms after the report rather than 155.
     /// `laidOut`: WebKit said there's a page to see (not a time limit, or a failure).
     func showFirstFrame(laidOut: Bool = true) {
         if laidOut, window == nil { laidOutUnseen = true }
@@ -459,7 +463,7 @@ final class SillWebView: WKWebView {
             guard let self, self.held else { return }
             self.held = false
             self.presenting = false
-            Motion.animate(0.12) { self.animator().alphaValue = 1 }
+            Motion.animate(0.06) { self.animator().alphaValue = 1 }
         }
         let presented = NSSelectorFromString("_doAfterNextPresentationUpdate:")
         guard responds(to: presented) else { return fadeIn() }
