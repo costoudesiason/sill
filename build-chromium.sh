@@ -5,6 +5,33 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 CEF="$HOME/sill-chromium/.cef/cef"
+WRAPPER="$HOME/sill-chromium/.cef/libcef_dll_wrapper.a"
+# The engine, when it isn't there yet: Sill's own CEF build with every video
+# format (ENGINE.md), kept as a release of this repository, and the small C++
+# wrapper Sill links against, built from it.
+ENGINE_TAG="engine-158.0.3-codecs"
+ENGINE_FILE="cef_binary_158.0.3+g8c29be2+chromium-158.0.8127.18_macosarm64_minimal.tar.bz2"
+if [ ! -d "$CEF/Release/Chromium Embedded Framework.framework" ]; then
+  echo "Fetching the engine ($ENGINE_TAG)"
+  TMP="$(mktemp -d)"
+  if ! curl -fL --retry 3 ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} -o "$TMP/$ENGINE_FILE" \
+      "https://github.com/costoudesiason/sill/releases/download/$ENGINE_TAG/${ENGINE_FILE//+/%2B}" \
+     && ! { command -v gh >/dev/null && gh release download "$ENGINE_TAG" -R costoudesiason/sill -p "$ENGINE_FILE" -D "$TMP" --clobber; }; then
+    rm -rf "$TMP"; echo "couldn't download $ENGINE_FILE (release $ENGINE_TAG)"; exit 1
+  fi
+  rm -rf "$CEF" "$WRAPPER"
+  mkdir -p "$CEF"
+  tar -xjf "$TMP/$ENGINE_FILE" -C "$CEF" --strip-components=1
+  rm -rf "$TMP"
+fi
+if [ ! -f "$WRAPPER" ]; then
+  command -v cmake >/dev/null && command -v ninja >/dev/null || { echo "cmake and ninja are needed to build libcef_dll_wrapper (brew install cmake ninja)"; exit 1; }
+  mkdir -p "$CEF/build"
+  if ! (cd "$CEF/build" && cmake -G Ninja -DPROJECT_ARCH=arm64 -DCMAKE_BUILD_TYPE=Release .. && ninja libcef_dll_wrapper) > "$CEF/build/wrapper.log" 2>&1; then
+    tail -20 "$CEF/build/wrapper.log"; echo "libcef_dll_wrapper build failed"; exit 1
+  fi
+  cp "$CEF/build/libcef_dll_wrapper/libcef_dll_wrapper.a" "$WRAPPER"
+fi
 if ! swift build -c release --arch arm64 > build.log 2>&1; then grep -E "error" build.log | head -20; echo "build failed"; exit 1; fi
 BIN="$(swift build -c release --arch arm64 --show-bin-path)/Sill"
 APP="build/Sill Chromium.app"
@@ -29,7 +56,7 @@ if [ -n "$UBOL" ]; then
   cp -Rc "$UBOL" "$APP/Contents/Resources/Extensions/uBlock Origin Lite"
 fi
 clang++ -x objective-c++ -arch arm64 -mmacosx-version-min=26.0 -std=c++20 -O2 -fobjc-arc -fno-rtti -fno-exceptions \
-  -I"$CEF" Tools/chromium-helper.mm -x none "$HOME/sill-chromium/.cef/libcef_dll_wrapper.a" -framework Cocoa -Wl,-dead_strip -o build/chromium-helper
+  -I"$CEF" Tools/chromium-helper.mm -x none "$WRAPPER" -framework Cocoa -Wl,-dead_strip -o build/chromium-helper
 for kind in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
   H="Sill Helper$kind"
   HA="$APP/Contents/Frameworks/$H.app"

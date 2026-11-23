@@ -565,7 +565,10 @@ class SEApp : public CefApp, public CefBrowserProcessHandler {
     if (!type.empty()) return;
     // None of Chrome's background traffic, update checks or reporting.
     line->AppendSwitch("disable-background-networking");
-    line->AppendSwitch("disable-component-update");
+    // The component updater stays on: it is how Chromium fetches Google's
+    // Widevine module (DRM). It can't be held to that one component from
+    // here, so the others it knows update too; it reports nothing back.
+    line->AppendSwitchWithValue("component-updater", "disable-pings");
     line->AppendSwitch("disable-domain-reliability");
     line->AppendSwitch("use-mock-keychain");
     // Drawing on the GPU, as Chrome and Dia do.
