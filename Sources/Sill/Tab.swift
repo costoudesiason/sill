@@ -381,6 +381,8 @@ extension Tab: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         scrolled(false)
         playingVideo = false
+        // The link the pointer was on went with the old page.
+        hovered(link: nil)
         showingError = errorNavigation != nil && navigation === errorNavigation
         errorNavigation = nil
         guard let url = webView.url else { return }
