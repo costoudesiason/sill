@@ -25,8 +25,23 @@ cp "$(dirname "$BIN")/sill-mcp" "$APP/Contents/Helpers/sill-mcp"
 strip -rSTx "$APP/Contents/Helpers/sill-mcp"
 # The icon: an Icon Composer file, compiled the way Xcode would, so macOS
 # renders its glass layers (Assets.car) with a flat fallback (AppIcon.icns).
-xcrun actool --compile "$APP/Contents/Resources" --app-icon AppIcon --platform macosx \
+# An absolute path: actool's helper keeps running between builds and reads a
+# relative one from the folder of whichever checkout started it.
+xcrun actool --compile "$PWD/$APP/Contents/Resources" --app-icon AppIcon --platform macosx \
   --minimum-deployment-target 26.0 --output-partial-info-plist "$(mktemp)" Resources/AppIcon.icon >/dev/null
+# Without the flat bitmaps only older systems read (Tools/trim-icon.m), the
+# file is 53 KB instead of 1.6 MB. Kept whole if the trim fails or the result
+# has lost its layers.
+CAR="$APP/Contents/Resources/Assets.car"
+TRIM="$(dirname "$BIN")/trim-icon"
+cp "$CAR" "$CAR.whole"
+if clang -fobjc-arc -framework Foundation -o "$TRIM" Tools/trim-icon.m 2>/dev/null && "$TRIM" "$CAR" \
+  && xcrun assetutil --info "$CAR" 2>/dev/null | grep -q IconImageStack; then
+  rm "$CAR.whole"
+else
+  mv "$CAR.whole" "$CAR"
+  echo "warning: icon bitmaps not trimmed"
+fi
 
 VERSION="$(cat VERSION 2>/dev/null || echo 0.1)"
 cat > "$APP/Contents/Info.plist" <<PLIST
