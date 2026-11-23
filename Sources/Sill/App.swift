@@ -97,7 +97,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Quitting asks only when something would be lost: downloads still
     /// coming down, then each page with something unsaved, in turn.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if quitAgreed { return .terminateNow }
         let running = Downloads.shared.items.filter { $0.active }.count
         if running > 0 {
             let alert = NSAlert()
@@ -112,19 +111,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var waiting = browsers[...]
         func next() {
             guard let browser = waiting.popFirst() else {
-                // Answered after this returned: quit again, not asking twice.
-                if returned { quitAgreed = true; NSApp.terminate(nil) } else { answer = true }
+                if returned { NSApp.reply(toApplicationShouldTerminate: true) } else { answer = true }
                 return
             }
             browser.mayCloseAll { may in
-                if may { next() } else if !returned { answer = false }
+                if may { next() } else if returned { NSApp.reply(toApplicationShouldTerminate: false) } else { answer = false }
             }
         }
         next()
         returned = true
-        return answer == true ? .terminateNow : .terminateCancel
+        // Still asking a page: the quit (or the Mac's shutdown or log out,
+        // which a refusal here would call off) waits for the answer.
+        return answer.map { $0 ? .terminateNow : .terminateCancel } ?? .terminateLater
     }
-    private var quitAgreed = false
 
     func applicationWillTerminate(_ notification: Notification) {
         session.flush(sessionState())
