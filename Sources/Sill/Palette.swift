@@ -212,11 +212,12 @@ final class Palette: NSObject {
         if !wasOpen { appear() }
     }
 
+    /// Brought above the window's other views once, on its first opening.
+    private var raised = false
+
     /// In the window, put away, before it is first wanted (the window does
     /// this once it has settled): the first ⌘T then only shows it, rather
     /// than also building and laying out every view of it and its glass.
-    private var raised = false
-
     func ready(in stage: NSView) {
         guard catcher.superview !== stage else { return }
         if !isOpen {
