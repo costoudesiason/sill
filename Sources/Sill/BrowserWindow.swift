@@ -921,7 +921,7 @@ extension BrowserWindowController {
             if under, let shown {
                 for case let old as SillWebView in pageHost.subviews { old.outgoing = true }
                 shown.afterNextFrame { [weak self, weak shown] in
-                    guard let self, let shown, self.selected?.webView === shown,
+                    guard let self, shown != nil, self.split?.contains(self.selected) == true,
                           self.splitView.superview === self.pageHost else { return }
                     for view in self.pageHost.subviews where view !== self.splitView && view !== self.leaving { view.removeFromSuperview() }
                 }
