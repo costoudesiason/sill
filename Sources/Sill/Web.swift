@@ -192,6 +192,11 @@ final class SillWebView: WKWebView {
         if window != nil { tab?.pageShown() }
     }
 
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        if window != nil { tab?.pageShown() }
+    }
+
     /// "New Window" reads "New Tab" here: that's what it does.
     /// The page's right-click menu is Sill's glass one: WebKit's items, in
     /// the same order, run as WebKit runs them. Items that open a submenu
@@ -240,6 +245,21 @@ final class SillWebView: WKWebView {
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
         outgoing = false
+    }
+
+    /// On screen: in a window and not put aside (see `park`).
+    var isShown: Bool { window != nil && !isHidden }
+
+    /// Put aside where it is, hidden, rather than taken out of the window.
+    /// WebKit blanks a page that comes back into a window until it has drawn
+    /// again, and holds the app still for that drawing; a page that was only
+    /// hidden still has its last frame and is simply shown.
+    func park() {
+        guard !isHidden else { return }
+        isHidden = true
+        outgoing = false
+        // Not resized with the window while it's away; sized when shown.
+        autoresizingMask = []
     }
 
     // MARK: the first frame

@@ -88,6 +88,7 @@ final class PaneView: NSView {
         view.frame = bounds
         view.autoresizingMask = [.width, .height]
         if view.superview !== self { addSubview(view) }
+        view.isHidden = false
     }
 }
 

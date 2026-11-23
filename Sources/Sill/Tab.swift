@@ -337,7 +337,7 @@ final class Tab: NSObject {
     /// landing on whatever page is in front. `shown` is false if the page
     /// went away first, and the dialog is to be answered unseen.
     func whenShown(_ present: @escaping (_ shown: Bool) -> Void) {
-        if webView?.window != nil { present(true) } else { heldPrompts.append(present) }
+        if (webView as? SillWebView)?.isShown == true { present(true) } else { heldPrompts.append(present) }
     }
 
     /// The page is in a window (again): what waited for that goes ahead.
@@ -526,7 +526,7 @@ extension Tab: WKNavigationDelegate {
         if endedHungProcess {
             endedHungProcess = false
             if let next = afterHungProcess { webView.load(URLRequest(url: next)) }
-            else if webView.window == nil { needsReload = true } else { webView.reload() }
+            else if (webView as? SillWebView)?.isShown != true { needsReload = true } else { webView.reload() }
             afterHungProcess = nil
             return
         }
@@ -540,7 +540,7 @@ extension Tab: WKNavigationDelegate {
             errorNavigation = webView.loadSimulatedRequest(URLRequest(url: url), responseHTML: html)
             return
         }
-        if webView.window == nil { needsReload = true } else { webView.reload() }
+        if (webView as? SillWebView)?.isShown != true { needsReload = true } else { webView.reload() }
     }
 }
 
@@ -619,7 +619,7 @@ extension Tab: WKUIDelegate {
     @objc(_webView:runBeforeUnloadConfirmPanelWithMessage:initiatedByFrame:completionHandler:)
     func webView(_ webView: WKWebView, runBeforeUnloadConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
-        guard webView.window != nil else { return completionHandler(true) }
+        guard (webView as? SillWebView)?.isShown == true else { return completionHandler(true) }
         Prompts.leave(in: host?.window, completionHandler)
     }
 

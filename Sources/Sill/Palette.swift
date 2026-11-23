@@ -825,6 +825,22 @@ final class PaletteField: NSTextField {
         }
         return super.performKeyEquivalent(with: event)
     }
+
+    /// Two spaces stay two spaces: the system's "add full stop with double
+    /// space" would turn the end of an address into "site.com." and fail it.
+    @objc(textView:shouldChangeTextInRange:replacementString:)
+    func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
+        if replacementString == ". ", range.length == 1, (textView.string as NSString).substring(with: range) == " ",
+           NSApp.currentEvent?.type == .keyDown, NSApp.currentEvent?.characters == " " {
+            textView.insertText(" ", replacementRange: NSRange(location: range.upperBound, length: 0))
+            return false
+        }
+        // NSTextField answers this itself, but not where Swift can call it.
+        let selector = NSSelectorFromString("textView:shouldChangeTextInRange:replacementString:")
+        guard let inherited = class_getMethodImplementation(NSTextField.self, selector) else { return true }
+        typealias Answer = @convention(c) (AnyObject, Selector, NSTextView, NSRange, NSString?) -> Bool
+        return unsafeBitCast(inherited, to: Answer.self)(self, selector, textView, range, replacementString as NSString?)
+    }
 }
 
 final class PaletteTable: NSTableView {
