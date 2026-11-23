@@ -28,7 +28,7 @@ struct Visit: Codable, Hashable {
 @MainActor
 final class History {
     static let shared = History()
-    private(set) var visits: [String: Visit] = [:] { didSet { knownHosts = nil; shelf = nil; flat = nil; latest = nil } }
+    private(set) var visits: [String: Visit] = [:]
     private var knownHosts: Set<String>?
     /// The last answer to `recent`, kept until history changes: the empty
     /// palette asks each time it is shown or its field is cleared, and each
@@ -62,14 +62,64 @@ final class History {
         if typed { visit.typed += 1 }
         if let title, !title.isEmpty { visit.title = title }
         visits[key] = visit
+        noted(visit)
         trim()
         persist()
     }
 
     func retitle(_ url: URL, _ title: String) {
-        guard !title.isEmpty, let key = Self.key(url), visits[key] != nil, visits[key]?.title != title else { return }
-        visits[key]?.title = title
+        guard !title.isEmpty, let key = Self.key(url), var visit = visits[key], visit.title != title else { return }
+        visit.title = title
+        visits[key] = visit
+        noted(visit)
         persist()
+    }
+
+    /// Forgets everything worked out from the entries: for a change to many of them at once.
+    private func changed() { knownHosts = nil; shelf = nil; flat = nil; latest = nil }
+
+    /// One entry is new, or has a later visit or another title: what is kept
+    /// about all of them is brought up to date for that one, where making it
+    /// again is a pass over the whole of history after every page.
+    private func noted(_ visit: Visit) {
+        if knownHosts != nil, let host = visit.address?.host() { knownHosts?.insert(Domains.bare(host)) }
+        if let limit = latest?.limit {
+            // Only as long as the list holds every entry or is full: a retitled
+            // entry too old to be in it stays out.
+            if let at = latest?.visits.firstIndex(where: { $0.url == visit.url }) {
+                if latest?.visits[at].last == visit.last {
+                    latest?.visits[at] = visit
+                } else {
+                    latest?.visits.remove(at: at)
+                    latest?.visits.insert(visit, at: 0)
+                }
+            } else if let newest = latest?.visits.first, visit.last < newest.last {
+                if (latest?.visits.count ?? 0) < limit { latest = nil }
+            } else {
+                latest?.visits.insert(visit, at: 0)
+                if (latest?.visits.count ?? 0) > limit { latest?.visits.removeLast() }
+            }
+        }
+        guard shelf != nil else { return }
+        let read = reading(visit)
+        if let at = places[visit.url] {
+            let same = shelf?[at].0.title == visit.title
+            shelf?[at] = (visit, read)
+            guard flat != nil else { return }
+            flat?.weights[at * 3] = Double(visit.count) + Double(visit.typed) * 2
+            flat?.weights[at * 3 + 1] = visit.last.timeIntervalSinceReferenceDate
+            if !same {
+                // The title's new bytes go on the end; the old ones stay behind, unread.
+                let end = Int32(flat?.bytes.count ?? 0)
+                flat?.spans[(at * Flat.fields + Flat.title) * 2] = end
+                flat?.spans[(at * Flat.fields + Flat.title) * 2 + 1] = Int32(read.titleBytes.count)
+                flat?.bytes.append(contentsOf: read.titleBytes)
+            }
+        } else {
+            places[visit.url] = shelf?.count ?? 0
+            shelf?.append((visit, read))
+            flat?.add(visit, read)
+        }
     }
 
     /// Entries from elsewhere (Safari), kept alongside your own: the more
@@ -89,22 +139,27 @@ final class History {
                 visits[key] = copy
             }
         }
+        changed()
         trim()
         persist()
     }
 
     func remove(_ key: String) {
         visits[key] = nil
+        changed()
         persist()
     }
 
     func markTyped(_ url: URL) {
-        guard let key = Self.key(url) else { return }
-        visits[key]?.typed += 1
+        guard let key = Self.key(url), var visit = visits[key] else { return }
+        visit.typed += 1
+        visits[key] = visit
+        noted(visit)
     }
 
     func clear() {
         visits = [:]
+        changed()
         persist()
     }
 
@@ -133,10 +188,13 @@ final class History {
     /// Every entry beside its reading, in a row: made once after history
     /// changes, then walked on each keystroke without a lookup per entry.
     private var shelf: [(Visit, Reading)]?
+    /// Where each address stands on the shelf.
+    private var places: [String: Int] = [:]
 
     private var entries: [(Visit, Reading)] {
         if let shelf { return shelf }
         let made = visits.values.map { ($0, reading($0)) }
+        places = Dictionary(uniqueKeysWithValues: made.enumerated().map { ($1.0.url, $0) })
         shelf = made
         return made
     }
@@ -151,6 +209,17 @@ final class History {
         var spans = ContiguousArray<Int32>()
         /// Three to an entry, what its score is made of: visits counted, when last, how deep.
         var weights = ContiguousArray<Double>()
+
+        mutating func add(_ visit: Visit, _ read: Reading) {
+            weights.append(Double(visit.count) + Double(visit.typed) * 2)
+            weights.append(visit.last.timeIntervalSinceReferenceDate)
+            weights.append(read.depth)
+            for field in [read.pathBytes, read.titleBytes, read.hostBytes, read.rawHostBytes, read.bareBytes] {
+                spans.append(Int32(bytes.count))
+                spans.append(Int32(field.count))
+                bytes.append(contentsOf: field)
+            }
+        }
     }
     private var flat: Flat?
 
@@ -158,16 +227,7 @@ final class History {
         if let flat { return flat }
         var made = Flat()
         made.spans.reserveCapacity(entries.count * Flat.fields * 2)
-        for (visit, read) in entries {
-            made.weights.append(Double(visit.count) + Double(visit.typed) * 2)
-            made.weights.append(visit.last.timeIntervalSinceReferenceDate)
-            made.weights.append(read.depth)
-            for field in [read.pathBytes, read.titleBytes, read.hostBytes, read.rawHostBytes, read.bareBytes] {
-                made.spans.append(Int32(made.bytes.count))
-                made.spans.append(Int32(field.count))
-                made.bytes.append(contentsOf: field)
-            }
-        }
+        for (visit, read) in entries { made.add(visit, read) }
         flat = made
         return made
     }
@@ -340,6 +400,7 @@ final class History {
         guard visits.count > Self.cap else { return }
         let keep = visits.values.sorted { $0.last > $1.last }.prefix(Self.cap * 9 / 10)
         visits = Dictionary(keep.map { ($0.url, $0) }, uniquingKeysWith: { a, _ in a })
+        changed()
     }
 
     private func persist() {
