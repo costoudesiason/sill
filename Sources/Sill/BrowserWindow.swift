@@ -1047,7 +1047,7 @@ extension BrowserWindowController {
     func tabHovered(_ tab: Tab, in item: NSView) {
         previewLeave?.cancel()
         previewWait?.cancel()
-        guard Preferences.shared.showsTabPreviews, !paletteOpen,
+        guard Preferences.shared.showsTabPreviews, !paletteOpen, !GlassMenu.isOpen,
               window?.isKeyWindow == true, NSEvent.pressedMouseButtons == 0 else { return hidePreview() }
         if preview.isShowing { return showPreview(tab, under: item) }
         // The picture is taken now, so it's there when the card comes.
