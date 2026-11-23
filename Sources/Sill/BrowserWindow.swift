@@ -164,22 +164,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         window.isOpaque = true
         window.backgroundColor = .windowBackgroundColor
         if isPrivate { window.appearance = NSAppearance(named: .darkAqua) }
-        if popup {
-            // A small window a page opened ("Sign in with…") has its traffic
-            // lights, as any panel does: there's no tab row to close it from.
-            // An empty unified toolbar makes the title bar the bar's height,
-            // so macOS centres them in it.
-            let toolbar = NSToolbar(identifier: "popup")
-            toolbar.showsBaselineSeparator = false
-            toolbar.allowsUserCustomization = false
-            window.toolbar = toolbar
-            window.toolbarStyle = .unified
-        } else {
-            // No traffic lights: ⌘W, ⇧⌘W, ⌘M and full screen stay in the menus.
-            for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-                window.standardWindowButton(kind)?.isHidden = true
-            }
-        }
+        // Traffic lights, as any Mac window has. An empty unified toolbar
+        // makes the title bar the bar's height, so macOS centres them in it.
+        let toolbar = NSToolbar(identifier: popup ? "popup" : "browser")
+        toolbar.showsBaselineSeparator = false
+        toolbar.allowsUserCustomization = false
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
         super.init(window: window)
         window.delegate = self
 
@@ -411,7 +402,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if loadingLine.superview !== stage { stage.addSubview(loadingLine) }
         loadingLine.frame = NSRect(x: 0, y: TopBar.height - LoadingLine.thickness, width: stage.bounds.width, height: LoadingLine.thickness)
         // Back and forward start after the traffic lights where there are some.
-        if isPopup, let window, let zoom = window.standardWindowButton(.zoomButton), !zoom.isHidden,
+        if let window, let zoom = window.standardWindowButton(.zoomButton), !zoom.isHidden,
            !window.styleMask.contains(.fullScreen) {
             bar.leadingInset = zoom.convert(zoom.bounds, to: nil).maxX + 6
         } else {

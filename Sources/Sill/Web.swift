@@ -823,7 +823,7 @@ enum PictureInPicture {
         if (!pip.on) return;
         const w = v.videoWidth, h = v.videoHeight;
         if (!w || !h) return;
-        const scale = Math.min(1, 960 / w);
+        const scale = Math.min(1, (pip.max || 720) / w);
         const nw = Math.max(2, Math.round(w * scale) & ~1), nh = Math.max(2, Math.round(h * scale) & ~1);
         if (nw !== W || nh !== H) { W = nw; H = nh; canvas = new OffscreenCanvas(W, H); ctx = canvas.getContext('2d', { willReadFrequently: true, alpha: false }); }
         try {
@@ -907,7 +907,8 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
     /// what keeps that scaled to the panel while it floats.
     private weak var panel: NSWindow?
     private weak var host: CALayer?
-    private var ticker: Timer?
+    private var opening: CFRunLoopObserver?
+    private var resized: NSObjectProtocol?
     /// AVKit's flight in is over: the float shows.
     private var landed = false
 
@@ -1044,7 +1045,7 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
         if renderer.status == .failed { renderer.flush() }
         renderer.enqueue(sample)
         frames += 1
-        if frames == 3 { startWhenReady() }
+        if frames == 1 { startWhenReady() }
     }
 
     /// The layer's clock kept on the video's: running while it plays, at
@@ -1066,7 +1067,7 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
     }
 
     private func startWhenReady() {
-        guard let controller, started != nil, frames >= 3, controller.isPictureInPicturePossible,
+        guard let controller, started != nil, frames >= 1, controller.isPictureInPicturePossible,
               !controller.isPictureInPictureActive else { return }
         track()
         controller.startPictureInPicture()
@@ -1099,12 +1100,25 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
     /// flight back lands there; the picture in the panel is scaled to the
     /// panel, every frame the panel is on screen, the flights included.
     private func track() {
-        guard ticker == nil else { return fit() }
-        let ticker = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
+        // Opening: fitted in the same pass of the run loop that makes the
+        // panel, before Core Animation draws it, so its first frame is right.
+        if opening == nil {
+            let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, true, 1_999_000) { [weak self] _, _ in
+                MainActor.assumeIsolated { self?.fit() }
+            }
+            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+            opening = observer
+        }
+        fit()
+    }
+
+    /// Open: only a change of the float's size needs anything done.
+    private func settle() {
+        if let opening { CFRunLoopObserverInvalidate(opening); self.opening = nil }
+        guard let panel, resized == nil else { return }
+        resized = NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: panel, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.fit() }
         }
-        RunLoop.main.add(ticker, forMode: .common)
-        self.ticker = ticker
         fit()
     }
 
@@ -1173,8 +1187,8 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
     }
 
     private func untrack() {
-        ticker?.invalidate()
-        ticker = nil
+        if let opening { CFRunLoopObserverInvalidate(opening); self.opening = nil }
+        if let resized { NotificationCenter.default.removeObserver(resized); self.resized = nil }
         host = nil
         panel = nil
     }
@@ -1193,7 +1207,9 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
         MainActor.assumeIsolated {
             finish(true)
             landed = true
-            track()
+            fit()
+            // A moment for AVKit to settle its layout, then hands off.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.settle() }
         }
     }
 
@@ -1252,7 +1268,10 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
     nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController,
                                                 didTransitionToRenderSize newRenderSize: CMVideoDimensions) {
         MainActor.assumeIsolated {
-            track()
+            fit()
+            // Frames no bigger than the float shows them: less to copy.
+            let width = max(320, min(1920, Int(newRenderSize.width)))
+            run("p.max = \(width);")
         }
     }
 

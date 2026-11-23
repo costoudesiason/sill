@@ -17,7 +17,7 @@ final class TabStripView: NSView {
     private let spacing: CGFloat = 4
     /// Opening, closing and making room: quick, eased out, no bounce.
     static let reflow: TimeInterval = 0.24
-    private var maxWidth: CGFloat { Preferences.shared.tabWidth == .fill ? .greatestFiniteMagnitude : 240 }
+    private var maxWidth: CGFloat { Preferences.shared.tabWidth == .fill ? .greatestFiniteMagnitude : 300 }
 
     private(set) var items: [TabItemView] = []
     private var heldWidth: CGFloat?
@@ -198,10 +198,21 @@ final class TabStripView: NSView {
         return floor(min(maxWidth, max(minWidth, even)))
     }
 
+    /// Where the row starts: tabs as wide as they may be, and the row in
+    /// the middle of the bar when they don't fill it; more tabs, narrower
+    /// tabs, until they do.
+    private func rowStart(tabWidth: CGFloat) -> CGFloat {
+        let count = CGFloat(items.count)
+        guard count > 0, heldWidth == nil else { return heldStart }
+        let row = count * tabWidth + (count - 1) * spacing
+        return max(0, floor((bounds.width - row) / 2))
+    }
+    private var heldStart: CGFloat = 0
+
     private func targetFrames() -> [ObjectIdentifier: NSRect] {
         let tabWidth = heldWidth ?? width(for: items.count)
         var result: [ObjectIdentifier: NSRect] = [:]
-        var x: CGFloat = 0
+        var x: CGFloat = rowStart(tabWidth: tabWidth)
         for item in items {
             result[ObjectIdentifier(item)] = NSRect(x: x, y: 0, width: tabWidth, height: bounds.height)
             x += tabWidth + spacing
@@ -223,7 +234,8 @@ final class TabStripView: NSView {
 
     private func slot(at x: CGFloat) -> Int {
         let tabWidth = items.first?.frame.width ?? width(for: items.count)
-        let index = Int((x / (tabWidth + spacing)).rounded(.down))
+        let start = items.first?.frame.minX ?? 0
+        let index = Int(((x - start) / (tabWidth + spacing)).rounded(.down))
         return max(0, min(items.count - 1, index))
     }
 
@@ -232,7 +244,7 @@ final class TabStripView: NSView {
     func close(_ item: TabItemView) {
         // Hold the widths (unless it's the last tab) so the next close button
         // slides under the pointer, as long as the pointer stays in the strip.
-        if item !== items.last { heldWidth = item.frame.width }
+        if item !== items.last { heldWidth = item.frame.width; heldStart = items.first?.frame.minX ?? 0 }
         browser?.close(item.tab)
     }
 
@@ -578,12 +590,19 @@ final class TabItemView: NSView {
         }
         icon.isHidden = tab.isLoading && tab.favicon == nil
         label.isHidden = false
-        icon.frame = NSRect(x: 14, y: (h - iconSize) / 2, width: iconSize, height: iconSize)
+        // Icon and title together, in the middle of the tab, as Safari has
+        // them; a title too long for it starts at the left and fades out.
+        // The same margin both sides, so the close button coming and going
+        // on hover doesn't move them.
+        let margin: CGFloat = 34, gap: CGFloat = 8
+        let group = min(w - margin * 2, iconSize + gap + ceil(titleSize.width))
+        let start = max(14, floor((w - group) / 2))
+        icon.frame = NSRect(x: start, y: (h - iconSize) / 2, width: iconSize, height: iconSize)
         spinner.frame = icon.frame
         // Its centre as far from the right edge as the icon's is from the left.
         closeButton.frame = NSRect(x: w - 32, y: (h - 20) / 2, width: 20, height: 20)
-        let labelX: CGFloat = 38
-        let labelRight = showsClose ? w - 34 : w - 14
+        let labelX = start + iconSize + gap
+        let labelRight = min(showsClose ? w - margin : w - 14, max(labelX, start + group))
         let labelHeight = ceil(titleSize.height)
         label.frame = NSRect(x: labelX, y: (h - labelHeight) / 2, width: max(0, labelRight - labelX), height: labelHeight)
 

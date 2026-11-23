@@ -134,7 +134,7 @@ enum Theme: String, CaseIterable, Identifiable {
 enum TabWidth: String, CaseIterable, Identifiable {
     /// Tabs share the whole bar, as Safari's do.
     case fill
-    /// Tabs keep a comfortable width and sit from the left.
+    /// Tabs keep a comfortable width, centred in the bar, narrowing as more open.
     case compact
     var id: String { rawValue }
     var name: String { self == .fill ? "Fill the bar" : "Compact" }
@@ -259,6 +259,7 @@ final class Saver<Value: Encodable> {
 
     /// `written` is called on the main thread once the value made is on disk.
     func save(_ make: @escaping () -> Value, written: (@MainActor () -> Void)? = nil) {
+        guard !final else { return }
         pending?.cancel()
         let work = DispatchWorkItem { [url, queue] in
             let value = make()
@@ -272,8 +273,13 @@ final class Saver<Value: Encodable> {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    /// Right now, on this thread: for quitting.
+    /// Written at quitting: what the app does as it closes everything down
+    /// afterwards (windows closing, tabs going) is not saved over it.
+    private var final = false
+
+    /// Right now, on this thread: for quitting. Nothing is saved after it.
     func flush(_ value: Value) {
+        final = true
         pending?.cancel()
         pending = nil
         guard let data = try? JSONEncoder().encode(value) else { return }

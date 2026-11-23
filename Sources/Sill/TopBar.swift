@@ -27,7 +27,7 @@ final class TopBar: NSView {
     override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { true }
 
-    /// Room kept on the left for a window's traffic lights (popups only).
+    /// Room kept on the left for the window's traffic lights.
     var leadingInset: CGFloat = 0 { didSet { if leadingInset != oldValue { needsLayout = true } } }
 
     init(strip: TabStripView) {
