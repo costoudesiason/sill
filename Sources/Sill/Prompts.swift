@@ -248,7 +248,9 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
                         // No way into Downloads: stopped, and said so, rather
                         // than a row that sits at nothing for good.
                         self.windows[ObjectIdentifier(download)] = nil
-                        self.item(for: download)?.failed = true
+                        let item = self.item(for: download)
+                        item?.failed = true
+                        self.settled(item)
                         completionHandler(nil)
                         browser?.toast("Download failed: Sill isn’t allowed to save to Downloads")
                         return
