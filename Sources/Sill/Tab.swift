@@ -28,6 +28,10 @@ final class Tab: NSObject {
     let id = UUID()
     let isPrivate: Bool
     weak var host: TabHost?
+    /// When the window last showed this tab's title or address, the last two
+    /// times, and whether a showing is waiting its turn.
+    var retitled: (CFTimeInterval, CFTimeInterval) = (0, 0)
+    var retitling = false
     /// The tab this one was opened from, for placing and for going back to it.
     weak var opener: Tab?
 

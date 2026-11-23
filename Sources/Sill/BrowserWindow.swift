@@ -723,19 +723,44 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 extension BrowserWindowController: TabHost {
     func tabChanged(_ tab: Tab, _ what: Tab.Change) {
         switch what {
-        case .title, .icon, .loading:
+        case .icon, .loading:
             strip.refresh(tab)
+        case .title:
             // Not a session save: titles are read when it's written, and a
             // page ticking its title would put the save off forever.
-            if tab === selected, what == .title { window?.title = tab.displayTitle }
+            retitle(tab)
         case .url:
-            strip.refresh(tab)
+            retitle(tab)
             changed()
         case .navigation:
             if tab === selected { updateNavigation() }
         case .scroll:
             break
         }
+    }
+
+    /// A new title or address reaches the strip and the window at once,
+    /// twice in any half second: a load's address and then its title. A page
+    /// that keeps changing them is shown its latest when the half second is up,
+    /// not redrawn for each.
+    private func retitle(_ tab: Tab) {
+        guard !tab.retitling else { return }
+        let now = CACurrentMediaTime()
+        let wait = (tab.retitled.0 + 0.5) - now
+        guard wait > 0 else { return showTitle(of: tab, at: now) }
+        tab.retitling = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self, weak tab] in
+            guard let tab else { return }
+            tab.retitling = false
+            self?.showTitle(of: tab, at: CACurrentMediaTime())
+        }
+    }
+
+    private func showTitle(of tab: Tab, at now: CFTimeInterval) {
+        tab.retitled = (tab.retitled.1, now)
+        guard tabs.contains(where: { $0 === tab }) else { return }
+        strip.refresh(tab)
+        if tab === selected { window?.title = tab.displayTitle }
     }
 
     func open(from tab: Tab, url: URL?, configuration: WKWebViewConfiguration?, background: Bool) -> Tab {
