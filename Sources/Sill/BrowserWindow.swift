@@ -489,12 +489,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
                 // Return on the site the palette was already loading: the page
                 // is there, mid-load or done, and becomes the tab as it is.
                 let ready = prerendered.map { Self.samePage($0, url) } ?? false
-                // A plain-HTTP address may wait on a question, or be cancelled:
-                // not in a view that already holds some other site's page.
-                let others = !ready && prerendered != nil && url.scheme == "http"
+                // A view that loaded some other site (the palette's guess
+                // before the last letters) is not used: it would show that
+                // site until this one drew.
+                let others = !ready && prerendered != nil
                 spare = nil
                 prerendered = nil
-                if others { view.removeFromSuperview(); tab.materialize() } else { tab.adopt(view, loaded: ready) }
+                if others { view.stopLoading(); view.removeFromSuperview(); tab.materialize() } else { tab.adopt(view, loaded: ready) }
             }
         }
         if shouldSelect { select(tab, animated: true) } else { strip.sync(animated: true) }
