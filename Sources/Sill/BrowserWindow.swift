@@ -1124,7 +1124,9 @@ extension BrowserWindowController: TabHost {
     /// ⌥ going down or up, and anything that ends a look: a click, a key, a scroll.
     private func watchForPeek() {
         guard peekWatch == nil else { return }
-        peekWatch = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]) { [weak self] event in
+        // Not the scroll wheel: a watcher on it runs in Sill for every
+        // scroll event before the page gets it. A look ends when ⌥ is let go.
+        peekWatch = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] event in
             guard let self, event.window === self.window else { return event }
             if event.type == .flagsChanged { self.peekIfAsked() } else { self.endPeek() }
             return event

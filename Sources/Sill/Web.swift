@@ -148,7 +148,10 @@ enum Web {
         let list = NSSelectorFromString("_features")
         guard WKPreferences.responds(to: list),
               let all = WKPreferences.perform(list)?.takeUnretainedValue() as? [NSObject] else { return [] }
-        let wanted: Set<String> = ["ScrollAnimatorEnabled", "EventHandlerDrivenSmoothKeyboardScrollingEnabled"]
+        // Only the keys: WebKit's scroll animator, tried for the wheel, eases
+        // every scroll toward where it's headed, which a trackpad feels as
+        // drag. Safari leaves it off too.
+        let wanted: Set<String> = ["EventHandlerDrivenSmoothKeyboardScrollingEnabled"]
         return all.filter { ($0.value(forKey: "key") as? String).map(wanted.contains) ?? false }
     }()
 
