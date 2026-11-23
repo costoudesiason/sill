@@ -226,7 +226,31 @@ final class Toast: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// A burst of them (twenty downloads starting, or ending, together) is
+    /// laid out and drawn twenty times a second at most, ending on the last:
+    /// each one measures its text and button, and only the last is read.
     func show(_ text: String, action: (String, () -> Void)?, in stage: NSView) {
+        if CACurrentMediaTime() - shownAt < 0.05 {
+            let scheduled = waiting != nil
+            waiting = (text, action, stage)
+            if !scheduled {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    guard let self, let (text, action, stage) = self.waiting else { return }
+                    self.waiting = nil
+                    self.present(text, action: action, in: stage)
+                }
+            }
+            return
+        }
+        waiting = nil
+        present(text, action: action, in: stage)
+    }
+
+    private var shownAt: CFTimeInterval = 0
+    private var waiting: (String, (String, () -> Void)?, NSView)?
+
+    private func present(_ text: String, action: (String, () -> Void)?, in stage: NSView) {
+        shownAt = CACurrentMediaTime()
         hiding?.cancel()
         label.stringValue = text
         self.action = action?.1
