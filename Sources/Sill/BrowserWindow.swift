@@ -367,7 +367,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
                     if previous === self.selected { PictureInPicture.return(to: previous) } else { self.pictured = previous }
                 }
                 guard let old, old !== self.selected?.webView else { return }
-                old.removeFromSuperview()
+                if old.superview === self.pageHost, let page = old as? SillWebView { page.park() } else { old.removeFromSuperview() }
             }
         }
         selected = tab
@@ -558,7 +558,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         let now = Date()
         for tab in tabs where tab !== selected && tab !== pictured {
             // A floating video may be muted, so not "playing audio": it counts anyway.
-            guard let webView = tab.webView, webView.window == nil, now.timeIntervalSince(tab.lastShown) > after,
+            guard let webView = tab.webView, !webView.isShown, now.timeIntervalSince(tab.lastShown) > after,
                   webView.cameraCaptureState == .none, webView.microphoneCaptureState == .none,
                   webView.fullscreenState == .notInFullscreen, !Self.isPlayingAudio(webView)
             else { continue }
@@ -946,9 +946,9 @@ extension BrowserWindowController {
             let shown = selected.webView as? SillWebView
             let under = keep == nil && leaving?.superview !== pageHost
                 && shown?.shownBefore == true && splitView.superview !== pageHost
-                && pageHost.subviews.contains { $0 is WKWebView }
+                && pageHost.subviews.contains { $0 is WKWebView && !$0.isHidden }
             if !under {
-                for view in pageHost.subviews where view !== keep && view !== splitView { view.removeFromSuperview() }
+                putAside(except: splitView, keep)
             }
             if splitView.superview !== pageHost {
                 splitView.frame = pageHost.bounds
@@ -960,7 +960,7 @@ extension BrowserWindowController {
                 shown.afterNextFrame { [weak self, weak shown] in
                     guard let self, shown != nil, self.split?.contains(self.selected) == true,
                           self.splitView.superview === self.pageHost else { return }
-                    for view in self.pageHost.subviews where view !== self.splitView && view !== self.leaving { view.removeFromSuperview() }
+                    self.putAside(except: self.splitView, self.leaving)
                 }
             }
             for (pane, tab) in [(splitView.leftPane, split.left), (splitView.rightPane, split.right)] {
@@ -977,31 +977,57 @@ extension BrowserWindowController {
             splitView.apply(fraction: split.fraction)
         } else {
             let webView = selected.materialize()
+            let placed = webView.superview === pageHost && !webView.isHidden
             // A page that has been shown before comes back under the one
             // being left, which goes once the new one has drawn: nothing
             // waits, and the window never shows through between the two.
             let under = keep == nil && leaving?.superview !== pageHost
-                && webView.shownBefore && webView.superview !== pageHost
+                && webView.shownBefore && !placed
                 && !webView.isDescendant(of: splitView)
-                && pageHost.subviews.contains { $0 is WKWebView || $0 === splitView }
-            if !under {
-                for view in pageHost.subviews where view !== keep && view !== webView { view.removeFromSuperview() }
-            }
+                && pageHost.subviews.contains { ($0 is WKWebView && !$0.isHidden && $0 !== webView) || $0 === splitView }
+            if !under { putAside(except: webView, keep) }
             if webView.superview !== pageHost {
                 webView.frame = pageHost.bounds
-                webView.autoresizingMask = [.width, .height]
                 pageHost.addSubview(webView, positioned: under ? .below : .above, relativeTo: nil)
+            } else if !placed {
+                // Only hidden since it was last in front (see SillWebView.park).
+                webView.frame = pageHost.bounds
+                order(webView, below: under)
+                webView.isHidden = false
             }
+            webView.autoresizingMask = [.width, .height]
             webView.shownBefore = true
             webView.outgoing = false
             if under {
                 for case let old as SillWebView in pageHost.subviews where old !== webView { old.outgoing = true }
                 webView.afterNextFrame { [weak self, weak webView] in
                     guard let self, let webView, self.selected?.webView === webView,
-                          webView.superview === self.pageHost else { return }
-                    for view in self.pageHost.subviews where view !== webView && view !== self.leaving { view.removeFromSuperview() }
+                          webView.superview === self.pageHost, !webView.isHidden else { return }
+                    self.putAside(except: webView, self.leaving)
                 }
             }
+        }
+    }
+
+    /// Every page in the page area but these is hidden where it is; the
+    /// split's two halves, which hold their own pages, leave the window.
+    private func putAside(except shown: NSView?, _ kept: NSView?) {
+        for view in pageHost.subviews where view !== shown && view !== kept {
+            if let page = view as? SillWebView { page.park() } else { view.removeFromSuperview() }
+        }
+    }
+
+    /// Moves a page already in the page area to the back or the front of it
+    /// without taking it out of the window.
+    private func order(_ view: NSView, below: Bool) {
+        var context = (Unmanaged.passUnretained(view).toOpaque(), below)
+        withUnsafeMutablePointer(to: &context) { pointer in
+            pageHost.sortSubviews({ a, b, raw in
+                let (target, below) = raw!.assumingMemoryBound(to: (UnsafeMutableRawPointer, Bool).self).pointee
+                let isA = Unmanaged.passUnretained(a).toOpaque() == target, isB = Unmanaged.passUnretained(b).toOpaque() == target
+                if isA == isB { return .orderedSame }
+                return (isA == below) ? .orderedAscending : .orderedDescending
+            }, context: pointer)
         }
     }
 

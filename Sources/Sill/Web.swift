@@ -210,6 +210,21 @@ final class SillWebView: WKWebView {
         outgoing = false
     }
 
+    /// On screen: in a window and not put aside (see `park`).
+    var isShown: Bool { window != nil && !isHidden }
+
+    /// Put aside where it is, hidden, rather than taken out of the window.
+    /// WebKit blanks a page that comes back into a window until it has drawn
+    /// again, and holds the app still for that drawing; a page that was only
+    /// hidden still has its last frame and is simply shown.
+    func park() {
+        guard !isHidden else { return }
+        isHidden = true
+        outgoing = false
+        // Not resized with the window while it's away; sized when shown.
+        autoresizingMask = []
+    }
+
     // MARK: the first frame
 
     /// A web view that has never drawn is opaque white: a flash of it between
