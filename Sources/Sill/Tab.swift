@@ -19,6 +19,9 @@ protocol TabHost: AnyObject {
     func focused(_ tab: Tab, field: LoginField)
     /// The question its page has for you changed (Permissions.swift).
     func promptsChanged(_ tab: Tab)
+    /// Whether its page is the one in front, or one half of the split in
+    /// front. Not the same as its view being in the window.
+    func isInFront(_ tab: Tab) -> Bool
 }
 
 /// One page and its history. Its web view is made the first time it is
@@ -789,7 +792,7 @@ extension Tab: WKUIDelegate {
         guard webView.window != nil || closing != nil else { return completionHandler(true) }
         // Asked because its tab, window or Sill is closing: a tab behind
         // another comes to the front, so it is plain which page is meant.
-        if closing != nil, webView.window == nil { host?.bringBack(self) }
+        if closing != nil, host?.isInFront(self) != true { host?.bringBack(self) }
         Prompts.leave(closing: closing == nil ? nil : displayTitle, in: host?.window) { [weak self] leave in
             if !leave, let closing = self?.closing {
                 self?.closing = nil

@@ -914,6 +914,10 @@ extension BrowserWindowController: TabHost {
 
     func promptsChanged(_ tab: Tab) { placePrompts() }
 
+    func isInFront(_ tab: Tab) -> Bool {
+        tab === selected || (split?.contains(tab) == true && split?.contains(selected) == true)
+    }
+
     /// The card of each page that has a question, top right of that page
     /// while it is in front (either half of a split), and off otherwise.
     func placePrompts() {
@@ -923,8 +927,7 @@ extension BrowserWindowController: TabHost {
                 tab.card = nil
                 continue
             }
-            let inFront = tab === selected || (split?.contains(tab) == true && split?.contains(selected) == true)
-            guard inFront, let view = tab.webView, view.window != nil, !view.outgoing else {
+            guard isInFront(tab), let view = tab.webView, view.window != nil else {
                 tab.card?.removeFromSuperview()
                 continue
             }
