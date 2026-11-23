@@ -916,7 +916,7 @@ final class BrowserNSWindow: NSWindow {
         if super.performKeyEquivalent(with: event) { return true }
         guard event.type == .keyDown, event.isARepeat,
               let controller = windowController as? BrowserWindowController,
-              let key = event.characters(byApplyingModifiers: []), !key.isEmpty,
+              let key = event.characters(byApplyingModifiers: .command), !key.isEmpty,
               let item = Self.item(for: key, event.modifierFlags.intersection([.command, .shift, .control, .option]),
                                    in: NSApp.mainMenu) else { return false }
         if controller.validateMenuItem(item), let action = item.action {
