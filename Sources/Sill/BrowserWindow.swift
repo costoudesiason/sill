@@ -180,18 +180,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         stage.addSubview(status)
         watchForPeek()
         stage.onLayout = { [weak self] in self?.stageLaidOut() }
-        // The Find bar is built once the window has settled, not on the first
-        // ⌘F: building it there cost that keypress two or three frames.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self, self.window != nil else { return }
-            if self.madeFindBar == nil { self.findBar.ready(in: self.stage, top: self.topInset) }
-            // The palette too, on a turn of its own: the first ⌘T only shows it.
-            guard !popup else { return }
-            Frame.afterCommit { [weak self] in
-                guard let self, self.window?.isVisible == true else { return }
-                self.palette.ready(in: self.stage)
-            }
-        }
+        // The Find bar, the palette and its settings are built ahead of their
+        // first use, not on the first ⌘F, ⌘T or ⌘, (cold, each cost 50 to 110
+        // ms, measured). Each part on a quiet moment of its own: see readyAhead.
+        readyAhead(step: 0, since: CACurrentMediaTime())
 
         bar.back.target = self
         bar.back.action = #selector(goBack(_:))
@@ -620,6 +612,37 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private func changed() { onChange?() }
 
     // MARK: - Palette
+
+    /// Builds the window's overlays ahead of their first use, one part per
+    /// quiet moment: the Find bar, then the palette, each made and then put
+    /// in the window, then the palette's settings. A moment is quiet once
+    /// the page in front has loaded (or ten seconds have gone by) and nothing
+    /// has been pressed, typed or scrolled for 0.4 s. At a fixed two seconds
+    /// they often landed on the first page's load or its first scroll; one
+    /// part at a time, no single turn holds the main thread for long.
+    private func readyAhead(step: Int, since start: CFTimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self, let window = self.window else { return }
+            let waited = CACurrentMediaTime() - start
+            // A window never shown (or long hidden) builds them when first wanted.
+            guard waited < 120 else { return }
+            let idle = ProcessInfo.processInfo.systemUptime - (NSApp.currentEvent?.timestamp ?? 0)
+            let quiet = waited > 1 && window.isVisible && idle > 0.4
+                && (self.selected?.isLoading != true || waited > 10)
+                // Not in the middle of a resize, a drag or an open menu.
+                && RunLoop.main.currentMode == .default
+            guard quiet else { return self.readyAhead(step: step, since: start) }
+            switch step {
+            case 0: _ = self.findBar
+            case 1: self.findBar.ready(in: self.stage, top: self.topInset)
+            case 2 where !self.isPopup: _ = self.palette
+            case 3 where !self.isPopup: self.palette.ready(in: self.stage)
+            case 4 where !self.isPopup: self.palette.readySettings()
+            default: return
+            }
+            self.readyAhead(step: step + 1, since: start)
+        }
+    }
 
     /// The palette, turned to its settings.
     func showSettings() {
