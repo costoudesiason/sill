@@ -69,20 +69,39 @@ final class LoadingLine: NSView {
         let from = drawnWidth
         let target = max(from, fraction * width)
         let creep = max(target, min(fraction + (0.94 - fraction) * 0.45, 0.94) * width)
-        bar.removeAnimation(forKey: "grow")
+        stopGrowing()
         setWidth(creep)
         guard !Motion.reduced else { setWidth(target); return }
         let arrive: CFTimeInterval = quick ? 0.15 : 0.45
-        let total: CFTimeInterval = arrive + 9
-        let animation = CAKeyframeAnimation(keyPath: "bounds.size.width")
-        animation.values = [from, target, creep]
-        animation.keyTimes = [0, NSNumber(value: arrive / total), 1]
-        animation.timingFunctions = [
-            CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.25, 1),   // a soft arrival
-            CAMediaTimingFunction(controlPoints: 0.1, 0.5, 0.3, 1),    // and a creep that tires
-        ]
-        animation.duration = total
-        bar.add(animation, forKey: "grow")
+        let now = bar.convertTime(CACurrentMediaTime(), from: nil)
+        let arrival = CABasicAnimation(keyPath: "bounds.size.width")
+        arrival.fromValue = from
+        arrival.toValue = target
+        arrival.beginTime = now
+        arrival.duration = arrive
+        arrival.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.25, 1)   // a soft arrival
+        // Held at its end until the creep, added after it and so on top, takes over.
+        arrival.fillMode = .forwards
+        arrival.isRemovedOnCompletion = false
+        bar.add(arrival, forKey: "grow")
+        // And a creep that tires: a few points a second for nine seconds, and
+        // often the only thing moving while a slow site keeps you waiting. At
+        // 30 frames a second rather than the display's 60 or 120: it moves a
+        // point or so a frame either way, and the window server composites
+        // the window half as often (or a quarter) while it waits.
+        let tiring = CABasicAnimation(keyPath: "bounds.size.width")
+        tiring.fromValue = target
+        tiring.toValue = creep
+        tiring.beginTime = now + arrive
+        tiring.duration = 9
+        tiring.timingFunction = CAMediaTimingFunction(controlPoints: 0.1, 0.5, 0.3, 1)
+        tiring.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
+        bar.add(tiring, forKey: "creep")
+    }
+
+    private func stopGrowing() {
+        bar.removeAnimation(forKey: "grow")
+        bar.removeAnimation(forKey: "creep")
     }
 
     /// `jump`: another tab came to the front; its line starts where its
@@ -118,7 +137,7 @@ final class LoadingLine: NSView {
             }
             // To the end, and fading as it gets there.
             let from = drawnWidth
-            bar.removeAnimation(forKey: "grow")
+            stopGrowing()
             setWidth(bounds.width)
             let sweep = CABasicAnimation(keyPath: "bounds.size.width")
             sweep.fromValue = from
