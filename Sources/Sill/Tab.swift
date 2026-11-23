@@ -66,6 +66,13 @@ final class Tab: NSObject {
     private var crashes: [Date] = []
     /// Its process died while it was out of sight: it reloads when shown.
     private var needsReload = false
+    /// Sill ended this page's process itself (it had stopped answering):
+    /// not a crash to count, and what to load in its place, if not the same page.
+    private var endedHungProcess = false
+    private var afterHungProcess: URL?
+    /// A reload (nil address) or address asked for and not yet begun by the
+    /// page: if the page turns out to be hung, it is what to do after.
+    private var asked: (url: URL?, at: Date)?
     /// The navigation that put Sill's own "can't open" page up, and whether
     /// that page is what's showing: it is not a visit to remember.
     private var errorNavigation: WKNavigation?
@@ -254,7 +261,10 @@ final class Tab: NSObject {
     func load(_ url: URL, typed: Bool = false) {
         typedNavigation = typed
         self.url = url
-        if let webView {
+        if let webView, !webView.processIsResponsive {
+            endHungProcess(of: webView, thenLoad: url)
+        } else if let webView {
+            asked = (url, Date())
             Shield.shared.whenReady { [weak self, weak webView] in
                 guard let webView, self?.webView === webView else { return }
                 webView.load(URLRequest(url: url))
@@ -277,10 +287,20 @@ final class Tab: NSObject {
     func goForward() { webView?.goForward() }
     func reload(fromOrigin: Bool = false) {
         guard let webView else { return }
+        if !webView.processIsResponsive { return endHungProcess(of: webView, thenLoad: nil) }
+        asked = (nil, Date())
         if webView.url == nil, let url { webView.load(URLRequest(url: url)) }
         else if fromOrigin { webView.reloadFromOrigin() } else { webView.reload() }
     }
     func stop() { webView?.stopLoading() }
+
+    /// A page stuck in a script answers nothing, a reload or a new address
+    /// included: its process is ended, and the page loads in a fresh one.
+    private func endHungProcess(of webView: SillWebView, thenLoad url: URL?) {
+        endedHungProcess = true
+        afterHungProcess = url
+        webView.endProcess()
+    }
 
     // MARK: - from the page script
 
@@ -381,6 +401,7 @@ extension Tab: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         scrolled(false)
         playingVideo = false
+        asked = nil
         // The link the pointer was on went with the old page.
         hovered(link: nil)
         showingError = errorNavigation != nil && navigation === errorNavigation
@@ -411,6 +432,7 @@ extension Tab: WKNavigationDelegate {
 
     private func showError(_ error: Error, in webView: WKWebView) {
         let error = error as NSError
+        asked = nil
         // Cancelled, or a download taking over, or a plug-in: not a failure to show.
         if error.code == NSURLErrorCancelled || (error.domain == "WebKitErrorDomain" && [102, 204].contains(error.code)) { return }
         guard let failed = (error.userInfo[NSURLErrorFailingURLErrorKey] as? URL) ?? url else { return }
@@ -428,10 +450,31 @@ extension Tab: WKNavigationDelegate {
         }
     }
 
+    /// The page's process has stopped answering (a script that never ends).
+    /// A reload or address asked of it in the last moments is what found
+    /// that out, and would wait for ever: the process is ended for it.
+    @objc(_webViewWebProcessDidBecomeUnresponsive:)
+    func webViewWebProcessDidBecomeUnresponsive(_ webView: WKWebView) {
+        guard let view = webView as? SillWebView, view === self.webView else { return }
+        if let asked, Date().timeIntervalSince(asked.at) < 15 {
+            self.asked = nil
+            return endHungProcess(of: view, thenLoad: asked.url)
+        }
+        view.processStoppedAnswering()
+    }
+
     /// The page's process died (out of memory, or a crash). Shown, it comes
     /// back at once; behind another tab, when it's next shown. Twice in a
     /// minute, it says so rather than reloading into the same crash forever.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        asked = nil
+        if endedHungProcess {
+            endedHungProcess = false
+            if let next = afterHungProcess { webView.load(URLRequest(url: next)) }
+            else if webView.window == nil { needsReload = true } else { webView.reload() }
+            afterHungProcess = nil
+            return
+        }
         let now = Date()
         crashes = crashes.filter { now.timeIntervalSince($0) < 60 } + [now]
         if crashes.count >= 2, let url = webView.url ?? url {

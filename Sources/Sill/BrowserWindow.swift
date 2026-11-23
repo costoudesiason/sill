@@ -570,6 +570,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// unloads it, for a tab or window being closed.
     static func silence(_ tab: Tab) {
         guard let view = tab.webView else { return }
+        // A page stuck in a script never takes the unload below, and its
+        // process would spin on with no tab: it is ended, now if WebKit
+        // already knows, or once it finds out.
+        if !view.processIsResponsive { view.endProcess() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [view] in
+            if !view.processIsResponsive { view.endProcess() }
+        }
         let stop = "document.querySelectorAll('video, audio').forEach(m => { try { m.pause(); } catch (_) {} });"
             + " if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});"
         view.evaluateJavaScript(stop, in: nil, in: .page) { _ in }
