@@ -9,7 +9,7 @@ let package = Package(
         .executableTarget(
             name: "sill-mcp",
             path: "Sources/sill-mcp",
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: [.swiftLanguageMode(.v5), .unsafeFlags(["-Osize"], .when(configuration: .release))]
         ),
         .executableTarget(
             name: "Sill",
