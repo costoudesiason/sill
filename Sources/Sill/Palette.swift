@@ -171,12 +171,13 @@ final class Palette: NSObject {
         field.textColor = Ink.current.primary
         searchIcon.contentTintColor = Ink.current.secondary
         pill.needsLayout = true
-        if catcher.superview !== stage {
-            catcher.frame = stage.bounds
-            catcher.autoresizingMask = [.width, .height]
+        ready(in: stage)
+        // Above whatever came after it was readied, as when it was made here.
+        if !raised, stage.subviews.last !== card {
             stage.addSubview(catcher)
             stage.addSubview(card)
         }
+        raised = true
         // Always opens on the search, whatever it was left showing.
         if showingSettings { showSettings(false, animated: false) }
         let initial: String
@@ -210,6 +211,25 @@ final class Palette: NSObject {
             editor.selectAll(nil)
         }
         if !wasOpen { appear() }
+    }
+
+    /// Brought above the window's other views once, on its first opening.
+    private var raised = false
+
+    /// In the window, put away, before it is first wanted (the window does
+    /// this once it has settled): the first ⌘T then only shows it, rather
+    /// than also building and laying out every view of it and its glass.
+    func ready(in stage: NSView) {
+        guard catcher.superview !== stage else { return }
+        if !isOpen {
+            catcher.isHidden = true
+            card.isHidden = true
+        }
+        catcher.frame = stage.bounds
+        catcher.autoresizingMask = [.width, .height]
+        stage.addSubview(catcher)
+        stage.addSubview(card)
+        layout(in: stage)
     }
 
     func close(animated: Bool = true) {
@@ -333,7 +353,7 @@ final class Palette: NSObject {
                 rows += others.sorted { $0.lastShown > $1.lastShown }.prefix(4).map { .item(.tab($0)) }
             }
             let openURLs = Set(browser.tabs.compactMap { $0.url.flatMap(History.key) })
-            let recent = History.shared.recent(limit: 40).filter { !openURLs.contains($0.url) }
+            let recent = History.shared.recent(limit: History.recentLimit).filter { !openURLs.contains($0.url) }
             if !recent.isEmpty && !browser.isPrivate {
                 rows.append(.header("Recently Visited"))
                 var hosts = Set<String>()

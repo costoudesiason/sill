@@ -155,9 +155,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         window.tabbingMode = .disallowed
         window.minSize = NSSize(width: 420, height: 300)
         window.collectionBehavior.insert(.fullScreenPrimary)
-        // See-through: the bar's glass shows the desktop behind the window.
-        // Opaque unless rounder corners are asked for (Settings › Appearance):
-        // a see-through window is composited whole on every frame.
+        // Opaque: the bar's glass shows the desktop behind the window all the
+        // same. Rounder corners (Settings › Appearance) come from the window
+        // server (applyLooks); only without that is the window see-through,
+        // and a see-through window is composited whole on every frame.
         window.isOpaque = true
         window.backgroundColor = .windowBackgroundColor
         if isPrivate { window.appearance = NSAppearance(named: .darkAqua) }
@@ -182,8 +183,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
         strip.browser = self
         stage.wantsLayer = true
-        // Rounder than the system's window corners; the shadow of a
-        // see-through window follows what it draws, so it follows these.
+        // Rounder than the system's window corners where the window server
+        // can't round them; the shadow of a see-through window follows what
+        // it draws, so it follows these.
         stage.layer?.cornerCurve = .continuous
         window.contentView = stage
         ground.material = .sidebar
@@ -202,8 +204,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // The Find bar is built once the window has settled, not on the first
         // ⌘F: building it there cost that keypress two or three frames.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self, self.madeFindBar == nil, self.window != nil else { return }
-            self.findBar.ready(in: self.stage, top: self.topInset)
+            guard let self, self.window != nil else { return }
+            if self.madeFindBar == nil { self.findBar.ready(in: self.stage, top: self.topInset) }
+            // The palette too, on a turn of its own: the first ⌘T only shows it.
+            guard !popup else { return }
+            Frame.afterCommit { [weak self] in
+                guard let self, self.window?.isVisible == true else { return }
+                self.palette.ready(in: self.stage)
+            }
         }
 
         bar.back.target = self
@@ -268,13 +276,32 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             wash.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(amount).cgColor
         }
         ground.isHidden = !prefs.glassBar
-        wash.isHidden = !prefs.glassBar
-        // Rounder corners need a see-through window, clipped to them; the
-        // system's own corners cost nothing. Only the corners are clipped:
-        // the bar's top two and the page's bottom two. A rounded mask over
-        // the whole window, page and all, made every frame of a scrolling
-        // page or a video go through an extra offscreen pass.
+        // No wash at all is no layer to blend.
+        wash.isHidden = !prefs.glassBar || amount == 0
         let round = prefs.roundCorners
+        // Rounder corners from the window server, as every window's own
+        // corners are: the window stays opaque, nothing in it is clipped, and
+        // the shadow and rim follow. Measured on a page scrolling itself for
+        // five seconds: steady 60 fps, worst frame 22-28 ms rather than
+        // 35-490, and a fifth less WindowServer time than clipping it here.
+        // (Square while on a full screen, whatever is set meanwhile.)
+        let full = window?.styleMask.contains(.fullScreen) == true
+        if setCornerRadius(round ? (full ? 0 : prefs.cornerRadius) : nil) {
+            window?.isOpaque = true
+            window?.backgroundColor = .windowBackgroundColor
+            stage.layer?.cornerRadius = 0
+            stage.layer?.backgroundColor = nil
+            Self.clip(top, radius: 0, corners: .top)
+            Self.clip(pageHost, radius: 0, corners: .bottom)
+            if before?.roundCorners != looks.roundCorners || before?.cornerRadius != looks.cornerRadius {
+                window?.invalidateShadow()
+            }
+            return
+        }
+        // Without it: a see-through window, clipped to them. Only the
+        // corners are clipped: the bar's top two and the page's bottom two.
+        // A rounded mask over the whole window, page and all, made every
+        // frame of a scrolling page or a video go through an extra offscreen pass.
         let radius = round ? prefs.cornerRadius : 0
         window?.isOpaque = !round
         window?.backgroundColor = round ? .clear : .windowBackgroundColor
@@ -289,6 +316,38 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
     }
     private var appliedLooks: Looks?
+    /// The system's radius for this window, from before Sill changed it.
+    private var systemCornerRadius: Double?
+
+    /// Asks the window server to round the window at `radius`, or puts the
+    /// system's own corners back for nil. False where it can't be asked (the
+    /// setting lives outside the public framework), and the caller clips.
+    private func setCornerRadius(_ radius: Double?) -> Bool {
+        let get = NSSelectorFromString("_cornerRadius"), set = NSSelectorFromString("_setCornerRadius:")
+        // Only as the two were found: a number out, a number in. Either
+        // changed, and they're left alone rather than called the wrong way.
+        guard let window, window.responds(to: get), window.responds(to: set),
+              Self.shape(of: get, in: window) == "d16@0:8", Self.shape(of: set, in: window) == "v24@0:8d16"
+        else { return false }
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Double
+        typealias Setter = @convention(c) (AnyObject, Selector, Double) -> Void
+        let current = unsafeBitCast(window.method(for: get), to: Getter.self)(window, get)
+        if systemCornerRadius == nil {
+            // Never changed and not asked to be: the system's corners, untouched.
+            guard radius != nil else { return true }
+            systemCornerRadius = current
+        }
+        let wanted = radius ?? systemCornerRadius ?? current
+        if current != wanted { unsafeBitCast(window.method(for: set), to: Setter.self)(window, set, wanted) }
+        return true
+    }
+
+    /// What a method takes and gives back, as the runtime records it.
+    private static func shape(of selector: Selector, in object: AnyObject) -> String? {
+        guard let method = class_getInstanceMethod(type(of: object), selector),
+              let types = method_getTypeEncoding(method) else { return nil }
+        return String(cString: types)
+    }
 
     private enum Edge { case top, bottom }
 
@@ -386,6 +445,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     }
     func windowDidEnterFullScreen(_ notification: Notification) { stage.needsLayout = true }
     func windowDidExitFullScreen(_ notification: Notification) { stage.needsLayout = true }
+    // Square on a full screen, as every window is; round again on the way back.
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        if Preferences.shared.roundCorners { _ = setCornerRadius(0) }
+    }
+    func windowWillExitFullScreen(_ notification: Notification) {
+        if Preferences.shared.roundCorners { _ = setCornerRadius(Preferences.shared.cornerRadius) }
+    }
 
     // MARK: - Tabs
 
@@ -593,8 +659,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         endPeek()
         palette.open(mode, in: stage)
         if mode == .newTab, spare == nil {
-            // On the next turn, so the palette is on screen first.
-            DispatchQueue.main.async { [weak self] in
+            // Once the palette's first frame is committed: made on the next
+            // turn instead, a web view (5 to 75 ms, its process started with
+            // it) ran before that frame and held the palette back.
+            Frame.afterCommit { [weak self] in
                 guard let self, self.spare == nil, self.window?.isVisible == true else { return }
                 self.spare = SillWebView(frame: self.pageBounds, configuration: Web.configuration(private: self.isPrivate))
                 // Starts its web process now, not at Return: no page is loaded.
@@ -625,7 +693,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     func prerenderSoon(_ url: URL?) {
         prerenderTimer?.invalidate()
         guard let url, paletteOpen, palette.mode == .newTab, !isPrivate, !WarmSite.handles(url) || !Preferences.shared.keepsClaudeReady,
-              let host = url.host(), History.shared.knows(host: host) else { return }
+              let host = url.host() else { return }
+        // A site you haven't been to isn't loaded ahead, but the way there is
+        // opened (and to its www., where most bare names send you), so the
+        // lookup and handshake are done by Return. After the same pause.
+        guard History.shared.knows(host: host) else {
+            prerenderTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.paletteOpen else { return }
+                    self.expect(url)
+                    if host.split(separator: ".").count == 2 { self.expect(URL(string: "https://www.\(host)/")) }
+                }
+            }
+            return
+        }
         // Never a plain-HTTP page that is asked about first: the spare view asks nothing.
         guard url.scheme == "https" || !SitePermissions.asksBeforeHTTP(host) else { return }
         if let prerendered, Self.samePage(prerendered, url) { return }
@@ -685,15 +766,28 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if olderThan != nil, !paletteOpen { spare = nil }
         guard Preferences.shared.sleepsTabs else { return }
         let after = olderThan ?? TimeInterval(max(5, Preferences.shared.sleepAfterMinutes) * 60)
-        let now = Date()
-        for tab in tabs where tab !== selected && tab !== pictured {
-            // A floating video may be muted, so not "playing audio": it counts anyway.
-            guard let webView = tab.webView, !webView.isShown, now.timeIntervalSince(tab.lastShown) > after,
-                  webView.cameraCaptureState == .none, webView.microphoneCaptureState == .none,
-                  webView.fullscreenState == .notInFullscreen, !Self.isPlayingAudio(webView)
-            else { continue }
-            tab.sleepUnlessTyping()
+        // One at a time, a moment apart, each asked again when its turn
+        // comes: a page let go costs the main thread a few milliseconds (its
+        // picture, its history, its view taken down), and a window of tabs
+        // going at once, as memory runs short, was a hitch of its own.
+        var turn: TimeInterval = 0
+        for tab in tabs where mayNap(tab, after: after) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + turn) { [weak self, weak tab] in
+                guard let self, let tab, self.tabs.contains(where: { $0 === tab }), self.mayNap(tab, after: after) else { return }
+                tab.sleepUnlessTyping()
+            }
+            turn += 0.15
         }
+    }
+
+    private func mayNap(_ tab: Tab, after: TimeInterval) -> Bool {
+        // A floating video may be muted, so not "playing audio": it counts anyway.
+        guard tab !== selected, tab !== pictured, let webView = tab.webView, !webView.isShown,
+              Date().timeIntervalSince(tab.lastShown) > after,
+              webView.cameraCaptureState == .none, webView.microphoneCaptureState == .none,
+              webView.fullscreenState == .notInFullscreen, !Self.isPlayingAudio(webView)
+        else { return false }
+        return true
     }
 
     /// Stops everything a page is playing, ends its picture in picture, and
@@ -1193,7 +1287,7 @@ extension BrowserWindowController {
             // being left, which goes once the new one has drawn: nothing
             // waits, and the window never shows through between the two.
             let under = keep == nil && leaving?.superview !== pageHost
-                && webView.shownBefore && !placed
+                && (webView.shownBefore || webView.laidOutUnseen) && !placed
                 && !webView.isDescendant(of: splitView)
                 && pageHost.subviews.contains { ($0 is WKWebView && !$0.isHidden && $0 !== webView) || $0 === splitView }
             if !under { putAside(except: webView, keep) }
@@ -1367,19 +1461,31 @@ extension BrowserWindowController {
 
     /// The tabs either side of the one in front, a moment after it changes:
     /// the next ⌃Tab, or a click next door, finds its page already there.
-    fileprivate func warmNeighbours(of tab: Tab) {
+    fileprivate func warmNeighbours(of tab: Tab, waited: TimeInterval = 0) {
         neighbourWarming?.cancel()
+        let pause: TimeInterval = waited == 0 ? 1.0 : 0.5
         let work = DispatchWorkItem { [weak self, weak tab] in
             guard let self, let tab, tab === self.selected, let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
-            for i in [index - 1, index + 1] where self.tabs.indices.contains(i) {
-                let neighbour = self.tabs[i]
-                guard neighbour.webView == nil, !neighbour.warmedUnseen else { continue }
-                self.warm(neighbour)
-                neighbour.warmedUnseen = neighbour.webView != nil
+            // Not while the page in front is still coming in: two more pages
+            // loading beside it would share its network and processor, and
+            // it's the one being looked at. A page that never settles doesn't
+            // hold them off for more than a few seconds.
+            if tab.isLoading, waited < 6 { return self.warmNeighbours(of: tab, waited: waited + pause) }
+            // Each on a turn of its own: making a web view and starting its
+            // load holds the main thread a few milliseconds, two in a row twice that.
+            let neighbours = [index - 1, index + 1].filter { self.tabs.indices.contains($0) }.map { self.tabs[$0] }
+            for (n, neighbour) in neighbours.enumerated() {
+                let wake = { [weak self, weak neighbour, weak tab] in
+                    guard let self, let neighbour, let tab, tab === self.selected,
+                          neighbour.webView == nil, !neighbour.warmedUnseen else { return }
+                    self.warm(neighbour)
+                    neighbour.warmedUnseen = neighbour.webView != nil
+                }
+                if n == 0 { wake() } else { Frame.afterCommit(wake) }
             }
         }
         neighbourWarming = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + pause, execute: work)
     }
 
     /// A click into the other half of a split makes that page the one in

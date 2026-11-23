@@ -28,7 +28,9 @@ struct Visit: Codable, Hashable {
 @MainActor
 final class History {
     static let shared = History()
-    private(set) var visits: [String: Visit] = [:]
+    private(set) var visits: [String: Visit] = [:] { didSet { changes += 1 } }
+    /// Changes to `visits` since they were read.
+    private var changes = 0
     private var knownHosts: Set<String>?
     /// The last answer to `recent`, kept until history changes: the empty
     /// palette asks each time it is shown or its field is cleared, and each
@@ -39,10 +41,160 @@ final class History {
     private static let cap = 6000
 
     private init() {
-        let url = Places.support.appendingPathComponent("history.json")
-        if let data = try? Data(contentsOf: url), let list = try? JSONDecoder().decode([Visit].self, from: data) {
-            visits = Dictionary(list.map { ($0.url, $0) }, uniquingKeysWith: { a, b in a.last > b.last ? a : b })
+        // Read at launch, off the main thread (preload); waited for if not
+        // done yet, which is never longer than reading it here would be.
+        if let read = Self.early.read {
+            read.wait()
+            visits = Self.early.takeVisits() ?? Self.read()
+            making = Self.early.making
+            Self.early.making = nil
+        } else {
+            visits = Self.read()
         }
+        Self.made = self
+        if let making, making.work?.wait(timeout: .now()) == .success { finish(making) }
+    }
+
+    // MARK: - made in the background
+
+    /// Reading six thousand entries took some 35 ms, and working out what
+    /// searching needs of each (the shelf, below) 65 ms more, with another
+    /// 20 for the sites known and the newest forty: paid on the main thread
+    /// by the first page to record a visit and by the first letter typed in
+    /// ⌘T. All of it is done here instead, in the background, as the app
+    /// starts (main.swift).
+    nonisolated static func preload() {
+        let early = early
+        let making = Making { early.visitsToPrepare() }
+        let read = DispatchWorkItem(qos: .userInitiated) {
+            early.put(visits: History.read())
+            making.start()
+        }
+        early.read = read
+        early.making = making
+        DispatchQueue.global(qos: .userInitiated).async(execute: read)
+    }
+
+    nonisolated private static func read() -> [String: Visit] {
+        let url = Places.support.appendingPathComponent("history.json")
+        guard let data = try? Data(contentsOf: url), let list = try? JSONDecoder().decode([Visit].self, from: data) else { return [:] }
+        return Dictionary(list.map { ($0.url, $0) }, uniquingKeysWith: { a, b in a.last > b.last ? a : b })
+    }
+
+    /// The one made, once it is: the background work hands it what it made.
+    private static weak var made: History?
+
+    /// What preload read, waiting for History's init, behind a lock.
+    private final class Early: @unchecked Sendable {
+        private let lock = NSLock()
+        /// Both set once, on the main thread, before the app runs.
+        var read: DispatchWorkItem?
+        var making: Making?
+        private var visits: [String: Visit]?
+        private var forPreparing: [String: Visit]?
+        func put(visits: [String: Visit]) { lock.withLock { self.visits = visits; forPreparing = visits } }
+        func takeVisits() -> [String: Visit]? { lock.withLock { defer { visits = nil }; return visits } }
+        func visitsToPrepare() -> [String: Visit]? { lock.withLock { defer { forPreparing = nil }; return forPreparing } }
+    }
+    nonisolated private static let early = Early()
+
+    /// The shelf and the rest being made from a copy of the visits, off the
+    /// main thread. What it made is read on the main thread once its work
+    /// has finished (waited for, or told of), never while it runs.
+    private final class Making: @unchecked Sendable {
+        private(set) var work: DispatchWorkItem?
+        private(set) var prepared: Prepared?
+        private let source: @Sendable () -> [String: Visit]?
+        private let at: Int
+
+        /// `at`: how many changes there had been to the visits when copied.
+        init(at: Int = 0, _ source: @escaping @Sendable () -> [String: Visit]?) {
+            self.source = source
+            self.at = at
+        }
+
+        /// Once, from the thread that made it, or the one reading at launch.
+        func start() {
+            let work = DispatchWorkItem(qos: .utility) { [weak self] in
+                guard let self, let visits = self.source() else { return }
+                self.prepared = Prepared(visits, at: self.at)
+            }
+            self.work = work
+            work.notify(queue: .main) { [weak self] in
+                MainActor.assumeIsolated { if let self { History.made?.finish(self) } }
+            }
+            DispatchQueue.global(qos: .utility).async(execute: work)
+        }
+    }
+    private var making: Making?
+
+    /// Everything searching and the palette work out from history, made
+    /// from the visits as they were when copied.
+    private struct Prepared: @unchecked Sendable {
+        let visits: [String: Visit]
+        let at: Int
+        let shelf: [(Visit, Reading)]
+        let places: [String: Int]
+        let readings: [String: Reading]
+        let flat: Flat
+        let knownHosts: Set<String>
+        let recent: [Visit]
+
+        init(_ visits: [String: Visit], at: Int) {
+            self.visits = visits
+            self.at = at
+            let shelf = visits.values.map { ($0, History.makeReading($0)) }
+            self.shelf = shelf
+            places = Dictionary(uniqueKeysWithValues: shelf.enumerated().map { ($1.0.url, $0) })
+            readings = Dictionary(uniqueKeysWithValues: shelf.map { ($0.0.url, $0.1) })
+            var flat = Flat()
+            flat.spans.reserveCapacity(shelf.count * Flat.fields * 2)
+            for (visit, read) in shelf { flat.add(visit, read) }
+            flat.live = flat.bytes.count
+            self.flat = flat
+            knownHosts = Set(visits.values.compactMap { $0.address.map { Domains.bare($0.host()) } })
+            recent = Array(visits.values.sorted { $0.last > $1.last }.prefix(History.recentLimit))
+        }
+    }
+
+    /// The palette's list of recent sites asks for this many.
+    nonisolated static let recentLimit = 40
+
+    /// Made again in the background after a change to many entries at once
+    /// (trimmed, merged from Safari, one removed): the next letter typed
+    /// would otherwise make it all again on the main thread.
+    private func makeAgain() {
+        let making = Making(at: changes) { [visits] in visits }
+        self.making = making
+        making.start()
+    }
+
+    /// Takes what was made in the background, unless something newer is on
+    /// its way or the shelf has been made here already. Changes made since
+    /// the copy are put on top of it; if any entry it holds has gone since,
+    /// it is let go and made again when wanted.
+    private func finish(_ done: Making) {
+        guard done === making else { return }
+        making = nil
+        guard let prepared = done.prepared, shelf == nil else { return }
+        // Nothing changed since the copy (the usual case): no entry to compare.
+        let same = changes == prepared.at
+        guard same || !prepared.visits.keys.contains(where: { visits[$0] == nil }) else { return }
+        readings = prepared.readings
+        places = prepared.places
+        shelf = prepared.shelf
+        flat = prepared.flat
+        if knownHosts == nil { knownHosts = prepared.knownHosts }
+        if latest == nil { latest = (Self.recentLimit, prepared.recent) }
+        if !same { for (key, visit) in visits where prepared.visits[key] != visit { noted(visit) } }
+    }
+
+    /// Asked for before the background has finished (a letter typed in the
+    /// first moment after launch): waiting for it beats making it twice.
+    private func awaitPrepared() {
+        guard shelf == nil, let making, let work = making.work else { return }
+        work.wait()
+        finish(making)
     }
 
     static func key(_ url: URL) -> String? {
@@ -76,7 +228,10 @@ final class History {
     }
 
     /// Forgets everything worked out from the entries: for a change to many of them at once.
-    private func changed() { knownHosts = nil; shelf = nil; flat = nil; latest = nil }
+    private func changed() {
+        knownHosts = nil; shelf = nil; flat = nil; latest = nil
+        makeAgain()
+    }
 
     /// One entry is new, or has a later visit or another title: what is kept
     /// about all of them is brought up to date for that one, where making it
@@ -198,6 +353,7 @@ final class History {
     private var places: [String: Int] = [:]
 
     private var entries: [(Visit, Reading)] {
+        awaitPrepared()
         if let shelf { return shelf }
         let made = visits.values.map { ($0, reading($0)) }
         places = Dictionary(uniqueKeysWithValues: made.enumerated().map { ($1.0.url, $0) })
@@ -241,7 +397,7 @@ final class History {
         return made
     }
 
-    private static func bytes(_ text: String) -> ContiguousArray<UInt8> {
+    nonisolated private static func bytes(_ text: String) -> ContiguousArray<UInt8> {
         // One spelling of each accented letter, as comparing strings would see it.
         ContiguousArray(text.precomposedStringWithCanonicalMapping.utf8)
     }
@@ -263,13 +419,20 @@ final class History {
     private func reading(_ visit: Visit) -> Reading {
         if let known = readings[visit.url], known.title == visit.title { return known }
         if readings.count > Self.cap * 2 { readings = [:] }
+        let made = Self.makeReading(visit)
+        readings[visit.url] = made
+        return made
+    }
+
+    /// On any thread: preload makes them in the background.
+    nonisolated private static func makeReading(_ visit: Visit) -> Reading {
         let url = visit.address
         let bare = Address.display(url).lowercased()
         let rawHost = url?.host()?.lowercased()
         let path = url.map { (($0.host() ?? "") + $0.path).lowercased() } ?? visit.url.lowercased()
         let host = Domains.bare(rawHost)
         let lowerTitle = visit.title.lowercased()
-        let made = Reading(path: path,
+        return Reading(path: path,
                            bare: bare,
                            depth: Double(1 + bare.utf8.reduce(0) { $1 == 47 ? $0 + 1 : $0 }) * 0.5 + 0.5,
                            rawHost: rawHost,
@@ -281,8 +444,6 @@ final class History {
                            hostBytes: Self.bytes(host),
                            rawHostBytes: Self.bytes(rawHost ?? ""),
                            bareBytes: Self.bytes(bare))
-        readings[visit.url] = made
-        return made
     }
 
     /// Entries matching every word typed, best first.

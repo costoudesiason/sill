@@ -39,6 +39,26 @@ enum Motion {
     }
 }
 
+// MARK: - After the frame
+
+@MainActor
+enum Frame {
+    /// Runs `work` on the main thread once what has changed so far has been
+    /// committed for the screen. Work sent with DispatchQueue.main.async
+    /// runs before that (the run loop serves the main queue ahead of Core
+    /// Animation's commit, measured), so it held up the very frame it was
+    /// meant to follow.
+    static func afterCommit(_ work: @escaping @MainActor () -> Void) {
+        // Last of the observers at the end of a run loop pass, after Core
+        // Animation's own (order 2,000,000), and only once.
+        let activities = CFRunLoopActivity.beforeWaiting.rawValue | CFRunLoopActivity.exit.rawValue
+        let observer = CFRunLoopObserverCreateWithHandler(nil, activities, false, CFIndex.max) { _, _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated(work) }
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+    }
+}
+
 // MARK: - Preferences
 
 enum SearchEngine: String, CaseIterable, Identifiable {

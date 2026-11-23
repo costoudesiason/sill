@@ -175,6 +175,9 @@ final class StatusPill: NSVisualEffectView {
         layer?.cornerRadius = 8
         layer?.cornerCurve = .continuous
         alphaValue = 0
+        // Hidden when faded out, not just clear: its blur sits over the page
+        // and samples it, and a scrolling page would have it redone.
+        isHidden = true
         label.font = .systemFont(ofSize: 11)
         label.textColor = .secondaryLabelColor
         label.lineBreakMode = .byTruncatingMiddle
@@ -190,9 +193,16 @@ final class StatusPill: NSVisualEffectView {
         if let text, !text.isEmpty {
             label.stringValue = text
             superview.map(place)
+            isHidden = false
             if alphaValue < 1 { Motion.animate(0.1) { animator().alphaValue = 1 } }
         } else {
-            let work = DispatchWorkItem { [weak self] in Motion.animate(0.12) { self?.animator().alphaValue = 0 } }
+            guard !isHidden else { return }
+            let work = DispatchWorkItem { [weak self] in
+                Motion.animate(0.12, { self?.animator().alphaValue = 0 }, completion: {
+                    // Unless a link came under the pointer meanwhile.
+                    if let self, self.alphaValue == 0 { self.isHidden = true }
+                })
+            }
             hiding = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
         }

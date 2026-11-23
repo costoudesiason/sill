@@ -296,26 +296,51 @@ final class TabItemView: NSView {
     var isLeaving = false
     /// While a tab grows in or collapses out, its contents stay laid out at
     /// this width and the frame clips them.
-    var layoutWidth: CGFloat? { didSet { if layoutWidth != oldValue { Motion.still { layoutContents() } } } }
+    var layoutWidth: CGFloat? { didSet { if layoutWidth != oldValue { clips(); Motion.still { layoutContents() } } } }
     var isPaired = false { didSet { if isPaired != oldValue { needsDisplay = true } } }
-    var isFront = false { didSet { if isFront != oldValue { wearGlass(isFront); restyle() } } }
+    var isFront = false { didSet { if isFront != oldValue { wearGlass(isFront); clips(); restyle() } } }
 
+    /// Clipped only while it needs it: growing in or folding away (laid out
+    /// wider than it is), or wearing glass. A rounded clip renders the tab
+    /// offscreen each time the row is drawn, and a row of them made every
+    /// frame of a tab opening or closing cost a pass per tab. The others'
+    /// contents sit inside them, and their fill rounds itself.
+    private func clips() {
+        let clip = isFront || layoutWidth != nil
+        if layer?.masksToBounds != clip { layer?.masksToBounds = clip }
+    }
+
+    /// The glass stays in the tab once made, hidden while the tab isn't in
+    /// front: putting a glass view into the window and taking it out again
+    /// on every switch cost some 5 ms a switch on the main thread, hiding
+    /// and showing it 1.4 (a 30-tab harness, display and commit included).
     private func wearGlass(_ on: Bool) {
         Motion.still {
             if on {
+                let glass = self.glass ?? makeGlass()
                 content.removeFromSuperview()
                 glass.frame = bounds
                 glass.cornerRadius = bounds.height / 2
                 glass.contentView = content
                 content.frame = glass.bounds
-                addSubview(glass)
-            } else {
+                glass.isHidden = false
+            } else if let glass {
+                glass.isHidden = true
                 glass.contentView = nil
-                glass.removeFromSuperview()
                 content.frame = bounds
                 addSubview(content)
             }
         }
+    }
+
+    /// Only for a tab that comes to the front: a glass view takes some
+    /// 0.4 ms to make, and a restored window of tabs made one for each.
+    private func makeGlass() -> NSGlassEffectView {
+        let made = NSGlassEffectView()
+        made.effectIsInteractive = true
+        addSubview(made, positioned: .below, relativeTo: nil)
+        glass = made
+        return made
     }
     private var isHovered = false { didSet { if isHovered != oldValue { restyle() } } }
 
@@ -346,7 +371,7 @@ final class TabItemView: NSView {
     /// inside the glass's own content view (a glass view only promises that
     /// view sits inside it; anything beside it gets refracted), so they move
     /// in when the tab comes to the front and out when it leaves.
-    private let glass = NSGlassEffectView()
+    private var glass: NSGlassEffectView?
     private let content = FlippedView()
 
     init(tab: Tab, strip: TabStripView) {
@@ -355,9 +380,7 @@ final class TabItemView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerCurve = .continuous
-        layer?.masksToBounds = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
-        glass.effectIsInteractive = true
         addSubview(content)
 
         icon.imageScaling = .scaleProportionallyUpOrDown
@@ -368,7 +391,7 @@ final class TabItemView: NSView {
         spinner.isDisplayedWhenStopped = false
         content.addSubview(spinner)
 
-        label.font = .systemFont(ofSize: 13)
+        label.font = Self.font
         label.lineBreakMode = .byClipping
         label.cell?.truncatesLastVisibleLine = false
         label.wantsLayer = true
@@ -427,31 +450,39 @@ final class TabItemView: NSView {
     /// The icon a page without one of its own gets: made once, not per refresh.
     private static let globe = NSImage(systemSymbolName: "globe", accessibilityDescription: nil)?
         .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
+    private static let font = NSFont.systemFont(ofSize: 13)
+    private static let frontFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
     private static let privateIcon = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: nil)?
         .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
 
+    /// Called for every load starting and ending, every new icon and title,
+    /// of every tab: only what changed is set. A label given its text again,
+    /// even the same, is measured again; a tooltip set again is re-added.
     func refresh() {
-        label.stringValue = tab.displayTitle
-        // The preview card says the same and more; a tooltip would sit on it.
-        toolTip = Preferences.shared.showsTabPreviews ? nil
-            : tab.url.map { "\(tab.displayTitle)\n\(Address.display($0))" } ?? tab.displayTitle
-        setAccessibilityLabel(tab.displayTitle)
-        if tab.isLoading && tab.favicon == nil {
-            spinner.startAnimation(nil)
-            icon.isHidden = true
-        } else {
-            spinner.stopAnimation(nil)
-            icon.isHidden = false
+        let title = tab.displayTitle
+        if label.stringValue != title {
+            label.stringValue = title
+            setAccessibilityLabel(title)
         }
-        icon.image = tab.favicon ?? (tab.isPrivate ? Self.privateIcon : Self.globe)
-        icon.contentTintColor = tab.favicon == nil ? .secondaryLabelColor : nil
+        // The preview card says the same and more; a tooltip would sit on it.
+        let tip = Preferences.shared.showsTabPreviews ? nil
+            : tab.url.map { "\(title)\n\(Address.display($0))" } ?? title
+        if toolTip != tip { toolTip = tip }
+        let spinning = tab.isLoading && tab.favicon == nil
+        if spinning { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        icon.isHidden = spinning
+        let image = tab.favicon ?? (tab.isPrivate ? Self.privateIcon : Self.globe)
+        if icon.image !== image { icon.image = image }
+        let tint: NSColor? = tab.favicon == nil ? .secondaryLabelColor : nil
+        if icon.contentTintColor != tint { icon.contentTintColor = tint }
         restyle()
-        needsLayout = true
     }
 
     private func restyle() {
-        label.textColor = isFront ? .labelColor : .secondaryLabelColor
-        label.font = .systemFont(ofSize: 13, weight: isFront ? .semibold : .regular)
+        let color: NSColor = isFront ? .labelColor : .secondaryLabelColor
+        if label.textColor != color { label.textColor = color }
+        let font = isFront ? Self.frontFont : Self.font
+        if label.font != font { label.font = font }
         setAccessibilityValue(isFront)
         needsDisplay = true
         needsLayout = true
@@ -494,7 +525,7 @@ final class TabItemView: NSView {
     }
 
     private func layoutContents() {
-        if glass.superview === self {
+        if let glass, !glass.isHidden {
             glass.frame = bounds
             glass.cornerRadius = bounds.height / 2
             content.frame = glass.bounds
@@ -537,9 +568,22 @@ final class TabItemView: NSView {
             let start = max(0, (label.frame.width - 18) / label.frame.width)
             fade.locations = [0, NSNumber(value: start), 1]
             label.layer?.mask = fade
+            // A mask is an offscreen pass each time the row is drawn; kept
+            // as a bitmap, a title that hasn't changed is drawn from that
+            // while the row slides about. At the screen's scale, or it blurs.
+            label.layer?.shouldRasterize = true
+            label.layer?.rasterizationScale = window?.backingScaleFactor ?? 2
             CATransaction.commit()
-        } else {
+        } else if label.layer?.mask != nil {
             label.layer?.mask = nil
+            label.layer?.shouldRasterize = false
+        }
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        if let scale = window?.backingScaleFactor, label.layer?.shouldRasterize == true {
+            label.layer?.rasterizationScale = scale
         }
     }
 
