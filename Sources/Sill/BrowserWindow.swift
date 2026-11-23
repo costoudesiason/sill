@@ -104,6 +104,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// The page whose video is still on its way out to Picture in Picture.
     private weak var leaving: WKWebView?
     private var expected = Set<String>()
+    private var connectAheadTimer: Timer?
+    private var connectedAhead: [String: Date] = [:]
     /// What the spare is already loading, guessed from the palette's top hit.
     private var prerendered: URL?
     private var prerenderTimer: Timer?
@@ -757,8 +759,29 @@ extension BrowserWindowController: TabHost {
         let url = link.flatMap(URL.init(string:))
         hoveredLink = url
         peekIfAsked()
+        connectAhead(to: url, from: tab)
         guard Preferences.shared.showsLinkPreview else { return }
         status.show(url.map { Address.display($0) })
+    }
+
+    /// Resting the pointer on a link to another site opens a connection to
+    /// it, in the page's own data store, so the lookup and handshake are
+    /// under way before the click. A connection only: nothing is requested.
+    private func connectAhead(to url: URL?, from tab: Tab) {
+        connectAheadTimer?.invalidate()
+        guard let url, url.scheme == "https", let host = url.host(), let view = tab.webView,
+              host != view.url?.host(), connectedAhead[host].map({ Date().timeIntervalSince($0) > 30 }) ?? true
+        else { return }
+        let site = url.port.map { "\(host):\($0)" } ?? host
+        connectAheadTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: false) { [weak self, weak view] _ in
+            MainActor.assumeIsolated {
+                let connect = NSSelectorFromString("_preconnectToServer:")
+                guard let self, let view, view.responds(to: connect), let root = URL(string: "https://\(site)/") else { return }
+                if self.connectedAhead.count > 64 { self.connectedAhead = [:] }
+                self.connectedAhead[host] = Date()
+                view.perform(connect, with: root)
+            }
+        }
     }
 
     // MARK: - A look at a link
