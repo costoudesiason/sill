@@ -346,6 +346,10 @@ final class PageNotifications: NSObject, UNUserNotificationCenterDelegate {
         let tab = page.flatMap(Self.tab)
         // Nothing from a private window is left in Notification Centre.
         if tab?.isPrivate == true { return }
+        // Still allowed: a page open since before a reset, or since its day
+        // ran out, has WebKit's word that it may notify, and no longer yours.
+        guard let site = Self.site(of: notification) ?? tab?.webView?.url.flatMap(Self.site),
+              SitePermissions.shared.allowed([.notifications], at: site, private: false) == true else { return }
         let content = UNMutableNotificationContent()
         content.title = Self.text("WKNotificationCopyTitle", of: notification)
         content.body = Self.text("WKNotificationCopyBody", of: notification)
@@ -359,8 +363,28 @@ final class PageNotifications: NSObject, UNUserNotificationCenterDelegate {
         center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
             guard granted else { return }
             center.add(UNNotificationRequest(identifier: "page-\(id)", content: content, trigger: nil))
+            // The page hears it was shown only once the Mac has let it be.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let manager = PageNotifications.shared.manager else { return }
+                    Self.function("WKNotificationManagerProviderDidShowNotification", Told.self)?(manager, id)
+                }
+            }
         }
-        Self.function("WKNotificationManagerProviderDidShowNotification", Told.self)?(manager, id)
+    }
+
+    /// The site a notification is from, as SitePermissions names sites.
+    private static func site(of notification: UnsafeRawPointer) -> String? {
+        typealias Copy = @convention(c) (CFAllocator?, UnsafeRawPointer) -> Unmanaged<CFString>?
+        guard let origin = function("WKNotificationGetSecurityOrigin", Getter.self)?(notification),
+              let string = function("WKSecurityOriginCopyToString", Getter.self)?(origin) else { return nil }
+        defer { function("WKRelease", (@convention(c) (UnsafeRawPointer) -> Void).self)?(string) }
+        return function("WKStringCopyCFString", Copy.self)?(nil, string)?.takeRetainedValue() as String?
+    }
+
+    private static func site(_ url: URL) -> String? {
+        guard let scheme = url.scheme, let host = url.host() else { return nil }
+        return "\(scheme)://\(host)" + (url.port.map { ":\($0)" } ?? "")
     }
 
     private func withdraw(_ notification: UnsafeRawPointer) {
