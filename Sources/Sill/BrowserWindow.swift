@@ -429,6 +429,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     // MARK: - Tabs
 
     func restore(_ states: [SessionTab], selectedIndex: Int) {
+        // The icons on disk, if they are nearly read: the row comes up with them.
+        Favicons.shared.settle(within: 0.03)
         tabs = states.compactMap { state in
             guard let url = URL(string: state.url) else { return nil }
             let tab = Tab(url: url, title: state.title, isPrivate: isPrivate)

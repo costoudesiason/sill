@@ -602,7 +602,6 @@ final class Favicons {
     private var memory: [String: NSImage] = [:]
     /// Where each host's icon in memory came from: the same address again needs no fetch.
     private var source: [String: URL] = [:]
-    private var misses: Set<String> = []
     private var inflight: [String: [(NSImage?) -> Void]] = [:]
     /// Once every icon on disk is in memory, nothing is read from disk again.
     private var preloaded = false
@@ -614,10 +613,15 @@ final class Favicons {
     private final class Staged: @unchecked Sendable {
         private let lock = NSLock()
         private var images: [String: NSImage]? = [:]
+        /// Left once every file has been read: the main thread may wait on it, briefly.
+        let read = DispatchGroup()
         func put(_ key: String, _ image: NSImage) { lock.withLock { images?[key] = image } }
         func image(_ key: String) -> NSImage? { lock.withLock { images?[key] } }
-        func close() { lock.withLock { images = nil } }
+        /// Everything read, handed over once; nothing is staged after.
+        func drain() -> [String: NSImage] { lock.withLock { defer { images = nil }; return images ?? [:] } }
     }
+    /// Run once the preload has landed: tabs asked for an icon it hadn't reached yet.
+    private var afterPreload: [() -> Void] = []
     private let folder = Places.caches.appendingPathComponent("Icons", isDirectory: true)
     private let session: URLSession = {
         let configuration = URLSessionConfiguration.default
@@ -644,38 +648,57 @@ final class Favicons {
     func preload() {
         let folder = folder
         let staged = staged
+        staged.read.enter()
         DispatchQueue.global(qos: .userInitiated).async {
             let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
-            var found: [(String, NSImage)] = []
             for url in files {
                 guard let data = try? Data(contentsOf: url), let (image, _) = Self.decode(data, storing: false) else { continue }
-                found.append((url.lastPathComponent, image))
                 staged.put(url.lastPathComponent, image)
             }
+            staged.read.leave()
             DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    for (key, image) in found where self.memory[key] == nil { self.memory[key] = image }
-                    self.preloaded = true
-                    staged.close()
-                }
+                MainActor.assumeIsolated { self.landed() }
             }
         }
+    }
+
+    /// Files what the preload found, once: from its own hop to the main
+    /// thread, or sooner from settle().
+    private func landed() {
+        guard !preloaded else { return }
+        for (key, image) in staged.drain() where memory[key] == nil { memory[key] = image }
+        preloaded = true
+        let waiting = afterPreload
+        afterPreload = []
+        waiting.forEach { $0() }
+    }
+
+    /// Before tabs are restored: waits up to `limit` for the preload (300
+    /// icons take about 120 ms to read, measured), so they come up with
+    /// their icons; tabs made after that take what has been read so far,
+    /// and the rest when it lands (whenPreloaded), never a file of their own.
+    func settle(within limit: TimeInterval) {
+        guard !preloaded, staged.read.wait(timeout: .now() + limit) == .success else { return }
+        // Everything is staged: taken now, the preload's own hop finds it done.
+        landed()
+    }
+
+    /// Runs `work` once every icon on disk is in memory: at once if it is.
+    func whenPreloaded(_ work: @escaping () -> Void) {
+        if preloaded { work() } else { afterPreload.append(work) }
     }
 
     func cached(for page: URL?) -> NSImage? {
         guard let key = key(page) else { return nil }
         if let image = memory[key] { return image }
-        if preloaded || misses.contains(key) { return nil }
+        if preloaded { return nil }
         if let image = staged.image(key.replacingOccurrences(of: "/", with: "_")) {
             memory[key] = image
             return image
         }
-        // Asked before the preload has finished: from disk, this once.
-        if let data = try? Data(contentsOf: file(key)), let (image, _) = Self.decode(data) {
-            memory[key] = image
-            return image
-        }
-        misses.insert(key)
+        // Asked before the preload has reached it: nothing yet, and no file
+        // read here. Reading and decoding one cost the main thread about
+        // 0.6 ms (measured), for every tab of a restored window.
         return nil
     }
 
@@ -700,7 +723,6 @@ final class Favicons {
                     if let made {
                         self.memory[key] = made
                         self.source[key] = icon
-                        self.misses.remove(key)
                     }
                     let waiting = self.inflight.removeValue(forKey: key) ?? []
                     waiting.forEach { $0(made ?? self.memory[key]) }
