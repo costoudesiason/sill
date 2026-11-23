@@ -189,7 +189,7 @@ final class SillWebView: WKWebView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window != nil { tab?.pageShown() }
+        if isShown { tab?.pageShown() }
     }
 
     override func viewDidUnhide() {

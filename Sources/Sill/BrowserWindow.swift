@@ -394,9 +394,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
                 // Return on the site the palette was already loading: the page
                 // is there, mid-load or done, and becomes the tab as it is.
                 let ready = prerendered.map { Self.samePage($0, url) } ?? false
+                // A plain-HTTP address may wait on a question, or be cancelled:
+                // not in a view that already holds some other site's page.
+                let others = !ready && prerendered != nil && url.scheme == "http"
                 spare = nil
                 prerendered = nil
-                tab.adopt(view, loaded: ready)
+                if others { tab.materialize() } else { tab.adopt(view, loaded: ready) }
             }
         }
         if shouldSelect { select(tab, animated: true) } else { strip.sync(animated: true) }
@@ -930,6 +933,7 @@ extension BrowserWindowController: TabHost {
 
     func promptsChanged(_ tab: Tab) { placePrompts() }
 
+    /// The tab in front, or the other half of its split.
     func isInFront(_ tab: Tab) -> Bool {
         tab === selected || (split?.contains(tab) == true && split?.contains(selected) == true)
     }
@@ -943,7 +947,7 @@ extension BrowserWindowController: TabHost {
                 tab.card = nil
                 continue
             }
-            guard isInFront(tab), let view = tab.webView, view.window != nil else {
+            guard isInFront(tab), let view = tab.webView, view.isShown else {
                 tab.card?.removeFromSuperview()
                 continue
             }

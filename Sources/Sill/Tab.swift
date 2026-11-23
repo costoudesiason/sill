@@ -322,7 +322,7 @@ final class Tab: NSObject {
     /// loading loads its address.
     func loadIfEmpty() {
         guard let webView, url != nil else { return }
-        let check = "(function(){ var b = document.body; return location.href === 'about:blank' || !b || (b.childElementCount === 0 && !b.textContent.trim()); })()"
+        let check = "(function(){ var b = document.body; var r = b || document.documentElement; return location.href === 'about:blank' || !r || (r.childElementCount === 0 && !r.textContent.trim()); })()"
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self, weak webView] in
             guard let self, let webView, self.webView === webView, (webView as? SillWebView)?.isShown == true, !webView.isLoading else { return }
             webView.evaluateJavaScript(check, in: nil, in: Web.world) { [weak self, weak webView] result in
