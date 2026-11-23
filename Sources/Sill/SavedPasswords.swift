@@ -17,9 +17,9 @@ enum SavedPasswords {
         let user: String
     }
 
-    private static let creator = FourCharCode(0x5349_4C4C)  // 'SILL'
+    fileprivate static let creator = FourCharCode(0x5349_4C4C)  // 'SILL'
 
-    private static func base(_ host: String, _ user: String) -> [String: Any] {
+    fileprivate static func base(_ host: String, _ user: String) -> [String: Any] {
         [kSecClass as String: kSecClassInternetPassword,
          kSecAttrServer as String: host,
          kSecAttrAccount as String: user,
@@ -213,5 +213,33 @@ enum DiaImport {
         }
         guard status == kCCSuccess else { return nil }
         return String(data: plain.prefix(written), encoding: .utf8)
+    }
+}
+
+extension SavedPasswords {
+    /// Every account Sill keeps, by site then name. Names only.
+    static func all() async -> [Login] {
+        await Task.detached(priority: .userInitiated) { () -> [Login] in
+            let query: [String: Any] = [kSecClass as String: kSecClassInternetPassword,
+                                        kSecAttrCreator as String: creator,
+                                        kSecMatchLimit as String: kSecMatchLimitAll,
+                                        kSecReturnAttributes as String: true]
+            var found: CFTypeRef?
+            guard SecItemCopyMatching(query as CFDictionary, &found) == errSecSuccess,
+                  let items = found as? [[String: Any]] else { return [] }
+            return items.compactMap { item -> Login? in
+                guard let server = item[kSecAttrServer as String] as? String,
+                      let user = item[kSecAttrAccount as String] as? String else { return nil }
+                return Login(host: server, user: user)
+            }
+            .sorted { (Domains.bare($0.host), $0.user) < (Domains.bare($1.host), $1.user) }
+        }.value
+    }
+
+    @discardableResult
+    static func delete(_ login: Login) async -> Bool {
+        await Task.detached(priority: .userInitiated) { () -> Bool in
+            SecItemDelete(base(login.host, login.user) as CFDictionary) == errSecSuccess
+        }.value
     }
 }

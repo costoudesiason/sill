@@ -413,11 +413,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             .item(.init(title: "History", symbol: "clock", keys: ["⌘", "Y"]) { [weak self] in self?.showHistory(nil) }),
             .item(.init(title: "Downloads", symbol: "arrow.down.circle") { [weak self] in self?.showDownloads(nil) }),
             .item(.init(title: "Extensions", symbol: "puzzlepiece.extension") { [weak self] in self?.showExtensions(nil) }),
-            .item(.init(title: "Passwords", symbol: "key") {
-                if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Passwords") {
-                    NSWorkspace.shared.openApplication(at: app, configuration: .init())
-                }
-            }),
+            .item(.init(title: "Passwords", symbol: "key") { PasswordsWindow.show() }),
             .item(.init(title: "Import Passwords from Dia…", symbol: "square.and.arrow.down", isEnabled: DiaImport.available) { [weak self] in
                 self?.importFromDia()
             }),
