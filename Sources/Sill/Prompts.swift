@@ -178,7 +178,9 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
         windows[ObjectIdentifier(download)] = window
         let isPrivate = (window?.windowController as? BrowserWindowController)?.isPrivate == true
         items.insert(DownloadItem(download: download, isPrivate: isPrivate), at: 0)
-        if items.count > 30 { items.removeLast() }
+        // The list keeps 30, but never drops one still coming down: its row
+        // is what stops it and clears up after it.
+        if items.count > 30, let old = items.lastIndex(where: { !$0.active }) { items.remove(at: old) }
         retime()
     }
 
