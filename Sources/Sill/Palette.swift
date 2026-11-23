@@ -319,7 +319,7 @@ final class Palette: NSObject {
                 rows += others.sorted { $0.lastShown > $1.lastShown }.prefix(4).map { .item(.tab($0)) }
             }
             let openURLs = Set(browser.tabs.compactMap { $0.url.flatMap(History.key) })
-            let recent = History.shared.recent(limit: 40).filter { !openURLs.contains($0.url) }
+            let recent = History.shared.recent(limit: History.recentLimit).filter { !openURLs.contains($0.url) }
             if !recent.isEmpty && !browser.isPrivate {
                 rows.append(.header("Recently Visited"))
                 var hosts = Set<String>()
