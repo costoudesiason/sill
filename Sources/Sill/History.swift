@@ -304,7 +304,15 @@ final class History {
                             let span = (at * Flat.fields + field) * 2
                             let count = Int(spans[span + 1])
                             guard needle.count <= count else { return false }
-                            return memmem(bytes.baseAddress! + Int(spans[span]), count, needle.baseAddress, needle.count) != nil
+                            let start = bytes.baseAddress! + Int(spans[span])
+                            guard let hit = memmem(start, count, needle.baseAddress, needle.count) else { return false }
+                            // Bytes can match inside a character ("i" in "i̇", a flag's
+                            // first half): only a hit with plain letters either side is
+                            // taken as it is, the rest are asked of the text itself.
+                            let from = UnsafeRawPointer(start).distance(to: UnsafeRawPointer(hit)), to = from + needle.count
+                            if needle[0] < 0x80 || from == 0 || start[from - 1] < 0x80, to == count || start[to] < 0x80 { return true }
+                            let word = words[needles.firstIndex { $0.baseAddress == needle.baseAddress } ?? 0]
+                            return field == Flat.path ? entries[at].1.path.contains(word) : entries[at].1.lowerTitle.contains(word)
                         }
                         // A plain word can only begin text whose bytes begin with it, so
                         // the bytes turn most entries away before a string is compared.

@@ -245,6 +245,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         popover.contentViewController = host
         popover.contentSize = host.view.fittingSize
         downloadsPopover = popover
+        // Progress is read only while the list is open. The popover says when
+        // it closes; the view inside isn't told until it is thrown away.
+        Downloads.shared.watch(true)
+        var closed: NSObjectProtocol?
+        closed = NotificationCenter.default.addObserver(forName: NSPopover.didCloseNotification, object: popover, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                if let closed { NotificationCenter.default.removeObserver(closed) }
+                closed = nil
+                Downloads.shared.watch(false)
+                if self?.downloadsPopover === popover { self?.downloadsPopover = nil }
+            }
+        }
         popover.show(relativeTo: bar.downloadsRect, of: bar, preferredEdge: .maxY)
     }
 

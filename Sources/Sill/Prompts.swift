@@ -247,8 +247,6 @@ struct DownloadsView: View {
             }
         }
         .frame(width: 340)
-        .onAppear { downloads.watch(true) }
-        .onDisappear { downloads.watch(false) }
     }
 }
 
