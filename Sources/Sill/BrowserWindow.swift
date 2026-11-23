@@ -89,7 +89,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// the window so its rim never shows; the page covers it below the bar.
     private let ground = NSVisualEffectView()
     private let wash = NSView()
-    private let toastView = Toast()
+    /// Made the first time there is something to say: a window is opened,
+    /// resized and laid out many times for each note it shows.
+    private var madeToast: Toast?
     private var downloadsPopover: NSPopover?
     /// Recently closed in this window, newest last, for ⇧⌘T.
     private var closed: [(url: URL, title: String, index: Int, state: Any?)] = []
@@ -152,7 +154,6 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         stage.addSubview(top)
         stage.addSubview(pageHost)
         stage.addSubview(status)
-        stage.addSubview(toastView)
         watchForPeek()
         stage.onLayout = { [weak self] in self?.stageLaidOut() }
 
@@ -272,7 +273,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         madePalette?.stageResized(stage)
         if let findBar = madeFindBar, findBar.isOpen { findBar.place(in: stage, top: topInset) }
         status.place(in: stage)
-        toastView.place(in: stage)
+        if let toast = madeToast, !toast.isHidden { toast.place(in: stage) }
     }
 
     func windowDidResize(_ notification: Notification) { stage.needsLayout = true }
@@ -622,7 +623,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     // MARK: - Status, toast
 
     func toast(_ text: String, action: (String, () -> Void)? = nil) {
-        toastView.show(text, action: action, in: stage)
+        let toast = madeToast ?? {
+            let made = Toast()
+            // Where it has always been: over the page and the status, under the rest.
+            stage.addSubview(made, positioned: .above, relativeTo: status)
+            madeToast = made
+            return made
+        }()
+        toast.show(text, action: action, in: stage)
     }
 
     // MARK: - Menu actions
