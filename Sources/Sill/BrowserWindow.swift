@@ -811,6 +811,12 @@ extension BrowserWindowController: TabHost {
         let content = NSSize(width: max(360, min(size.width, 1000)), height: max(320, min(size.height, 900)) + TopBar.height)
         var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: content))
         frame.origin = NSPoint(x: parent.frame.midX - frame.width / 2, y: parent.frame.midY - frame.height / 2)
+        // Several at once step down and across, so none hides another.
+        let others = AppDelegate.shared.browsers.filter { $0.isPopup && $0 !== popup }.compactMap { $0.window?.frame.origin }
+        while others.contains(where: { abs($0.x - frame.origin.x) < 1 && abs($0.y - frame.origin.y) < 1 }) {
+            frame.origin.x += 24
+            frame.origin.y -= 24
+        }
         window.setFrame(frame, display: false)
         let made = popup.addTab(url: nil, configuration: configuration, opener: tab)
         popup.showWindow(nil)

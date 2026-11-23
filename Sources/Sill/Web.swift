@@ -110,6 +110,8 @@ enum Web {
         configuration.preferences.isTextInteractionEnabled = true
         configuration.allowsAirPlayForMediaPlayback = true
         configuration.defaultWebpagePreferences.preferredContentMode = .desktop
+        // A page opens windows when you click, not on its own.
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         // Pages out of sight are left to WebKit's default, which suspends a
         // page once it is idle and in no window: a tab behind another costs
         // nothing. A page playing sound or video, or still loading, isn't
