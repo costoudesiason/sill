@@ -597,7 +597,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     func prerenderSoon(_ url: URL?) {
         prerenderTimer?.invalidate()
         guard let url, paletteOpen, palette.mode == .newTab, !isPrivate, !WarmSite.handles(url) || !Preferences.shared.keepsClaudeReady,
-              let host = url.host(), History.shared.knows(host: host) else { return }
+              let host = url.host() else { return }
+        // A site you haven't been to isn't loaded ahead, but the way there is
+        // opened (and to its www., where most bare names send you), so the
+        // lookup and handshake are done by Return. After the same pause.
+        guard History.shared.knows(host: host) else {
+            prerenderTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.paletteOpen else { return }
+                    self.expect(url)
+                    if host.split(separator: ".").count == 2 { self.expect(URL(string: "https://www.\(host)/")) }
+                }
+            }
+            return
+        }
         // Never a plain-HTTP page that is asked about first: the spare view asks nothing.
         guard url.scheme == "https" || !SitePermissions.asksBeforeHTTP(host) else { return }
         if let prerendered, Self.samePage(prerendered, url) { return }
