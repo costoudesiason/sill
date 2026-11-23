@@ -528,6 +528,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// one in front, or the other half of its split), one whose video
     /// floats, or one playing sound or using the camera.
     func napIdleTabs(olderThan: TimeInterval? = nil) {
+        // Short of memory, the page kept ready for a new tab goes too.
+        if olderThan != nil, !paletteOpen { spare = nil }
         guard Preferences.shared.sleepsTabs else { return }
         let after = olderThan ?? TimeInterval(max(5, Preferences.shared.sleepAfterMinutes) * 60)
         let now = Date()
@@ -744,6 +746,8 @@ extension BrowserWindowController: TabHost {
     /// that keeps changing them is shown its latest when the half second is up,
     /// not redrawn for each.
     private func retitle(_ tab: Tab) {
+        // A load's own changes (redirects, then the title) are never held.
+        if tab.isLoading { return showTitle(of: tab, at: CACurrentMediaTime()) }
         guard !tab.retitling else { return }
         let now = CACurrentMediaTime()
         let wait = (tab.retitled.0 + 0.5) - now
@@ -903,7 +907,8 @@ extension BrowserWindowController {
         if let split, split.contains(selected) {
             // As for one page below: the pair comes back under the page being left.
             let shown = selected.webView as? SillWebView
-            let under = keep == nil && shown?.shownBefore == true && splitView.superview !== pageHost
+            let under = keep == nil && leaving?.superview !== pageHost
+                && shown?.shownBefore == true && splitView.superview !== pageHost
                 && pageHost.subviews.contains { $0 is WKWebView }
             if !under {
                 for view in pageHost.subviews where view !== keep && view !== splitView { view.removeFromSuperview() }
@@ -914,6 +919,7 @@ extension BrowserWindowController {
                 pageHost.addSubview(splitView, positioned: under ? .below : .above, relativeTo: nil)
             }
             if under, let shown {
+                for case let old as SillWebView in pageHost.subviews { old.outgoing = true }
                 shown.afterNextFrame { [weak self, weak shown] in
                     guard let self, let shown, self.selected?.webView === shown,
                           self.splitView.superview === self.pageHost else { return }
@@ -937,7 +943,8 @@ extension BrowserWindowController {
             // A page that has been shown before comes back under the one
             // being left, which goes once the new one has drawn: nothing
             // waits, and the window never shows through between the two.
-            let under = keep == nil && webView.shownBefore && webView.superview !== pageHost
+            let under = keep == nil && leaving?.superview !== pageHost
+                && webView.shownBefore && webView.superview !== pageHost
                 && !webView.isDescendant(of: splitView)
                 && pageHost.subviews.contains { $0 is WKWebView || $0 === splitView }
             if !under {
@@ -949,7 +956,9 @@ extension BrowserWindowController {
                 pageHost.addSubview(webView, positioned: under ? .below : .above, relativeTo: nil)
             }
             webView.shownBefore = true
+            webView.outgoing = false
             if under {
+                for case let old as SillWebView in pageHost.subviews where old !== webView { old.outgoing = true }
                 webView.afterNextFrame { [weak self, weak webView] in
                     guard let self, let webView, self.selected?.webView === webView,
                           webView.superview === self.pageHost else { return }

@@ -6,8 +6,11 @@ import WebKit
 ///
 /// It's asked for, never automatic: loading a page fetches it, and a link
 /// can be "sign out". Nothing exists until the first look, and nothing is
-/// kept after it: the web view is made for the card and dropped with it.
-final class Peek: NSView, WKNavigationDelegate {
+/// kept after it: the web view is made for the card and dropped with it,
+/// and each look has a data store of its own, so the page is seen signed
+/// out: a page can't use a look to send a request as you, and what the
+/// looked-at page stores goes with the card.
+final class Peek: NSView, WKNavigationDelegate, WKUIDelegate {
     static let size = NSSize(width: 420, height: 306)
     private static let foot: CGFloat = 44
 
@@ -76,11 +79,13 @@ final class Peek: NSView, WKNavigationDelegate {
 
     private func open(_ url: URL, by point: NSPoint, in stage: NSView, below top: CGFloat, private isPrivate: Bool) {
         let configuration = Web.configuration(private: isPrivate)
+        configuration.websiteDataStore = .nonPersistent()
         // A look makes no sound.
         configuration.mediaTypesRequiringUserActionForPlayback = .all
         let pageFrame = NSRect(x: 0, y: 0, width: Self.size.width, height: Self.size.height - Self.foot)
         let view = SillWebView(frame: pageFrame, configuration: configuration)
         view.navigationDelegate = self
+        view.uiDelegate = self
         // Half size: a desktop-width page in a card.
         view.pageZoom = 0.5
         view.holdForFirstFrame()
@@ -93,7 +98,7 @@ final class Peek: NSView, WKNavigationDelegate {
                 if let title = view.title, !title.isEmpty { self?.titleLabel.stringValue = title }
             }
         }
-        view.load(URLRequest(url: url))
+        Shield.shared.whenReady { [weak view] in view?.load(URLRequest(url: url)) }
 
         // Below and right of the pointer; the other side where it won't fit.
         let gap: CGFloat = 18, edge: CGFloat = 10
@@ -120,6 +125,7 @@ final class Peek: NSView, WKNavigationDelegate {
         self.page = nil
         page.stopLoading()
         page.navigationDelegate = nil
+        page.uiDelegate = nil
         Motion.animate(0.1, { animator().alphaValue = 0 }, completion: { [weak self] in
             page.removeFromSuperview()
             if self?.link == nil { self?.isHidden = true }
@@ -137,6 +143,13 @@ final class Peek: NSView, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse) async -> WKNavigationResponsePolicy {
         response.canShowMIMEType ? .allow : .cancel
+    }
+
+    /// A look is never asked for the camera or the microphone.
+    func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+                 initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
+                 decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+        decisionHandler(.deny)
     }
 
     @objc(_webView:renderingProgressDidChange:)

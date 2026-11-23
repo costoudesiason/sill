@@ -155,6 +155,15 @@ final class SillWebView: WKWebView {
         super.willOpenMenu(menu, with: event)
     }
 
+    /// The page being left stays over the one coming in until that has drawn;
+    /// for that moment it is only a picture, and clicks go to the new page.
+    var outgoing = false
+    override func hitTest(_ point: NSPoint) -> NSView? { outgoing ? nil : super.hitTest(point) }
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        outgoing = false
+    }
+
     // MARK: the first frame
 
     /// A web view that has never drawn is opaque white: a flash of it between
@@ -345,7 +354,7 @@ enum PageScripts {
         const v = e.target;
         if (!(v instanceof HTMLVideoElement)) return;
         if (v.webkitPresentationMode === 'picture-in-picture') floated.add(v);
-        else if (floated.delete(v)) left(e);
+        else if (v.webkitPresentationMode === 'inline' && floated.delete(v)) left(e);
       }, true);
 
       // The page's icon: the one nearest 64 px, an SVG, or /favicon.ico.
