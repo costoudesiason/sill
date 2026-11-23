@@ -118,10 +118,15 @@ final class TabStripView: NSView {
             item.isPaired = false
             item.layer?.zPosition = -1
         }
+        // Gone from sight in half the time: tabs have no fill of their own,
+        // so a neighbour growing across one shows both through each other
+        // (its icon over their titles, captured) for as long as it lingers.
+        if !leaving.isEmpty {
+            Motion.animate(Self.reflow / 2) { for item in leaving { item.animator().alphaValue = 0 } }
+        }
         Motion.animate(Self.reflow, {
             for item in leaving {
                 item.animator().frame = NSRect(x: item.frame.minX, y: item.frame.minY, width: 0, height: item.frame.height)
-                item.animator().alphaValue = 0
             }
             for item in items where item !== dragged {
                 if let target = frames[ObjectIdentifier(item)] { item.animator().frame = target }
@@ -295,18 +300,20 @@ final class TabItemView: NSView {
     private weak var strip: TabStripView?
     var isLeaving = false
     /// While a tab grows in or collapses out, its contents stay laid out at
-    /// this width and the frame clips them.
-    var layoutWidth: CGFloat? { didSet { if layoutWidth != oldValue { clips(); Motion.still { layoutContents() } } } }
+    /// this width and `content` clips them to the frame.
+    var layoutWidth: CGFloat? { didSet { if layoutWidth != oldValue { Motion.still { layoutContents() } } } }
     var isPaired = false { didSet { if isPaired != oldValue { needsDisplay = true } } }
     var isFront = false { didSet { if isFront != oldValue { wearGlass(isFront); clips(); restyle() } } }
 
-    /// Clipped only while it needs it: growing in or folding away (laid out
-    /// wider than it is), or wearing glass. A rounded clip renders the tab
-    /// offscreen each time the row is drawn, and a row of them made every
-    /// frame of a tab opening or closing cost a pass per tab. The others'
-    /// contents sit inside them, and their fill rounds itself.
+    /// Rounded and clipped only while wearing glass. A rounded clip renders
+    /// the tab offscreen each time the row is drawn, and a row of them made
+    /// every frame of a tab opening or closing cost a pass per tab. The
+    /// others' fill rounds itself, and their contents are kept inside them
+    /// by `content`'s square clip, which costs no pass of its own: without
+    /// it a title laid out at a tab's new width ran over its neighbours
+    /// while the row grew (captured slowed down, Close Other Tabs in Fill).
     private func clips() {
-        let clip = isFront || layoutWidth != nil
+        let clip = isFront
         if layer?.masksToBounds != clip { layer?.masksToBounds = clip }
     }
 
@@ -349,6 +356,16 @@ final class TabItemView: NSView {
     private let label = NSTextField(labelWithString: "")
     private let closeButton = TabCloseButton()
     private let fade = CAGradientLayer()
+    /// The title's size, measured once per title and font: a label asked
+    /// measures its text again each time, and every tab is laid out on every
+    /// frame of a window resize.
+    private var measured: (title: String, font: NSFont?, size: NSSize)?
+    private var titleSize: NSSize {
+        if let measured, measured.title == label.stringValue, measured.font == label.font { return measured.size }
+        let size = label.intrinsicContentSize
+        measured = (label.stringValue, label.font, size)
+        return size
+    }
 
     override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
@@ -381,6 +398,8 @@ final class TabItemView: NSView {
         wantsLayer = true
         layer?.cornerCurve = .continuous
         layerContentsRedrawPolicy = .onSetNeedsDisplay
+        content.wantsLayer = true
+        content.layer?.masksToBounds = true
         addSubview(content)
 
         icon.imageScaling = .scaleProportionallyUpOrDown
@@ -512,9 +531,9 @@ final class TabItemView: NSView {
         needsDisplay = true
     }
 
-    /// Laid out as the frame changes, inside whatever animation changes it,
-    /// so the title, icon and close button travel with the tab instead of
-    /// jumping to where they'll end up.
+    /// Laid out as the frame changes. The glass and the clip travel with the
+    /// frame, inside whatever animation changes it; what's in them takes its
+    /// new place at once and is uncovered as the tab grows (see layoutContents).
     override func resizeSubviews(withOldSize oldSize: NSSize) {
         layoutContents()
     }
@@ -532,9 +551,17 @@ final class TabItemView: NSView {
         } else {
             content.frame = bounds
         }
-        let h = bounds.height
+        // The icon, title and close button go straight to where they'll
+        // end up, as the row's header says. Sent along with the frame, the
+        // title still took its new width at once (a text field's frame
+        // doesn't travel) and the close button, travelling, crossed its
+        // letters on the way (captured, a tab growing in Fill).
         let w = layoutWidth ?? bounds.width
-        let narrow = w < 64
+        Motion.still { placeContents(width: w, narrow: w < 64) }
+    }
+
+    private func placeContents(width w: CGFloat, narrow: Bool) {
+        let h = bounds.height
         let showsClose = isFront ? w >= 44 : ((isHovered || Preferences.shared.closeButtons == .always) && !narrow)
         closeButton.isHidden = !showsClose
         let iconSize: CGFloat = 16
@@ -557,34 +584,26 @@ final class TabItemView: NSView {
         closeButton.frame = NSRect(x: w - 32, y: (h - 20) / 2, width: 20, height: 20)
         let labelX: CGFloat = 38
         let labelRight = showsClose ? w - 34 : w - 14
-        let labelHeight = ceil(label.intrinsicContentSize.height)
+        let labelHeight = ceil(titleSize.height)
         label.frame = NSRect(x: labelX, y: (h - labelHeight) / 2, width: max(0, labelRight - labelX), height: labelHeight)
 
         // Long titles fade out rather than end in an ellipsis.
-        if label.intrinsicContentSize.width > label.frame.width, label.frame.width > 20 {
+        if titleSize.width > label.frame.width, label.frame.width > 20 {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             fade.frame = label.bounds
             let start = max(0, (label.frame.width - 18) / label.frame.width)
             fade.locations = [0, NSNumber(value: start), 1]
-            label.layer?.mask = fade
-            // A mask is an offscreen pass each time the row is drawn; kept
-            // as a bitmap, a title that hasn't changed is drawn from that
-            // while the row slides about. At the screen's scale, or it blurs.
-            label.layer?.shouldRasterize = true
-            label.layer?.rasterizationScale = window?.backingScaleFactor ?? 2
+            if label.layer?.mask !== fade { label.layer?.mask = fade }
             CATransaction.commit()
         } else if label.layer?.mask != nil {
             label.layer?.mask = nil
-            label.layer?.shouldRasterize = false
         }
-    }
-
-    override func viewDidChangeBackingProperties() {
-        super.viewDidChangeBackingProperties()
-        if let scale = window?.backingScaleFactor, label.layer?.shouldRasterize == true {
-            label.layer?.rasterizationScale = scale
-        }
+        // No longer kept as a bitmap while masked: inside the glass that
+        // bitmap came out a few letters wide ("GitHu", captured), and a
+        // trace of 15 tabs opening and closing (Instruments, Animation
+        // Hitches) found the row's frames as quick without it, with no
+        // offscreen passes either way.
     }
 
     // MARK: mouse

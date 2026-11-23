@@ -22,6 +22,8 @@ protocol TabHost: AnyObject {
     /// Whether its page is the one in front, or one half of the split in
     /// front. Not the same as its view being in the window.
     func isInFront(_ tab: Tab) -> Bool
+    /// Its page finished loading out of sight, never yet in a window.
+    func loadedUnseen(_ tab: Tab)
 }
 
 /// One page and its history. Its web view is made the first time it is
@@ -59,7 +61,11 @@ final class Tab: NSObject {
     private(set) var isScrolled = false
     /// Whether a video is playing in the page, as its script last said.
     private(set) var playingVideo = false
-    var lastShown = Date() { didSet { warmedUnseen = false } }
+    var lastShown = Date() { didSet { warmedUnseen = false; seenAt = lastShown } }
+    /// When it was last in front, kept across a relaunch in the session, for
+    /// which restored tabs to load ahead. Not lastShown, which starts afresh
+    /// at launch so a tab woken then isn't put back to sleep straight away.
+    var seenAt: Date?
     /// Woken ahead for being next to the tab in front, and not looked at
     /// since: once it has slept again it isn't woken that way a second time,
     /// or each switch next door would load it afresh only for it to sleep.
@@ -120,6 +126,15 @@ final class Tab: NSObject {
         self.pending = url
         super.init()
         favicon = Favicons.shared.cached(for: url)
+        // Made before the icons on disk were all read (a window being
+        // restored): its own comes once they are, not from a file read here.
+        if favicon == nil, url != nil {
+            Favicons.shared.whenPreloaded { [weak self] in
+                guard let self, self.favicon == nil, let icon = Favicons.shared.cached(for: self.url) else { return }
+                self.favicon = icon
+                self.host?.tabChanged(self, .icon)
+            }
+        }
     }
 
     var displayTitle: String {
@@ -628,6 +643,9 @@ extension Tab: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         // A page with nothing to lay out never has a first frame: done is done.
         (webView as? SillWebView)?.showFirstFrame()
+        // Loaded out of sight (next door, or opened behind): drawn once
+        // now, unseen, so that it's there the moment it's shown.
+        if webView === self.webView, webView.window == nil, host?.isInFront(self) == false { host?.loadedUnseen(self) }
         guard let status = statusToCheck, let url = webView.url else { return }
         statusToCheck = nil
         // (An SVG or XML answer has no body, and isn't empty for that.)
