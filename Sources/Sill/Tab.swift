@@ -499,6 +499,15 @@ final class Tab: NSObject {
 
 // MARK: - The page's events (Chromium, through SillEngine)
 
+extension Tab {
+    /// Sill's page script, on Chromium: its messages as WebKit's handler took them.
+    func webView(_ view: SEWebView, message json: String) {
+        guard view === webView, let data = json.data(using: .utf8),
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        MessageRouter.route(body, to: self)
+    }
+}
+
 extension Tab: SEWebViewDelegate {
     func webView(_ view: SEWebView, shouldLoad url: URL, userGesture: Bool) -> Bool {
         let scheme = url.scheme?.lowercased() ?? ""

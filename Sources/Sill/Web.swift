@@ -402,9 +402,13 @@ final class MessageRouter: NSObject, WKScriptMessageHandler {
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.frameInfo.isMainFrame,
               let tab = (message.webView as? SillWebView)?.tab,
-              let body = message.body as? [String: Any],
-              let type = body["t"] as? String
+              let body = message.body as? [String: Any]
         else { return }
+        Self.route(body, to: tab)
+    }
+
+    static func route(_ body: [String: Any], to tab: Tab) {
+        guard let type = body["t"] as? String else { return }
         switch type {
         case "hover":
             tab.hovered(link: body["href"] as? String)
@@ -442,7 +446,10 @@ enum PageScripts {
     (() => {
       if (window.__sill) return;
       window.__sill = true;
-      const post = (m) => { try { webkit.messageHandlers.sill.postMessage(m); } catch (_) {} };
+      // To Sill: on Chromium through the function Sill's helper gives the
+      // page (taken now, before any of the page's own scripts run).
+      const send = window.__sillPost;
+      const post = (m) => { try { if (send) send(JSON.stringify(m)); else webkit.messageHandlers.sill.postMessage(m); } catch (_) {} };
 
       // Links under the pointer.
       let hovered = null;

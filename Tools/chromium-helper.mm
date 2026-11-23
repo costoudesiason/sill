@@ -6,6 +6,8 @@
 // which Sill's picture in picture uses: a video frame (RGBA bytes) and the
 // video's state go to Sill through shared memory, without a copy in between.
 #include <cstring>
+#include <map>
+#include <vector>
 #include "include/cef_app.h"
 #include "include/cef_sandbox_mac.h"
 #include "include/cef_shared_process_message_builder.h"
@@ -52,14 +54,57 @@ class PipFrame : public CefV8Handler {
   IMPLEMENT_REFCOUNTING(PipFrame);
 };
 
+// Sill's page script's messages (link hover, sign-in boxes, media…) to Sill:
+// one string of JSON, as WebKit's message handler took them.
+class Post : public CefV8Handler {
+ public:
+  bool Execute(const CefString&, CefRefPtr<CefV8Value>, const CefV8ValueList& args, CefRefPtr<CefV8Value>& ret,
+               CefString&) override {
+    ret = CefV8Value::CreateBool(false);
+    if (args.size() < 1 || !args[0]->IsString()) return true;
+    CefString text = args[0]->GetStringValue();
+    if (text.length() > 64 * 1024) return true;
+    CefRefPtr<CefProcessMessage> message = CefProcessMessage::Create("sill-msg");
+    message->GetArgumentList()->SetString(0, text);
+    CefV8Context::GetCurrentContext()->GetFrame()->SendProcessMessage(PID_BROWSER, message);
+    ret = CefV8Value::CreateBool(true);
+    return true;
+  }
+  IMPLEMENT_REFCOUNTING(Post);
+};
+
 class Renderer : public CefApp, public CefRenderProcessHandler {
  public:
   CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override { return this; }
-  void OnContextCreated(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, CefRefPtr<CefV8Context> context) override {
+
+  // Sill's page scripts come with each page as it's made.
+  void OnBrowserCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<CefDictionaryValue> extra) override {
+    if (!extra || !extra->HasKey("sill-scripts")) return;
+    CefRefPtr<CefListValue> list = extra->GetList("sill-scripts");
+    std::vector<CefString>& scripts = scripts_[browser->GetIdentifier()];
+    for (size_t i = 0; i < list->GetSize(); i++) scripts.push_back(list->GetString(i));
+  }
+  void OnBrowserDestroyed(CefRefPtr<CefBrowser> browser) override { scripts_.erase(browser->GetIdentifier()); }
+
+  void OnContextCreated(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefV8Context> context) override {
     if (!frame->IsMain()) return;
     context->GetGlobal()->SetValue("__sillPipFrame", CefV8Value::CreateFunction("__sillPipFrame", new PipFrame()),
                                    V8_PROPERTY_ATTRIBUTE_DONTENUM);
+    context->GetGlobal()->SetValue("__sillPost", CefV8Value::CreateFunction("__sillPost", new Post()),
+                                   static_cast<cef_v8_propertyattribute_t>(V8_PROPERTY_ATTRIBUTE_DONTENUM | V8_PROPERTY_ATTRIBUTE_READONLY |
+                                                                          V8_PROPERTY_ATTRIBUTE_DONTDELETE));
+    // Then Sill's own scripts, in the page's world, before any of the page's:
+    // web pages only (not Sill's own or an extension's), and each runs once a
+    // document (they check for themselves; extensions' worlds start here too).
+    std::string url = frame->GetURL().ToString();
+    bool web = url.rfind("http:", 0) == 0 || url.rfind("https:", 0) == 0 || url.rfind("file:", 0) == 0;
+    auto found = scripts_.find(browser->GetIdentifier());
+    if (!web || found == scripts_.end()) return;
+    for (const CefString& script : found->second) frame->ExecuteJavaScript(script, frame->GetURL(), 0);
   }
+
+ private:
+  std::map<int, std::vector<CefString>> scripts_;
   IMPLEMENT_REFCOUNTING(Renderer);
 };
 

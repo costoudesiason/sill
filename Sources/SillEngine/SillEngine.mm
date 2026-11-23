@@ -82,7 +82,17 @@ static NSHashTable<SEWebView*>* gViews;
 static int gOpenBrowsers = 0;
 static bool gQuitting = false;
 static CefRefPtr<CefRequestContext> gPrivateContext;
-static std::string gExtensions;  // folders of the extensions that come with Sill, comma separated
+static std::string gExtensions;
+// Sill's own page scripts, handed to every page's process as it's made
+// (Tools/chromium-helper.mm runs them as each document starts).
+static NSArray<NSString*>* gPageScripts = @[];
+static CefRefPtr<CefDictionaryValue> PageScriptsInfo() {
+  CefRefPtr<CefListValue> list = CefListValue::Create();
+  for (NSUInteger i = 0; i < gPageScripts.count; i++) list->SetString(i, gPageScripts[i].UTF8String);
+  CefRefPtr<CefDictionaryValue> info = CefDictionaryValue::Create();
+  info->SetList("sill-scripts", list);
+  return info;
+}  // folders of the extensions that come with Sill, comma separated
 
 // MARK: - Menu items
 
@@ -210,6 +220,12 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   };
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, CefProcessId,
                                 CefRefPtr<CefProcessMessage> message) override {
+    if (message->GetName() == "sill-msg") {
+      NSString* text = S(message->GetArgumentList()->GetString(0));
+      id<SEWebViewDelegate> d = view_.pageDelegate;
+      if (text && [d respondsToSelector:@selector(webView:message:)]) [d webView:view_ message:text];
+      return true;
+    }
     if (message->GetName() != "sill-pip") return false;
     CefRefPtr<CefSharedMemoryRegion> region = message->GetSharedMemoryRegion();
     if (!region || !region->IsValid() || region->Size() < sizeof(PipHeader)) return true;
@@ -371,7 +387,7 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   CefBrowserSettings settings;
   settings.background_color = CefColorSetARGB(255, 30, 30, 30);
   CefRefPtr<CefRequestContext> context = _isPrivate ? gPrivateContext : nullptr;
-  CefBrowserHost::CreateBrowser(info, client_, "", settings, nullptr, context);
+  CefBrowserHost::CreateBrowser(info, client_, "", settings, PageScriptsInfo(), context);
 }
 
 - (void)adoptBrowser:(CefRefPtr<CefBrowser>)browser {
@@ -385,6 +401,7 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   if (pendingHTML_) { [self loadHTML:pendingHTML_ forURL:pendingHTMLFor_]; pendingHTML_ = nil; }
   else if (pendingURL_) { [self loadURL:pendingURL_]; pendingURL_ = nil; }
 }
+
 
 - (void)browserClosed {
   browser_ = nullptr;
@@ -519,7 +536,7 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
 bool SEClient::OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int, const CefString& target_url,
                              const CefString&, WindowOpenDisposition disposition, bool,
                              const CefPopupFeatures& features, CefWindowInfo& info, CefRefPtr<CefClient>& client,
-                             CefBrowserSettings&, CefRefPtr<CefDictionaryValue>&, bool*) {
+                             CefBrowserSettings&, CefRefPtr<CefDictionaryValue>& extra, bool*) {
   id<SEWebViewDelegate> d = view_.pageDelegate;
   if (features.widthSet || features.heightSet || features.isPopup) {
     NSSize size = NSMakeSize(features.widthSet ? features.width : 520, features.heightSet ? features.height : 640);
@@ -528,6 +545,7 @@ bool SEClient::OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int, co
     info.SetAsChild((__bridge void*)popup, CefRect(0, 0, (int)popup.bounds.size.width, (int)popup.bounds.size.height));
     info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
     client = popup.client;
+    extra = PageScriptsInfo();
     return false;
   }
   NSURL* url = [NSURL URLWithString:S(target_url)];
@@ -624,6 +642,8 @@ static std::string InstallExtensions(NSString* profile) {
   }
   return folders;
 }
+
++ (void)setPageScripts:(NSArray<NSString*>*)scripts { gPageScripts = [scripts copy] ?: @[]; }
 
 + (BOOL)startWithProfile:(NSString*)profile {
   gLibrary = new CefScopedLibraryLoader();

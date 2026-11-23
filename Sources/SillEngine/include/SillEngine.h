@@ -12,6 +12,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Starting, running and stopping Chromium, once per launch.
 @interface SEEngine : NSObject
 /// Loads Chromium and starts it, keeping its profile in `profile`. NO if it can't.
+/// Scripts every page runs as each of its documents starts, before the page's
+/// own (http, https and file pages; main frame). Set before any page is made.
++ (void)setPageScripts:(NSArray<NSString *> *)scripts;
 + (BOOL)startWithProfile:(NSString *)profile;
 /// Runs `block` once Chromium is ready for pages (at once if it is).
 + (void)whenReady:(void (^)(void))block;
@@ -69,6 +72,8 @@ NS_ASSUME_NONNULL_BEGIN
            time:(double)time duration:(double)duration paused:(BOOL)paused;
 /// A key the page didn't take (⌘-shortcuts reach the menus this way).
 - (BOOL)webView:(SEWebView *)view unhandledKey:(NSEvent *)event;
+/// A message from Sill's page script (`__sillPost`), one string of JSON.
+- (void)webView:(SEWebView *)view message:(NSString *)json;
 @end
 
 /// A Chromium page in a view. Observable (KVO) as WKWebView's are: url,
