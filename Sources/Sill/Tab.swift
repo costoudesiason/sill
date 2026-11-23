@@ -66,6 +66,10 @@ final class Tab: NSObject {
     private var crashes: [Date] = []
     /// Its process died while it was out of sight: it reloads when shown.
     private var needsReload = false
+    /// The navigation that put Sill's own "can't open" page up, and whether
+    /// that page is what's showing: it is not a visit to remember.
+    private var errorNavigation: WKNavigation?
+    private var showingError = false
     /// The title last given to history, for which page: a page that keeps
     /// setting the same title doesn't touch history again.
     private var lastRetitled: (url: URL, title: String)?
@@ -157,7 +161,7 @@ final class Tab: NSObject {
                 MainActor.assumeIsolated {
                     guard let self, let title = view.title, !title.isEmpty || view.url != nil else { return }
                     self.title = title
-                    if !self.isPrivate, let url = view.url, self.lastRetitled?.url != url || self.lastRetitled?.title != title {
+                    if !self.isPrivate, !self.showingError, let url = view.url, self.lastRetitled?.url != url || self.lastRetitled?.title != title {
                         self.lastRetitled = (url, title)
                         History.shared.retitle(url, title)
                     }
@@ -377,8 +381,10 @@ extension Tab: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         scrolled(false)
         playingVideo = false
+        showingError = errorNavigation != nil && navigation === errorNavigation
+        errorNavigation = nil
         guard let url = webView.url else { return }
-        if !isPrivate { History.shared.record(url, title: webView.title, typed: typedNavigation) }
+        if !isPrivate, !showingError { History.shared.record(url, title: webView.title, typed: typedNavigation) }
         typedNavigation = false
         if favicon == nil || Favicons.shared.cached(for: url) == nil {
             favicon = Favicons.shared.cached(for: url)
@@ -407,7 +413,7 @@ extension Tab: WKNavigationDelegate {
         if error.code == NSURLErrorCancelled || (error.domain == "WebKitErrorDomain" && [102, 204].contains(error.code)) { return }
         guard let failed = (error.userInfo[NSURLErrorFailingURLErrorKey] as? URL) ?? url else { return }
         let html = ErrorPage.html(title: "Can’t open this page", detail: error.localizedDescription, url: failed)
-        webView.loadSimulatedRequest(URLRequest(url: failed), responseHTML: html)
+        errorNavigation = webView.loadSimulatedRequest(URLRequest(url: failed), responseHTML: html)
     }
 
     func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
@@ -431,7 +437,7 @@ extension Tab: WKNavigationDelegate {
             needsReload = false
             let html = ErrorPage.html(title: "This page keeps crashing",
                                       detail: "Its content process stopped twice in a minute, so Sill didn’t reload it again.", url: url)
-            webView.loadSimulatedRequest(URLRequest(url: url), responseHTML: html)
+            errorNavigation = webView.loadSimulatedRequest(URLRequest(url: url), responseHTML: html)
             return
         }
         if webView.window == nil { needsReload = true } else { webView.reload() }
