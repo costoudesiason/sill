@@ -11,6 +11,7 @@ WRAPPER="$HOME/sill-chromium/.cef/libcef_dll_wrapper.a"
 # wrapper Sill links against, built from it.
 ENGINE_TAG="engine-158.0.3-codecs"
 ENGINE_FILE="cef_binary_158.0.3+g8c29be2+chromium-158.0.8127.18_macosarm64_minimal.tar.bz2"
+ENGINE_SHA256="7a18cb9699e14a6f25a65d205eb8e290cdb035e9cb0a5910834100f27bc2d9a8"
 if [ ! -d "$CEF/Release/Chromium Embedded Framework.framework" ]; then
   echo "Fetching the engine ($ENGINE_TAG)"
   TMP="$(mktemp -d)"
@@ -19,9 +20,16 @@ if [ ! -d "$CEF/Release/Chromium Embedded Framework.framework" ]; then
      && ! { command -v gh >/dev/null && gh release download "$ENGINE_TAG" -R costoudesiason/sill -p "$ENGINE_FILE" -D "$TMP" --clobber; }; then
     rm -rf "$TMP"; echo "couldn't download $ENGINE_FILE (release $ENGINE_TAG)"; exit 1
   fi
-  rm -rf "$CEF" "$WRAPPER"
-  mkdir -p "$CEF"
-  tar -xjf "$TMP/$ENGINE_FILE" -C "$CEF" --strip-components=1
+  if [ "$(shasum -a 256 "$TMP/$ENGINE_FILE" | cut -d' ' -f1)" != "$ENGINE_SHA256" ]; then
+    rm -rf "$TMP"; echo "$ENGINE_FILE isn't the engine this build expects (checksum differs)"; exit 1
+  fi
+  # Unpacked beside its place and moved in whole, so a half-unpacked engine is never taken for one.
+  rm -rf "$CEF" "$CEF.part" "$WRAPPER"
+  mkdir -p "$CEF.part"
+  if ! tar -xjf "$TMP/$ENGINE_FILE" -C "$CEF.part" --strip-components=1; then
+    rm -rf "$TMP" "$CEF.part"; echo "couldn't unpack $ENGINE_FILE"; exit 1
+  fi
+  mv "$CEF.part" "$CEF"
   rm -rf "$TMP"
 fi
 if [ ! -f "$WRAPPER" ]; then
