@@ -664,13 +664,19 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// is already there. A short pause first, so passing letters don't load.
     func prerenderSoon(_ url: URL?) {
         prerenderTimer?.invalidate()
-        guard let url, paletteOpen, palette.mode == .newTab, !isPrivate, !WarmSite.handles(url) || !Preferences.shared.keepsClaudeReady,
-              let host = url.host() else { return }
-        // A site you haven't been to isn't loaded ahead, but the way there is
-        // opened (and to its www., where most bare names send you), so the
-        // lookup and handshake are done by Return. After the same pause.
-        guard History.shared.knows(host: host) else {
-            prerenderTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in
+        guard let url, paletteOpen, palette.mode != .tabs, !isPrivate, let host = url.host() else { return }
+        let newTab = palette.mode == .newTab
+        if newTab, WarmSite.handles(url), Preferences.shared.keepsClaudeReady { return }
+        // A site you haven't been to isn't loaded ahead, nor anything typed
+        // into the address field (⌘L), which replaces the page in front; but
+        // the way there is opened (and to its www., where most bare names
+        // send you), so the lookup and handshake are done by Return. After
+        // the same pause, or a longer one for a name that may be on its way
+        // to another: nytimes.co, typed on the way to nytimes.com.
+        guard newTab, History.shared.knows(host: host) else {
+            let last = host.split(separator: ".").last.map(String.init) ?? ""
+            let unfinished = ["com", "org", "net"].contains { $0.count > last.count && $0.hasPrefix(last) }
+            prerenderTimer = Timer.scheduledTimer(withTimeInterval: unfinished ? 0.4 : 0.08, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self, self.paletteOpen else { return }
                     self.expect(url)
