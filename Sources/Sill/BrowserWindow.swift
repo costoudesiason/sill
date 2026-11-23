@@ -477,7 +477,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     func select(_ tab: Tab, animated: Bool = false) {
         guard tabs.contains(where: { $0 === tab }) else { return }
-        if paletteOpen && selected !== tab { palette.close(animated: false) }
+        if paletteOpen && selected !== tab { palette.close(animated: false, focusPage: false) }
         madeFindBar?.close()
         let previous = selected
         hidePreview(animated: false)
@@ -703,9 +703,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         return key(a) == key(b)
     }
 
-    func paletteClosed() {
+    func paletteClosed(focusPage: Bool = true) {
         expected = []
-        if let webView = selected?.webView { window?.makeFirstResponder(webView) }
+        if focusPage, let webView = selected?.webView { window?.makeFirstResponder(webView) }
         // A spare nobody took (the palette was cancelled) gives its page back.
         // Later in the turn, so the Return that closed the palette can claim it.
         // One with no page stays: its process is the started one the next tab

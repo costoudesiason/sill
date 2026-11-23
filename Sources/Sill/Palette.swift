@@ -231,7 +231,10 @@ final class Palette: NSObject {
         layout(in: stage)
     }
 
-    func close(animated: Bool = true) {
+    /// `focusPage`: false when a page is about to be put in front and
+    /// focused anyway (a new tab, another tab): focusing the one being left
+    /// first woke its page for nothing.
+    func close(animated: Bool = true, focusPage: Bool = true) {
         guard isOpen else { return }
         isOpen = false
         suggestionTask?.cancel()
@@ -248,7 +251,7 @@ final class Palette: NSObject {
         } else {
             finish()
         }
-        browser?.paletteClosed()
+        browser?.paletteClosed(focusPage: focusPage)
     }
 
     private func appear() {
@@ -621,7 +624,7 @@ final class Palette: NSObject {
             })
         } else if let url {
             menu.addItem(ClosureMenuItem(title: "Open in New Tab") { [weak self] in
-                self?.close()
+                self?.close(focusPage: false)
                 browser.navigate(to: url, newTab: true, typed: true)
             })
             menu.addItem(ClosureMenuItem(title: "Open in Background Tab") { [weak self] in
@@ -683,7 +686,14 @@ final class Palette: NSObject {
         guard let browser else { return }
         let engine = Preferences.shared.engine
         let mode = self.mode
-        close()
+        // Whether another page comes to the front, and takes the keys itself.
+        let handsOff: Bool
+        switch item {
+        case .tab(let tab): handsOff = tab !== browser.selected
+        case .visit(let visit): handsOff = mode == .newTab && visit.address != nil
+        case .go, .search, .suggestion: handsOff = mode == .newTab
+        }
+        close(focusPage: !handsOff)
         switch item {
         case .tab(let tab):
             browser.select(tab)
