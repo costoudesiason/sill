@@ -206,7 +206,7 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
         // can't be given this name and then lose its file to this removal.
         naming.async {
             try? FileManager.default.removeItem(at: url)
-            promised.remove(url.path)
+            promised.remove(url.path.lowercased())
         }
     }
 
@@ -214,7 +214,8 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
     /// into Downloads can wait on the system asking for permission, and the
     /// window must not hang (or lose ⌘W) while it does.
     private nonisolated static let naming = DispatchQueue(label: "sill.downloads.naming", qos: .userInitiated)
-    /// Names given out to downloads that haven't written a byte yet.
+    /// Names given out to downloads that haven't written a byte yet, in
+    /// lower case: Downloads usually doesn't tell "A.pdf" from "a.pdf".
     private nonisolated(unsafe) static var promised: Set<String> = []
 
     /// A free name in Downloads, or nil if Sill isn't allowed in there.
@@ -226,11 +227,11 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
         let base = url.deletingPathExtension().lastPathComponent
         let ext = url.pathExtension
         var n = 2
-        while files.fileExists(atPath: url.path) || promised.contains(url.path) {
+        while files.fileExists(atPath: url.path) || promised.contains(url.path.lowercased()) {
             url = folder.appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)")
             n += 1
         }
-        promised.insert(url.path)
+        promised.insert(url.path.lowercased())
         return url
     }
 
@@ -259,7 +260,7 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
                         item.name = url.lastPathComponent
                         item.url = url
                         // Cancelled while its name was being picked.
-                        if item.failed { Self.naming.async { Self.promised.remove(url.path) }; return completionHandler(nil) }
+                        if item.failed { Self.naming.async { Self.promised.remove(url.path.lowercased()) }; return completionHandler(nil) }
                     }
                     completionHandler(url)
                     browser?.toast("Downloading “\(url.lastPathComponent)”")
@@ -275,7 +276,7 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
     }
 
     private func settled(_ item: DownloadItem?, freesName: Bool = true) {
-        if freesName, let path = item?.url?.path { Self.naming.async { Self.promised.remove(path) } }
+        if freesName, let path = item?.url?.path { Self.naming.async { Self.promised.remove(path.lowercased()) } }
         if let item, item.isPrivate, !AppDelegate.shared.browsers.contains(where: { $0.isPrivate }) {
             items.removeAll { $0 === item }
         }
