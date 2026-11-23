@@ -673,6 +673,12 @@ extension Tab: SEWebViewDelegate {
         (host?.window?.windowController as? BrowserWindowController)?.toast("Downloaded “\(file.lastPathComponent)”")
     }
 
+    /// A frame of its video for picture in picture.
+    func webView(_ view: SEWebView, videoFrame rgba: UnsafeRawPointer?, width: Int, height: Int,
+                 time: Double, duration: Double, paused: Bool) {
+        PictureInPicture.frame(from: self, rgba: rgba, width: width, height: height, time: time, duration: duration, paused: paused)
+    }
+
     /// A shortcut the page didn't use goes to the menus.
     func webView(_ view: SEWebView, unhandledKey event: NSEvent) -> Bool {
         guard event.modifierFlags.contains(.command) else { return false }

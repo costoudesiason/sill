@@ -190,6 +190,27 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
       return ![d webView:view_ shouldLoad:url userGesture:gesture];
     return false;
   }
+  // Picture in picture: frames from the page's process (Tools/chromium-helper.mm).
+  struct PipHeader {
+    uint32_t width, height;
+    double time, duration;
+    uint32_t paused, reserved;
+  };
+  bool OnProcessMessageReceived(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, CefProcessId,
+                                CefRefPtr<CefProcessMessage> message) override {
+    if (message->GetName() != "sill-pip") return false;
+    CefRefPtr<CefSharedMemoryRegion> region = message->GetSharedMemoryRegion();
+    if (!region || !region->IsValid() || region->Size() < sizeof(PipHeader)) return true;
+    auto* header = static_cast<const PipHeader*>(region->Memory());
+    size_t pixels = (size_t)header->width * header->height * 4;
+    bool frame = pixels && region->Size() >= sizeof(PipHeader) + pixels;
+    id<SEWebViewDelegate> d = view_.pageDelegate;
+    if ([d respondsToSelector:@selector(webView:videoFrame:width:height:time:duration:paused:)])
+      [d webView:view_ videoFrame:frame ? (header + 1) : nullptr width:frame ? header->width : 0
+          height:frame ? header->height : 0 time:header->time duration:header->duration paused:header->paused];
+    return true;
+  }
+
   // ⌘-click, middle-click: a tab of its own.
   bool OnOpenURLFromTab(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, const CefString& target_url,
                         WindowOpenDisposition disposition, bool) override {
@@ -411,7 +432,8 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   params->SetString("expression", script.UTF8String);
   params->SetBool("returnByValue", true);
   params->SetBool("awaitPromise", true);
-  params->SetBool("userGesture", false);
+  // As if clicked: Sill's own scripts (picture in picture's play button) may start media.
+  params->SetBool("userGesture", true);
   client_->devtools(browser_, "Runtime.evaluate", params, ^(BOOL ok, NSDictionary* json) {
     if (!completion) return;
     NSDictionary* result = json[@"result"];

@@ -534,7 +534,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
                     if previous === self.selected { PictureInPicture.return(to: previous) } else { self.pictured = previous }
                 }
                 guard let old, old !== self.selected?.webView else { return }
-                if old.superview === self.pageHost, let page = old as? SillWebView { page.park() } else { old.removeFromSuperview() }
+                // Floating: it stays in the window, drawn, under the page in front.
+                if floated, old.superview === self.pageHost {
+                    self.pageHost.addSubview(old, positioned: .below, relativeTo: nil)
+                } else if old.superview === self.pageHost { old.park() } else { old.removeFromSuperview() }
             }
         }
         selected = tab
@@ -608,6 +611,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // Its sound and video go with it, floating or not: nothing keeps
         // playing from a tab that's gone.
         if pictured === tab { pictured = nil }
+        PictureInPicture.return(to: tab)
         Self.silence(tab)
         Web.releaseIdleProcesses(soon: false)
         if tabs.isEmpty {
@@ -803,6 +807,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     // MARK: - Window
 
     /// WebKit knows whether a page is making sound; it just doesn't say so publicly.
+    /// Its video's picture in picture closed: back in front, or put aside.
+    func floatEnded(_ tab: Tab) {
+        if pictured === tab { pictured = nil }
+        guard let view = tab.webView, tab !== selected, split?.contains(tab) != true else { return }
+        if view.superview === pageHost { view.park() }
+    }
+
     private static func isPlayingAudio(_ webView: SillWebView) -> Bool {
         let key = "_isPlayingAudio"
         guard webView.responds(to: NSSelectorFromString(key)) else { return true }

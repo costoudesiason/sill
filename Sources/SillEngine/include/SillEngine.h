@@ -62,6 +62,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// A file the page is downloading: where it goes is decided here.
 - (nullable NSURL *)webView:(SEWebView *)view downloadNamed:(NSString *)name;
 - (void)webView:(SEWebView *)view download:(NSURL *)file progress:(double)progress done:(BOOL)done;
+/// A video frame for picture in picture, as the page sent it (RGBA, 4 bytes
+/// a pixel, rows packed), with the video's state; `rgba` is NULL (and the
+/// size 0) when only the state changed. Valid only during the call.
+- (void)webView:(SEWebView *)view videoFrame:(const void *_Nullable)rgba width:(NSInteger)width height:(NSInteger)height
+           time:(double)time duration:(double)duration paused:(BOOL)paused;
 /// A key the page didn't take (⌘-shortcuts reach the menus this way).
 - (BOOL)webView:(SEWebView *)view unhandledKey:(NSEvent *)event;
 @end

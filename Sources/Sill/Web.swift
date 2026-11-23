@@ -224,7 +224,7 @@ final class SillWebView: SEWebView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        pageHidden = !isShown
+        pageHidden = !isShown && !floating
         if isShown { tab?.pageShown() }
     }
     override func viewDidUnhide() {
@@ -234,7 +234,7 @@ final class SillWebView: SEWebView {
     }
     override func viewDidHide() {
         super.viewDidHide()
-        pageHidden = true
+        pageHidden = !floating
     }
 
     /// The page being left stays over the one coming in until that has drawn;
@@ -248,8 +248,21 @@ final class SillWebView: SEWebView {
 
     var isShown: Bool { window != nil && !isHidden }
 
+    /// Its video is in picture in picture: it stays in the window, drawn,
+    /// under the page in front, so Chromium keeps decoding it.
+    var floating = false {
+        didSet {
+            if floating { isHidden = false; autoresizingMask = [.width, .height] }
+            pageHidden = !floating && !isShown
+        }
+    }
+
     /// Put aside where it is, hidden: Chromium stops drawing it.
     func park() {
+        if floating {
+            superview?.addSubview(self, positioned: .below, relativeTo: nil)
+            return
+        }
         guard !isHidden else { return }
         isHidden = true
         outgoing = false
@@ -768,65 +781,304 @@ final class Favicons {
 /// site (an iframe) doesn't float by itself; youtube.com, Netflix and Twitch
 /// play theirs in the main frame.
 @MainActor
+/// Picture in picture on Chromium, in Apple's own floating window.
+///
+/// Chromium can't hand its video to AVKit, so the page sends it: a small
+/// script draws each new frame of the video (scaled to at most 960 wide, on
+/// the GPU) and passes the pixels to Sill's page-process function, which
+/// puts them in shared memory for Sill (Tools/chromium-helper.mm). Here they
+/// become sample buffers for AVKit's sample-buffer picture in picture, whose
+/// play/pause, skip and return buttons drive the video in the page. The
+/// page stays in the window, under the one in front, so Chromium keeps
+/// decoding it. A video another site serves without letting pages read it,
+/// or one under DRM, can't be drawn, and doesn't float.
 enum PictureInPicture {
-    /// Lets pages in `preferences` use picture in picture, as Safari does.
-    /// Always on: the setting only decides whether Sill floats a video by
-    /// itself, and pages' own PiP buttons work either way.
-    static func allow(_ preferences: WKPreferences) {
-        let set = NSSelectorFromString("_setAllowsPictureInPictureMediaPlayback:")
-        guard preferences.responds(to: set) else { return }
-        typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
-        unsafeBitCast(preferences.method(for: set), to: Setter.self)(preferences, set, true)
-    }
+    static func allow(_ preferences: WKPreferences) {}
 
-    /// The largest video playing, into picture in picture. Answers "in",
-    /// "none" (nothing playing) or "refused".
-    private static let enter = """
-    (function () {
-      var videos = document.querySelectorAll('video'), best = null, area = 0;
-      for (var i = 0; i < videos.length; i++) {
-        var v = videos[i];
-        if (v.webkitPresentationMode === 'picture-in-picture') return 'in';
+    /// The largest video playing, pumped to Sill. "in", or "none".
+    fileprivate static let pump = """
+    (() => {
+      if (window.__sillPip && window.__sillPip.on) return 'in';
+      if (typeof __sillPipFrame !== 'function') return 'none';
+      let best = null, area = 0;
+      for (const v of document.querySelectorAll('video')) {
         if (v.paused || v.ended || v.readyState < 2 || v.muted || v.volume === 0) continue;
-        var box = v.getBoundingClientRect();
-        // A real video, not a muted preview or a background loop.
-        if (box.width < 200 || box.height < 112) continue;
-        if (box.width * box.height >= area) { area = box.width * box.height; best = v; }
+        const b = v.getBoundingClientRect();
+        if (b.width < 200 || b.height < 112) continue;
+        if (b.width * b.height >= area) { area = b.width * b.height; best = v; }
       }
       if (!best) return 'none';
-      if (!best.webkitSupportsPresentationMode || !best.webkitSupportsPresentationMode('picture-in-picture')) return 'refused';
-      try { best.webkitSetPresentationMode('picture-in-picture'); return 'in'; } catch (e) { return 'refused'; }
-    })();
+      const v = best, pip = { on: true, v };
+      let W = 0, H = 0, canvas = null, ctx = null;
+      const state = () => [v.currentTime || 0, isFinite(v.duration) ? v.duration : 0, v.paused];
+      const send = () => {
+        if (!pip.on) return;
+        const w = v.videoWidth, h = v.videoHeight;
+        if (!w || !h) return;
+        const scale = Math.min(1, 960 / w);
+        const nw = Math.max(2, Math.round(w * scale) & ~1), nh = Math.max(2, Math.round(h * scale) & ~1);
+        if (nw !== W || nh !== H) { W = nw; H = nh; canvas = new OffscreenCanvas(W, H); ctx = canvas.getContext('2d', { willReadFrequently: true, alpha: false }); }
+        try {
+          ctx.drawImage(v, 0, 0, W, H);
+          __sillPipFrame(ctx.getImageData(0, 0, W, H).data.buffer, W, H, ...state());
+        } catch (e) { pip.on = false; __sillPipFrame(null, 0, 0, 0, 0, true); }
+      };
+      const each = () => { if (!pip.on) return; send(); v.requestVideoFrameCallback(each); };
+      v.requestVideoFrameCallback(each);
+      send();
+      // Paused, no frames come: the state still does, twice a second.
+      pip.beat = setInterval(() => { if (pip.on && v.paused) __sillPipFrame(null, 0, 0, ...state()); }, 500);
+      pip.stop = () => { pip.on = false; clearInterval(pip.beat); };
+      window.__sillPip = pip;
+      return 'in';
+    })()
     """
 
-    /// Back into the page, whatever is floating from it.
-    private static let exit = """
-    (function () {
-      var videos = document.querySelectorAll('video'), out = false;
-      for (var i = 0; i < videos.length; i++) {
-        if (videos[i].webkitPresentationMode === 'picture-in-picture') {
-          try { videos[i].webkitSetPresentationMode('inline'); out = true; } catch (e) {}
-        }
-      }
-      return out ? 'out' : 'none';
-    })();
-    """
+    fileprivate static let stopPump = "(() => { const p = window.__sillPip; if (p) { p.stop(); window.__sillPip = null; } })()"
 
-    /// `done(true)` runs once the video has floated (after the window
-    /// animation), `done(false)` straight away when nothing did.
+    /// `done(true)` once the video floats, `done(false)` at once when nothing could.
     static func leave(_ tab: Tab, done: @escaping (Bool) -> Void) {
-        // A video in full screen is already where it wants to be.
-        guard let webView = tab.webView, webView.fullscreenState == .notInFullscreen else { return done(false) }
-        webView.evaluateJavaScript(enter, in: nil, in: Web.world) { result in
-            if (try? result.get()) as? String == "in" {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { done(true) }
-            } else {
-                done(false)
+        guard let webView = tab.webView, let window = tab.host?.window else { return done(false) }
+        webView.evaluateJavaScript(pump, completion: { value, _ in
+            MainActor.assumeIsolated {
+                guard (value as? String) == "in" else { return done(false) }
+                Floating.shared.start(tab, in: window, done: done)
             }
+        })
+    }
+
+    /// Back into the page: the floating window closes.
+    static func `return`(to tab: Tab) {
+        Floating.shared.stop(tab)
+    }
+
+    static func frame(from tab: Tab, rgba: UnsafeRawPointer?, width: Int, height: Int, time: Double, duration: Double, paused: Bool) {
+        Floating.shared.frame(from: tab, rgba: rgba, width: width, height: height, paused: paused)
+    }
+}
+
+import AVKit
+import Accelerate
+import CoreMedia
+
+/// The one video floating, and AVKit's window for it.
+@MainActor
+final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureInPictureSampleBufferPlaybackDelegate {
+    static let shared = Floating()
+
+    private(set) weak var tab: Tab?
+    private var holder: NSView?
+    private var layer: AVSampleBufferDisplayLayer?
+    private var controller: AVPictureInPictureController?
+    private var possible: NSKeyValueObservation?
+    private var started: ((Bool) -> Void)?
+    private var pool: CVPixelBufferPool?
+    private var poolSize = (0, 0)
+    private var format: CMVideoFormatDescription?
+    private var paused = false
+    private var frames = 0
+
+    var isFloating: Bool { controller?.isPictureInPictureActive == true }
+
+    func start(_ tab: Tab, in window: NSWindow, done: @escaping (Bool) -> Void) {
+        stop(nil)
+        self.tab = tab
+        started = done
+        frames = 0
+        // The layer AVKit takes the frames from: video-sized, in the window,
+        // behind everything (AVKit draws the window from it; at a couple of
+        // pixels square, it showed black).
+        let holder = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 270))
+        holder.wantsLayer = true
+        let layer = AVSampleBufferDisplayLayer()
+        layer.frame = holder.bounds
+        layer.videoGravity = .resizeAspect
+        layer.preventsDisplaySleepDuringVideoPlayback = true
+        // Its own clock, running on the Mac's, as Apple's samples set one up.
+        var timebase: CMTimebase?
+        CMTimebaseCreateWithSourceClock(allocator: nil, sourceClock: CMClockGetHostTimeClock(), timebaseOut: &timebase)
+        if let timebase {
+            CMTimebaseSetTime(timebase, time: CMClockGetTime(CMClockGetHostTimeClock()))
+            CMTimebaseSetRate(timebase, rate: 1)
+            layer.controlTimebase = timebase
+        }
+        holder.layer?.addSublayer(layer)
+        window.contentView?.addSubview(holder, positioned: .below, relativeTo: nil)
+        self.holder = holder
+        self.layer = layer
+        let controller = AVPictureInPictureController(contentSource: .init(sampleBufferDisplayLayer: layer, playbackDelegate: self))
+        controller.delegate = self
+        self.controller = controller
+        (tab.webView)?.floating = true
+        // Floats once AVKit has frames to size its window by (started with
+        // none, it works its size out as NaN and AppKit stops the app); if
+        // it never can, the page is let go.
+        possible = controller.observe(\.isPictureInPicturePossible, options: [.new]) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.startWhenReady() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, weak tab] in
+            guard let self, let tab, self.tab === tab, self.started != nil, !self.isFloating else { return }
+            self.finish(false)
+            self.stop(tab)
         }
     }
 
-    static func `return`(to tab: Tab) {
-        tab.webView?.evaluateJavaScript(exit, in: nil, in: Web.world) { _ in }
+    private func finish(_ floated: Bool) {
+        guard let started else { return }
+        self.started = nil
+        started(floated)
+    }
+
+    /// Ends it for `tab` (nil: whatever is floating).
+    func stop(_ tab: Tab?) {
+        guard self.tab != nil, tab == nil || tab === self.tab else { return }
+        let was = self.tab
+        if controller?.isPictureInPictureActive == true { controller?.stopPictureInPicture() }
+        cleanUp(was)
+    }
+
+    private func cleanUp(_ was: Tab?) {
+        possible = nil
+        controller?.delegate = nil
+        controller = nil
+        layer?.sampleBufferRenderer.flush()
+        holder?.removeFromSuperview()
+        holder = nil
+        layer = nil
+        tab = nil
+        pool = nil
+        format = nil
+        finish(false)
+        guard let was, let view = was.webView else { return }
+        view.evaluateJavaScript(PictureInPicture.stopPump, completion: nil)
+        view.floating = false
+        (was.host as? BrowserWindowController)?.floatEnded(was)
+    }
+
+    func frame(from tab: Tab, rgba: UnsafeRawPointer?, width: Int, height: Int, paused: Bool) {
+        guard tab === self.tab, let layer else { return }
+        if paused != self.paused {
+            self.paused = paused
+            controller?.invalidatePlaybackState()
+        }
+        guard let rgba, width > 0, height > 0, let buffer = pixelBuffer(width, height) else { return }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        if let base = CVPixelBufferGetBaseAddress(buffer) {
+            var source = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: rgba), height: vImagePixelCount(height),
+                                       width: vImagePixelCount(width), rowBytes: width * 4)
+            var target = vImage_Buffer(data: base, height: vImagePixelCount(height), width: vImagePixelCount(width),
+                                       rowBytes: CVPixelBufferGetBytesPerRow(buffer))
+            // RGBA → BGRA
+            let map: [UInt8] = [2, 1, 0, 3]
+            vImagePermuteChannels_ARGB8888(&source, &target, map, vImage_Flags(kvImageNoFlags))
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        if format == nil || CMVideoFormatDescriptionGetDimensions(format!).width != Int32(width)
+            || CMVideoFormatDescriptionGetDimensions(format!).height != Int32(height) {
+            var made: CMVideoFormatDescription?
+            CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: buffer, formatDescriptionOut: &made)
+            format = made
+        }
+        guard let format else { return }
+        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+                                        decodeTimeStamp: .invalid)
+        var sample: CMSampleBuffer?
+        CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: buffer, formatDescription: format,
+                                                 sampleTiming: &timing, sampleBufferOut: &sample)
+        guard let sample else { return }
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true), CFArrayGetCount(attachments) > 0 {
+            let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+            CFDictionarySetValue(dictionary, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+        }
+        let renderer = layer.sampleBufferRenderer
+        if renderer.status == .failed { renderer.flush() }
+        renderer.enqueue(sample)
+        frames += 1
+        if frames == 3 { startWhenReady() }
+    }
+
+    private func startWhenReady() {
+        guard let controller, started != nil, frames >= 3, controller.isPictureInPicturePossible,
+              !controller.isPictureInPictureActive else { return }
+        controller.startPictureInPicture()
+    }
+
+    private func pixelBuffer(_ width: Int, _ height: Int) -> CVPixelBuffer? {
+        if pool == nil || poolSize != (width, height) {
+            let attributes: [String: Any] = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                                             kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
+                                             kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
+            var made: CVPixelBufferPool?
+            CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &made)
+            pool = made
+            poolSize = (width, height)
+        }
+        guard let pool else { return nil }
+        var buffer: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer)
+        return buffer
+    }
+
+    private func run(_ script: String) {
+        tab?.webView?.evaluateJavaScript("(() => { const p = window.__sillPip; if (!p) return; const v = p.v; \(script) })()", completion: nil)
+    }
+
+    // MARK: AVKit's window
+
+    nonisolated func pictureInPictureControllerDidStartPictureInPicture(_ controller: AVPictureInPictureController) {
+        MainActor.assumeIsolated { finish(true) }
+    }
+
+    nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController,
+                                                failedToStartPictureInPictureWithError error: Error) {
+        MainActor.assumeIsolated {
+            let was = tab
+            cleanUp(was)
+        }
+    }
+
+    /// The return button: the tab comes back to the front, then the window closes.
+    nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController,
+                                                restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
+        MainActor.assumeIsolated {
+            if let tab { tab.host?.bringBack(tab) }
+            completionHandler(true)
+        }
+    }
+
+    nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
+        MainActor.assumeIsolated {
+            guard controller === self.controller else { return }
+            cleanUp(tab)
+        }
+    }
+
+    // MARK: its buttons, on the video in the page
+
+    nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController, setPlaying playing: Bool) {
+        MainActor.assumeIsolated {
+            paused = !playing
+            run(playing ? "v.play();" : "v.pause();")
+        }
+    }
+
+    nonisolated func pictureInPictureControllerTimeRangeForPlayback(_ controller: AVPictureInPictureController) -> CMTimeRange {
+        CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
+    }
+
+    nonisolated func pictureInPictureControllerIsPlaybackPaused(_ controller: AVPictureInPictureController) -> Bool {
+        MainActor.assumeIsolated { paused }
+    }
+
+    nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController,
+                                                didTransitionToRenderSize newRenderSize: CMVideoDimensions) {}
+
+    nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController, skipByInterval interval: CMTime,
+                                                completion completionHandler: @escaping () -> Void) {
+        MainActor.assumeIsolated {
+            run("v.currentTime = Math.max(0, v.currentTime + \(interval.seconds));")
+            completionHandler()
+        }
     }
 }
