@@ -19,6 +19,9 @@ protocol TabHost: AnyObject {
     func focused(_ tab: Tab, field: LoginField)
     /// The question its page has for you changed (Permissions.swift).
     func promptsChanged(_ tab: Tab)
+    /// Whether its page is the one in front, or one half of the split in
+    /// front. Not the same as its view being in the window.
+    func isInFront(_ tab: Tab) -> Bool
 }
 
 /// One page and its history. Its web view is made the first time it is
@@ -317,7 +320,7 @@ final class Tab: NSObject {
         guard let webView, url != nil else { return }
         let check = "(function(){ var b = document.body; var r = b || document.documentElement; return location.href === 'about:blank' || !r || (r.childElementCount === 0 && !r.textContent.trim()); })()"
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self, weak webView] in
-            guard let self, let webView, self.webView === webView, webView.isShown, !webView.isLoading else { return }
+            guard let self, let webView, self.webView === webView, (webView as? SillWebView)?.isShown == true, !webView.isLoading else { return }
             webView.evaluateJavaScript(check, in: nil, in: Web.world) { [weak self, weak webView] result in
                 guard let self, let webView, self.webView === webView, !webView.isLoading,
                       (try? result.get()) as? Bool == true, let target = webView.url.flatMap({ $0.scheme == "about" ? nil : $0 }) ?? self.url
@@ -801,11 +804,12 @@ extension Tab: WKUIDelegate {
     @objc(_webView:runBeforeUnloadConfirmPanelWithMessage:initiatedByFrame:completionHandler:)
     func webView(_ webView: WKWebView, runBeforeUnloadConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
-        let shown = (webView as? SillWebView)?.isShown == true
-        guard shown || closing != nil else { return completionHandler(true) }
+        // A page out of sight (parked: hidden, still in the window) isn't
+        // asked unless its tab, window or Sill is closing.
+        guard (webView as? SillWebView)?.isShown == true || closing != nil else { return completionHandler(true) }
         // Asked because its tab, window or Sill is closing: a tab behind
         // another comes to the front, so it is plain which page is meant.
-        if closing != nil, !shown { host?.bringBack(self) }
+        if closing != nil, host?.isInFront(self) != true { host?.bringBack(self) }
         Prompts.leave(closing: closing == nil ? nil : displayTitle, in: host?.window) { [weak self] leave in
             if !leave, let closing = self?.closing {
                 self?.closing = nil

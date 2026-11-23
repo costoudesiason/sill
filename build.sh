@@ -8,7 +8,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-swift build -c release --arch arm64 2>&1 | grep -E "error|warning: unre|Compiling|Build complete" || true
+# A failed compile stops here: the binary left from the last build must not
+# be packaged as if it were this one.
+if ! swift build -c release --arch arm64 > build.log 2>&1; then
+    grep -E "error" build.log | head -20
+    echo "build failed"; exit 1
+fi
+grep -E "warning: unre" build.log || true
 BIN="$(swift build -c release --arch arm64 --show-bin-path)/Sill"
 [ -x "$BIN" ] || { echo "build failed"; exit 1; }
 
