@@ -8,7 +8,7 @@ import SwiftUI
 /// chosen row is a fill.
 @MainActor
 final class Palette: NSObject {
-    enum Mode { case newTab, address, tabs }
+    enum Mode { case newTab, address, tabs, history }
 
     enum Item {
         case go(URL)
@@ -181,13 +181,14 @@ final class Palette: NSObject {
         if showingSettings { showSettings(false, animated: false) }
         let initial: String
         switch mode {
-        case .newTab, .tabs: initial = ""
+        case .newTab, .tabs, .history: initial = ""
         case .address:
             let url = browser.selected?.url
             initial = Preferences.shared.engine.query(in: url) ?? (url.map { $0.absoluteString } ?? "")
         }
         field.placeholderAttributedString = NSAttributedString(
-            string: mode == .tabs ? "Search tabs" : mode == .newTab ? "Search or enter website" : "Search or enter address",
+            string: mode == .tabs ? "Search tabs" : mode == .history ? "Search history"
+                : mode == .newTab ? "Search or enter website" : "Search or enter address",
             attributes: [.foregroundColor: Ink.current.tertiary, .font: field.font!])
         field.stringValue = initial
         typed = initial
@@ -304,7 +305,20 @@ final class Palette: NSObject {
         var rows: [Row] = []
         let others = browser.tabs.filter { $0 !== browser.selected && !$0.isBlank }
 
-        if mode == .tabs {
+        if mode == .history {
+            // ⌘Y: everything visited, newest first, under the day it was
+            // last seen; typing narrows it to what matches.
+            let visits = text.isEmpty
+                ? History.shared.recent(limit: 400)
+                : History.shared.search(text, limit: 300).sorted { $0.last > $1.last }
+            var day: String?
+            for visit in visits {
+                let heading = Self.dayHeading(visit.last)
+                if heading != day { rows.append(.header(heading)); day = heading }
+                rows.append(.item(.visit(visit)))
+            }
+            if visits.isEmpty { rows.append(.header(text.isEmpty ? "No history yet" : "Nothing in history matches")) }
+        } else if mode == .tabs {
             // Every open tab, this one too, in strip order.
             let lowered = text.lowercased()
             let matching = browser.tabs.filter {
@@ -443,9 +457,20 @@ final class Palette: NSObject {
         select(selectable[next])
     }
 
+    /// Today, Yesterday, a weekday this week, else the date.
+    private static func dayHeading(_ date: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) { return "Today" }
+        if calendar.isDateInYesterday(date) { return "Yesterday" }
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: calendar.startOfDay(for: Date())).day ?? 99
+        if days < 7 { return date.formatted(.dateTime.weekday(.wide)) }
+        let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: Date())
+        return sameYear ? date.formatted(.dateTime.day().month(.wide)) : date.formatted(.dateTime.day().month(.wide).year())
+    }
+
     private func updateFooter() {
         let row = table.selectedRow
-        var text = mode == .newTab ? "Open in New Tab" : "Open"
+        var text = mode == .newTab || mode == .history ? "Open in New Tab" : "Open"
         if row >= 0, row < rows.count, let item = rows[row].item {
             switch item {
             case .tab: text = "Switch to Tab"
@@ -625,6 +650,13 @@ final class Palette: NSObject {
                 self?.rebuild()
             })
         }
+        if mode == .history {
+            menu.addItem(.separator())
+            menu.addItem(ClosureMenuItem(title: "Clear History…") { [weak self] in
+                AppDelegate.shared.clearHistory(nil)
+                self?.rebuild()
+            })
+        }
         // Raycast's way: a glass menu rising from the Actions pill, right-aligned.
         guard let window = pill.window else { return }
         let anchor = pill.convert(pill.actionsAnchor, to: nil)
@@ -632,6 +664,7 @@ final class Palette: NSObject {
             "Switch to Tab": "arrow.right.square", "Close Tab": "xmark.square",
             "Open in New Tab": "plus.square.on.square", "Open in Background Tab": "square.stack",
             "Open Here": "arrow.turn.down.right", "Copy Link": "link", "Remove from History": "trash",
+            "Clear History…": "clock.arrow.circlepath",
         ], keys: ["Open in New Tab": ["↩"], "Switch to Tab": ["↩"], "Copy Link": ["⇧", "⌘", "C"]])
         let title: String
         switch item {
@@ -670,7 +703,7 @@ final class Palette: NSObject {
         case .go(let url):
             browser.navigate(to: url, newTab: mode == .newTab, typed: true)
         case .visit(let visit):
-            if let url = visit.address { browser.navigate(to: url, newTab: mode == .newTab, typed: true) }
+            if let url = visit.address { browser.navigate(to: url, newTab: mode == .newTab || mode == .history, typed: true) }
         case .search(let q), .suggestion(let q):
             browser.navigate(to: engine.search(q), newTab: mode == .newTab, typed: false)
         }

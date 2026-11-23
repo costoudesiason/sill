@@ -337,7 +337,7 @@ enum MainMenu {
             item("Back", #selector(BrowserWindowController.goBack(_:)), "["),
             item("Forward", #selector(BrowserWindowController.goForward(_:)), "]"),
             .separator(),
-            item("Search History…", #selector(AppDelegate.openLocation(_:)), "y", target: app),
+            item("Show History", #selector(BrowserWindowController.showHistory(_:)), "y"),
         ]))
 
         var tabItems: [NSMenuItem] = [

@@ -319,6 +319,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         showPalette(.tabs)
     }
 
+    /// ⌘Y: history, searchable, in the palette.
+    @objc func showHistory(_ sender: Any?) {
+        showPalette(.history)
+    }
+
     private func updateNavigation() {
         bar.back.isEnabled = selected?.canGoBack ?? false
         bar.forward.isEnabled = selected?.canGoForward ?? false
@@ -560,7 +565,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     func showPalette(_ mode: Palette.Mode) {
         hidePreview(animated: false)
-        if paletteOpen && palette.mode == mode && mode == .newTab { palette.close(); return }
+        if paletteOpen && palette.mode == mode && (mode == .newTab || mode == .history) { palette.close(); return }
         status.show(nil)
         endPeek()
         palette.open(mode, in: stage)
