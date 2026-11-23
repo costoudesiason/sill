@@ -337,8 +337,15 @@ enum PageScripts {
         }, 60);
       };
       document.addEventListener('leavepictureinpicture', left, true);
+      // Only a video that was floating has come back: the same event tells
+      // of one going full screen, and bringing its tab back then takes the
+      // page out of the full-screen window, leaving it black.
+      const floated = new WeakSet();
       document.addEventListener('webkitpresentationmodechanged', (e) => {
-        if (e.target instanceof HTMLVideoElement && e.target.webkitPresentationMode !== 'picture-in-picture') left(e);
+        const v = e.target;
+        if (!(v instanceof HTMLVideoElement)) return;
+        if (v.webkitPresentationMode === 'picture-in-picture') floated.add(v);
+        else if (floated.delete(v)) left(e);
       }, true);
 
       // The page's icon: the one nearest 64 px, an SVG, or /favicon.ico.
