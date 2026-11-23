@@ -552,9 +552,22 @@ final class TabItemView: NSView {
             let start = max(0, (label.frame.width - 18) / label.frame.width)
             fade.locations = [0, NSNumber(value: start), 1]
             label.layer?.mask = fade
+            // A mask is an offscreen pass each time the row is drawn; kept
+            // as a bitmap, a title that hasn't changed is drawn from that
+            // while the row slides about. At the screen's scale, or it blurs.
+            label.layer?.shouldRasterize = true
+            label.layer?.rasterizationScale = window?.backingScaleFactor ?? 2
             CATransaction.commit()
-        } else {
+        } else if label.layer?.mask != nil {
             label.layer?.mask = nil
+            label.layer?.shouldRasterize = false
+        }
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        if let scale = window?.backingScaleFactor, label.layer?.shouldRasterize == true {
+            label.layer?.rasterizationScale = scale
         }
     }
 
