@@ -48,6 +48,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticTermination</key><false/>
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict>
   <key>NSCameraUsageDescription</key><string>A website you're on wants to use the camera.</string>
   <key>NSMicrophoneUsageDescription</key><string>A website you're on wants to use the microphone.</string>
   <key>NSLocationUsageDescription</key><string>A website you're on wants to know where you are.</string>

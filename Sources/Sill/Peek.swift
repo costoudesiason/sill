@@ -25,6 +25,7 @@ final class Peek: NSView, WKNavigationDelegate, WKUIDelegate {
     private var titleWatch: NSKeyValueObservation?
     private var waiting: DispatchWorkItem?
     private(set) var link: URL?
+    private var isPrivate = false
 
     init() {
         super.init(frame: NSRect(origin: .zero, size: Self.size))
@@ -78,6 +79,7 @@ final class Peek: NSView, WKNavigationDelegate, WKUIDelegate {
     }
 
     private func open(_ url: URL, by point: NSPoint, in stage: NSView, below top: CGFloat, private isPrivate: Bool) {
+        self.isPrivate = isPrivate
         let configuration = Web.configuration(private: isPrivate)
         configuration.websiteDataStore = .nonPersistent()
         // A look makes no sound.
@@ -138,6 +140,10 @@ final class Peek: NSView, WKNavigationDelegate, WKUIDelegate {
         let scheme = action.request.url?.scheme?.lowercased() ?? ""
         if action.shouldPerformDownload { return .cancel }
         if action.targetFrame?.isMainFrame != false, !["http", "https"].contains(scheme) { return .cancel }
+        // Plain HTTP out on the internet is asked about first, in a tab: a look doesn't ask.
+        if action.targetFrame?.isMainFrame != false, scheme == "http", let site = action.request.url?.host(),
+           SitePermissions.asksBeforeHTTP(site),
+           SitePermissions.shared.allowed([.insecure], at: site, private: isPrivate) != true { return .cancel }
         return .allow
     }
 

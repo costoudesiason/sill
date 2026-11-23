@@ -275,7 +275,8 @@ enum AgentCommands {
 
         case "tabs.close":
             let (tab, browser) = try tab(args)
-            browser.close(tab)
+            // An agent's close is its own decision: the page isn't asked.
+            browser.closeNow(tab)
             return ["closed": tab.id.uuidString]
 
         case "page.navigate":

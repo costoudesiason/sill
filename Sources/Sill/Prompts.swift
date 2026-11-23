@@ -62,9 +62,11 @@ enum Prompts {
         }
     }
 
-    static func leave(in window: NSWindow?, _ done: @escaping (Bool) -> Void) {
+    /// `closing`: the page's title, when it is asked because its tab, its
+    /// window or Sill is closing; its page may not have drawn behind the sheet.
+    static func leave(closing title: String? = nil, in window: NSWindow?, _ done: @escaping (Bool) -> Void) {
         let alert = NSAlert()
-        alert.messageText = "Are you sure you want to leave this page?"
+        alert.messageText = title.map { "Are you sure you want to leave “\($0)”?" } ?? "Are you sure you want to leave this page?"
         alert.informativeText = "Changes you made may not be saved."
         alert.addButton(withTitle: "Leave Page")
         alert.addButton(withTitle: "Stay on Page")

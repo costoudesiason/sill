@@ -61,6 +61,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         pressure.activate()
         WarmSite.shared.warm(after: 4)
+        // Only if some site was allowed to notify before: else nothing is set up.
+        if SitePermissions.shared.keepsNotifications { PageNotifications.shared.install() }
         if Preferences.shared.restoresTabs, restoreSession() {
             return
         }
@@ -92,6 +94,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    /// Quitting asks only when something would be lost: downloads still
+    /// coming down, then each page with something unsaved, in turn.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if quitAgreed { return .terminateNow }
+        let running = Downloads.shared.items.filter { $0.active }.count
+        if running > 0 {
+            let alert = NSAlert()
+            alert.messageText = running == 1 ? "Quit and stop the download?" : "Quit and stop \(running) downloads?"
+            alert.informativeText = "What has come down so far is thrown away."
+            alert.addButton(withTitle: "Quit")
+            alert.addButton(withTitle: "Cancel")
+            if alert.runModal() != .alertFirstButtonReturn { return .terminateCancel }
+        }
+        var answer: Bool?
+        var returned = false
+        var waiting = browsers[...]
+        func next() {
+            guard let browser = waiting.popFirst() else {
+                // Answered after this returned: quit again, not asking twice.
+                if returned { quitAgreed = true; NSApp.terminate(nil) } else { answer = true }
+                return
+            }
+            browser.mayCloseAll { may in
+                if may { next() } else if !returned { answer = false }
+            }
+        }
+        next()
+        returned = true
+        return answer == true ? .terminateNow : .terminateCancel
+    }
+    private var quitAgreed = false
 
     func applicationWillTerminate(_ notification: Notification) {
         session.flush(sessionState())
@@ -149,7 +183,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func windowClosed(_ browser: BrowserWindowController) {
         browsers.removeAll { $0 === browser }
-        if browser.isPrivate, !browsers.contains(where: { $0.isPrivate }) { Downloads.shared.forgetPrivate() }
+        if browser.isPrivate, !browsers.contains(where: { $0.isPrivate }) {
+            Downloads.shared.forgetPrivate()
+            SitePermissions.shared.forgetPrivate()
+        }
         saveSession()
     }
 
@@ -208,6 +245,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if alert.runModal() == .alertFirstButtonReturn { History.shared.clear() }
     }
 
+    @objc func resetSitePermissions(_ sender: Any?) {
+        SitePermissions.shared.reset()
+        current?.toast("Websites will ask again")
+    }
+
     @objc func makeDefaultBrowser(_ sender: Any?) {
         let app = Bundle.main.bundleURL
         Task {
@@ -231,6 +273,7 @@ enum MainMenu {
             item("Make Sill Your Default Browser", #selector(AppDelegate.makeDefaultBrowser(_:)), target: app),
             .separator(),
             item("Clear History…", #selector(AppDelegate.clearHistory(_:)), target: app),
+            item("Reset Website Permissions", #selector(AppDelegate.resetSitePermissions(_:)), target: app),
             .separator(),
             servicesItem(),
             .separator(),

@@ -17,6 +17,8 @@ protocol TabHost: AnyObject {
     func bringBack(_ tab: Tab)
     func hovered(_ tab: Tab, link: String?)
     func focused(_ tab: Tab, field: LoginField)
+    /// The question its page has for you changed (Permissions.swift).
+    func promptsChanged(_ tab: Tab)
 }
 
 /// One page and its history. Its web view is made the first time it is
@@ -84,6 +86,23 @@ final class Tab: NSObject {
     private var lastRetitled: (url: URL, title: String)?
     /// Typed or picked in the palette: counts for more in history.
     private var typedNavigation = false
+    /// Questions for you about this page (may it use the camera, carry on
+    /// over plain HTTP), first asked first, and the card the first is on.
+    private var asks: [SiteAsk] = []
+    var asking: SiteAsk? { asks.first }
+    var card: SitePrompt?
+    /// What to do once the page has said whether it may be closed.
+    private var closing: ((Bool) -> Void)?
+    /// The main frame's answer was an error (404, 500…) that didn't say how
+    /// long its page is: once loaded, an empty one gets Sill's page instead.
+    private var statusToCheck: Int?
+    /// Where the page is in its back/forward list, whether the last move
+    /// there was backwards, and whether it was a move along that list.
+    /// The plain-HTTP address Sill's "wasn't opened" page is going up for: not asked about again.
+    private var notOpened: URL?
+    private var place = 0
+    private var wentBack = false
+    private var alongHistory = false
 
     init(url: URL?, title: String = "", isPrivate: Bool) {
         self.url = url
@@ -217,6 +236,7 @@ final class Tab: NSObject {
         // Waking reloads it anyway: a crash noted before sleeping mustn't reload it twice.
         needsReload = false
         dropHeldPrompts()
+        dropAsks()
         pending = webView.url ?? url
         savedState = webView.interactionState
         playingVideo = false
@@ -295,7 +315,10 @@ final class Tab: NSObject {
         if webView.url == nil, let url { webView.load(URLRequest(url: url)) }
         else if fromOrigin { webView.reloadFromOrigin() } else { webView.reload() }
     }
-    func stop() { webView?.stopLoading() }
+    func stop() {
+        dropNavigationAsk()
+        webView?.stopLoading()
+    }
 
     /// A page stuck in a script answers nothing, a reload or a new address
     /// included: its process is ended, and the page loads in a fresh one.
@@ -327,6 +350,80 @@ final class Tab: NSObject {
         let held = heldPrompts
         heldPrompts = []
         held.forEach { $0(false) }
+    }
+
+    // MARK: - questions
+
+    func ask(_ ask: SiteAsk) {
+        asks.append(ask)
+        if asks.count == 1 { host?.promptsChanged(self) }
+    }
+
+    /// The answer picked on the card, for the question showing.
+    func answer(_ choice: Int) {
+        guard !asks.isEmpty else { return }
+        asks.removeFirst().answer(choice, true)
+        // What that settled isn't asked again by the ones waiting behind it.
+        while let next = asks.first, let known = next.known?() {
+            asks.removeFirst()
+            next.answer(known, false)
+        }
+        host?.promptsChanged(self)
+    }
+
+    /// The page is going away: its questions are answered as not answered.
+    func dropAsks() {
+        card?.removeFromSuperview()
+        card = nil
+        guard !asks.isEmpty else { return }
+        let dropped = asks
+        asks = []
+        dropped.forEach { $0.answer(nil, false) }
+    }
+
+    /// Another address was asked for, or loading was stopped: the page that
+    /// was waiting for "Continue" isn't coming.
+    private func dropNavigationAsk() {
+        guard asks.contains(where: { $0.holdsNavigation }) else { return }
+        let dropped = asks.filter { $0.holdsNavigation }
+        asks.removeAll { $0.holdsNavigation }
+        dropped.forEach { $0.answer(nil, false) }
+        host?.promptsChanged(self)
+    }
+
+    /// May the site use these? Answered from what you said before, or asked.
+    private func permit(_ kinds: [SitePermissions.Kind], for origin: WKSecurityOrigin, symbol: String, to what: String,
+                        _ done: @escaping (Bool) -> Void) {
+        let site = SitePermissions.site(origin), isPrivate = isPrivate
+        if let known = SitePermissions.shared.allowed(kinds, at: site, private: isPrivate) { return done(known) }
+        let name = origin.host.isEmpty ? "This page" : Domains.bare(origin.host)
+        ask(SiteAsk(symbol: symbol, title: "\(name) wants to \(what)",
+                    choices: ["Don’t Allow", "Allow for One Day", "Allow"],
+                    known: { SitePermissions.shared.allowed(kinds, at: site, private: isPrivate).map { $0 ? 2 : 0 } },
+                    answer: { choice, picked in
+            guard let choice else { return done(false) }
+            if picked {
+                SitePermissions.shared.set(kinds, at: site, allowed: choice > 0, lasting: [.run, .day, .always][choice], private: isPrivate)
+            }
+            done(choice > 0)
+        }))
+    }
+
+    // MARK: - closing
+
+    /// Whether the page may be closed: at once if it has nothing to say, or
+    /// after it has asked you (a page with something unsaved does, through
+    /// the same sheet as leaving it). `done` may run before this returns.
+    func mayClose(_ done: @escaping (Bool) -> Void) {
+        // One question at a time: a second close while it is asking waits for the first.
+        if closing != nil { return done(false) }
+        let tryClose = NSSelectorFromString("_tryClose")
+        guard let webView, webView.processIsResponsive, webView.responds(to: tryClose) else { return done(true) }
+        // True when the page has no unload handlers at all: nothing is sent
+        // to it, and closing costs what it always did.
+        typealias TryClose = @convention(c) (AnyObject, Selector) -> Bool
+        if unsafeBitCast(webView.method(for: tryClose), to: TryClose.self)(webView, tryClose) { return done(true) }
+        closing = done
     }
 
     // MARK: - from the page script
@@ -396,6 +493,33 @@ extension Tab: WKNavigationDelegate {
                            background: !action.modifierFlags.contains(.shift))
             return decisionHandler(.cancel)
         }
+        guard action.targetFrame?.isMainFrame == true else { return decisionHandler(.allow) }
+        alongHistory = action.navigationType == .backForward
+        dropNavigationAsk()
+        // Plain HTTP to a site out on the internet: it loads once you've said
+        // to carry on, and that holds for the site until Sill quits.
+        if scheme == "http", let site = url.host(), SitePermissions.asksBeforeHTTP(site), url != notOpened,
+           SitePermissions.shared.allowed([.insecure], at: site, private: isPrivate) != true {
+            let isPrivate = isPrivate
+            ask(SiteAsk(symbol: "lock.open", title: "\(Domains.bare(site)) isn’t secure",
+                        detail: "It uses plain HTTP: what you read and send there can be seen or changed on the way.",
+                        choices: ["Cancel", "Continue"], holdsNavigation: true,
+                        answer: { [weak self, weak webView] choice, picked in
+                if picked, choice == 1 {
+                    SitePermissions.shared.set([.insecure], at: site, allowed: true, lasting: .run, private: isPrivate)
+                }
+                decisionHandler(choice == 1 ? .allow : .cancel)
+                // Cancelled in a tab with no page yet: it says so, rather than staying blank.
+                if picked, choice == 0, let self, let webView, self.webView === webView, webView.backForwardList.currentItem == nil {
+                    let html = ErrorPage.html(title: "This page wasn’t opened",
+                                              detail: "\(Domains.bare(site)) uses plain HTTP, and you chose not to carry on.", url: url)
+                    self.notOpened = url
+                    self.errorNavigation = webView.loadSimulatedRequest(URLRequest(url: url), responseHTML: html)
+                }
+            }))
+            return
+        }
+        notOpened = nil
         decisionHandler(.allow)
     }
 
@@ -404,6 +528,19 @@ extension Tab: WKNavigationDelegate {
         if let http = response.response as? HTTPURLResponse,
            let disposition = http.value(forHTTPHeaderField: "Content-Disposition"), disposition.lowercased().hasPrefix("attachment") {
             return decisionHandler(.download)
+        }
+        // An error with nothing to show (404, 500… and an empty body) gets
+        // Sill's own page rather than a blank one. Known from the headers
+        // when they say the length; else looked at once it has loaded.
+        if response.isForMainFrame {
+            statusToCheck = nil
+            if let http = response.response as? HTTPURLResponse, http.statusCode >= 400, let url = http.url {
+                if http.expectedContentLength == 0 {
+                    decisionHandler(.cancel)
+                    return showStatus(http.statusCode, for: url, in: webView)
+                }
+                if http.expectedContentLength < 0 { statusToCheck = http.statusCode }
+            }
         }
         if response.canShowMIMEType { return decisionHandler(.allow) }
         // A page is never a download: HTML, text or no type at all (a
@@ -431,6 +568,11 @@ extension Tab: WKNavigationDelegate {
         asked = nil
         // The link the pointer was on went with the old page.
         hovered(link: nil)
+        // What the last page asked for went with it.
+        dropAsks()
+        let at = webView.backForwardList.backList.count
+        wentBack = at < place
+        place = at
         showingError = errorNavigation != nil && navigation === errorNavigation
         errorNavigation = nil
         guard let url = webView.url else { return }
@@ -445,6 +587,25 @@ extension Tab: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         // A page with nothing to lay out never has a first frame: done is done.
         (webView as? SillWebView)?.showFirstFrame()
+        guard let status = statusToCheck, let url = webView.url else { return }
+        statusToCheck = nil
+        let empty = "!document.body || (!document.body.childElementCount && !document.body.textContent.trim())"
+        webView.evaluateJavaScript(empty, in: nil, in: Web.world) { [weak self, weak webView] result in
+            guard let self, let webView, self.webView === webView, webView.url == url, (try? result.get()) as? Bool == true else { return }
+            // The empty page stays in the back/forward list, behind Sill's:
+            // going back or forward lands on it and carries on the same way,
+            // rather than putting Sill's page up again and never getting past.
+            if self.alongHistory, self.wentBack ? webView.canGoBack : webView.canGoForward {
+                if self.wentBack { webView.goBack() } else { webView.goForward() }
+            } else {
+                self.showStatus(status, for: url, in: webView)
+            }
+        }
+    }
+
+    private func showStatus(_ status: Int, for url: URL, in webView: WKWebView) {
+        asked = nil
+        errorNavigation = webView.loadSimulatedRequest(URLRequest(url: url), responseHTML: ErrorPage.html(status: status, url: url))
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -495,6 +656,11 @@ extension Tab: WKNavigationDelegate {
     /// minute, it says so rather than reloading into the same crash forever.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         dropHeldPrompts()
+        dropAsks()
+        if let closing {
+            self.closing = nil
+            closing(true)
+        }
         asked = nil
         if endedHungProcess {
             endedHungProcess = false
@@ -543,8 +709,14 @@ extension Tab: WKUIDelegate {
         return tab.webView
     }
 
+    /// The page closed itself (window.close()), or agreed to be closed (mayClose).
     func webViewDidClose(_ webView: WKWebView) {
-        host?.closeRequested(self)
+        if let closing {
+            self.closing = nil
+            closing(true)
+        } else {
+            host?.closeRequested(self)
+        }
     }
 
     /// The page has drawn something: a view kept unseen so far comes in.
@@ -592,8 +764,17 @@ extension Tab: WKUIDelegate {
     @objc(_webView:runBeforeUnloadConfirmPanelWithMessage:initiatedByFrame:completionHandler:)
     func webView(_ webView: WKWebView, runBeforeUnloadConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
-        guard webView.window != nil else { return completionHandler(true) }
-        Prompts.leave(in: host?.window, completionHandler)
+        guard webView.window != nil || closing != nil else { return completionHandler(true) }
+        // Asked because its tab, window or Sill is closing: a tab behind
+        // another comes to the front, so it is plain which page is meant.
+        if closing != nil, webView.window == nil { host?.bringBack(self) }
+        Prompts.leave(closing: closing == nil ? nil : displayTitle, in: host?.window) { [weak self] leave in
+            if !leave, let closing = self?.closing {
+                self?.closing = nil
+                closing(false)
+            }
+            completionHandler(leave)
+        }
     }
 
     func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
@@ -611,13 +792,56 @@ extension Tab: WKUIDelegate {
     func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
                  initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
                  decisionHandler: @escaping (WKPermissionDecision) -> Void) {
-        decisionHandler(.prompt)
+        let (kinds, symbol, what): ([SitePermissions.Kind], String, String) = switch type {
+        case .camera: ([.camera], "video", "use the camera")
+        case .microphone: ([.microphone], "mic", "use the microphone")
+        default: ([.camera, .microphone], "video", "use the camera and microphone")
+        }
+        // Allowed here, the Mac still asks once whether Sill itself may use them.
+        permit(kinds, for: origin, symbol: symbol, to: what) { decisionHandler($0 ? .grant : .deny) }
+    }
+
+    func webView(_ webView: WKWebView, requestGeolocationPermissionFor origin: WKSecurityOrigin,
+                 initiatedByFrame frame: WKFrameInfo, decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+        permit([.location], for: origin, symbol: "location", to: "know where you are") { decisionHandler($0 ? .grant : .deny) }
+    }
+
+    /// The same question as WebKit asked it before macOS 27 gave it a public name.
+    @objc(_webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:)
+    func webView(_ webView: WKWebView, earlierRequestGeolocationPermissionFor origin: WKSecurityOrigin,
+                 initiatedByFrame frame: WKFrameInfo, decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+        self.webView(webView, requestGeolocationPermissionFor: origin, initiatedByFrame: frame, decisionHandler: decisionHandler)
+    }
+
+    @objc(_webView:requestNotificationPermissionForSecurityOrigin:decisionHandler:)
+    func webView(_ webView: WKWebView, requestNotificationPermissionFor origin: WKSecurityOrigin,
+                 decisionHandler: @escaping (Bool) -> Void) {
+        // Not from a private window (a notification stays in Notification
+        // Centre), and not where WebKit gives Sill no way to show one.
+        guard !isPrivate, PageNotifications.shared.available else { return decisionHandler(false) }
+        permit([.notifications], for: origin, symbol: "bell", to: "send you notifications") { allowed in
+            if allowed { PageNotifications.shared.install() }
+            decisionHandler(allowed)
+        }
     }
 }
 
 // MARK: - Error page
 
 enum ErrorPage {
+    /// For an answer that was an error and nothing else: no page came with it.
+    static func html(status: Int, url: URL) -> String {
+        let title = switch status {
+        case 404, 410: "Page not found"
+        case 401, 403: "You can’t open this page"
+        case 500...: "This site isn’t working"
+        default: "This page didn’t load"
+        }
+        let name = url.host().map(Domains.bare) ?? "The site"
+        let reason = HTTPURLResponse.localizedString(forStatusCode: status)
+        return html(title: title, detail: "\(name) answered \(status) (\(reason)) and sent no page.", url: url)
+    }
+
     static func html(title: String, detail: String, url: URL) -> String {
         func escape(_ text: String) -> String {
             text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
