@@ -32,6 +32,8 @@ final class Tab: NSObject {
     /// times, and whether a showing is waiting its turn.
     var retitled: (CFTimeInterval, CFTimeInterval) = (0, 0)
     var retitling = false
+    /// The page as it was last seen, for the preview card over its tab.
+    var picture: NSImage?
     /// The tab this one was opened from, for placing and for going back to it.
     weak var opener: Tab?
 

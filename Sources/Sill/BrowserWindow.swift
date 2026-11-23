@@ -79,6 +79,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private var paletteOpen: Bool { madePalette?.isOpen ?? false }
     private let status = StatusPill()
     private lazy var peek: Peek = { let peek = Peek(); stage.addSubview(peek); return peek }()
+    /// The card over a tab the pointer rests on (TabPreview.swift).
+    private lazy var preview = TabPreview()
+    private var previewWait: DispatchWorkItem?
+    private var previewLeave: DispatchWorkItem?
+    private var previewRefresh: Timer?
     private var madePeek = false
     private var hoveredLink: URL?
     private var peekWatch: Any?
@@ -341,6 +346,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if paletteOpen && selected !== tab { palette.close(animated: false) }
         madeFindBar?.close()
         let previous = selected
+        hidePreview(animated: false)
+        // The page being left, as it looks now: its tab's preview card.
+        if previous !== tab { previous?.capturePicture() }
         // The page being left keeps its place in the window, under the new
         // one, until its video has floated off into Picture in Picture: a
         // page taken out of the window first would have it cancelled. Only
@@ -449,6 +457,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     // MARK: - Palette
 
     func showPalette(_ mode: Palette.Mode) {
+        hidePreview(animated: false)
         if paletteOpen && palette.mode == mode && mode == .newTab { palette.close(); return }
         status.show(nil)
         endPeek()
@@ -585,7 +594,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     }
 
     func windowDidBecomeKey(_ notification: Notification) { AppDelegate.shared.lastBrowser = self }
-    func windowDidResignKey(_ notification: Notification) { endPeek() }
+    func windowDidResignKey(_ notification: Notification) { endPeek(); hidePreview(animated: false) }
 
     // MARK: - Context menu for a tab
 
@@ -1015,6 +1024,64 @@ extension BrowserWindowController {
     }
 
     /// Starts a sleeping or never-shown tab loading in the background.
+    // MARK: - Tab previews
+
+    /// The pointer came onto a tab: a card after a short rest, or at once if
+    /// one is already up for another tab.
+    func tabHovered(_ tab: Tab, in item: NSView) {
+        previewLeave?.cancel()
+        previewWait?.cancel()
+        guard Preferences.shared.showsTabPreviews, tab !== selected, !paletteOpen,
+              window?.isKeyWindow == true, NSEvent.pressedMouseButtons == 0 else { return hidePreview() }
+        if preview.isShowing { return showPreview(tab, under: item) }
+        let work = DispatchWorkItem { [weak self, weak item, weak tab] in
+            guard let self, let item, let tab, item.window != nil, NSEvent.pressedMouseButtons == 0 else { return }
+            self.showPreview(tab, under: item)
+        }
+        previewWait = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
+    }
+
+    /// Off a tab: the card waits a moment for the next tab along the row.
+    func tabUnhovered(_ tab: Tab) {
+        previewWait?.cancel()
+        guard preview.isShowing else { return }
+        let work = DispatchWorkItem { [weak self] in self?.hidePreview() }
+        previewLeave = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    private func showPreview(_ tab: Tab, under item: NSView) {
+        if preview.superview !== stage || stage.subviews.last !== preview { stage.addSubview(preview) }
+        preview.fill(tab, pageSize: pageBounds.size)
+        let tabFrame = stage.convert(item.bounds, from: item)
+        let size = preview.cardSize
+        let x = max(8, min(tabFrame.midX - size.width / 2, stage.bounds.width - 8 - size.width))
+        preview.present(at: NSPoint(x: x, y: topInset + 4))
+        // Live while it's up, if the page is running.
+        refreshPreview()
+        previewRefresh?.invalidate()
+        previewRefresh = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshPreview() }
+        }
+    }
+
+    private func refreshPreview() {
+        guard let tab = preview.tab, tab.webView != nil, !tab.isLoading || tab.picture == nil else { return }
+        tab.capturePicture { [weak self, weak tab] image in
+            guard let self, let tab, let image, self.preview.tab === tab else { return }
+            self.preview.show(image)
+        }
+    }
+
+    func hidePreview(animated: Bool = true) {
+        previewWait?.cancel()
+        previewLeave?.cancel()
+        previewRefresh?.invalidate()
+        previewRefresh = nil
+        preview.dismiss(animated: animated)
+    }
+
     func warm(_ tab: Tab) {
         guard tab.webView == nil, tab.url != nil, tabs.contains(where: { $0 === tab }) else { return }
         tab.materialize()

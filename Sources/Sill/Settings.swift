@@ -393,6 +393,8 @@ private struct TabsPane: View {
             }
             Line()
             SwitchRow(label: "Show a link’s address when pointing at it", isOn: $prefs.showsLinkPreview)
+            Line()
+            SwitchRow(label: "Preview a tab’s page when pointing at it", isOn: $prefs.showsTabPreviews)
         }
         Group(title: "Split View", footer: "Right-click a tab and choose Split Left or Split Right, then pick the tab for the other side. Drag the divider to resize; right-click again to separate them.") {
             Row(label: "Two pages side by side") { Text("Right-click a tab").foregroundStyle(.secondary) }

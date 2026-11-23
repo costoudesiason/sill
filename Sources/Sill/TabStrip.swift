@@ -359,11 +359,13 @@ final class TabItemView: NSView {
         }
         warming = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+        strip?.browser?.tabHovered(tab, in: self)
     }
 
     override func mouseExited(with event: NSEvent) {
         isHovered = false
         warming?.cancel()
+        strip?.browser?.tabUnhovered(tab)
         needsLayout = true
     }
 
@@ -377,7 +379,9 @@ final class TabItemView: NSView {
 
     func refresh() {
         label.stringValue = tab.displayTitle
-        toolTip = tab.url.map { "\(tab.displayTitle)\n\(Address.display($0))" } ?? tab.displayTitle
+        // The preview card says the same and more; a tooltip would sit on it.
+        toolTip = Preferences.shared.showsTabPreviews ? nil
+            : tab.url.map { "\(tab.displayTitle)\n\(Address.display($0))" } ?? tab.displayTitle
         setAccessibilityLabel(tab.displayTitle)
         if tab.isLoading && tab.favicon == nil {
             spinner.startAnimation(nil)

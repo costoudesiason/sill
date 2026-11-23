@@ -142,6 +142,8 @@ final class Preferences: ObservableObject {
     @Published var tabWidth: TabWidth { didSet { store.set(tabWidth.rawValue, forKey: "tabWidth") } }
     @Published var closeButtons: CloseButtons { didSet { store.set(closeButtons.rawValue, forKey: "closeButtons") } }
     @Published var showsLinkPreview: Bool { didSet { store.set(showsLinkPreview, forKey: "showsLinkPreview") } }
+    /// A card with a picture of the page when the pointer rests on a tab.
+    @Published var showsTabPreviews: Bool { didSet { store.set(showsTabPreviews, forKey: "tabPreviews") } }
     // Tabs and media
     @Published var autoPictureInPicture: Bool { didSet { store.set(autoPictureInPicture, forKey: "autoPiP") } }
     @Published var sleepsTabs: Bool { didSet { store.set(sleepsTabs, forKey: "sleepsTabs") } }
@@ -174,7 +176,7 @@ final class Preferences: ObservableObject {
 
     private init() {
         store.register(defaults: ["suggestions": true, "restoresTabs": true, "applePasswords": true,
-                                  "glassBar": true, "glassWash": 0.25, "cornerRadius": 26.0, "showsLinkPreview": true,
+                                  "glassBar": true, "glassWash": 0.25, "cornerRadius": 26.0, "showsLinkPreview": true, "tabPreviews": true,
                                   "autoPiP": true, "sleepsTabs": true, "warmClaude": true, "sleepAfterMinutes": 120, "blocksAds": true])
         theme = Theme(rawValue: store.string(forKey: "theme") ?? "") ?? .system
         glassBar = store.bool(forKey: "glassBar")
@@ -184,6 +186,7 @@ final class Preferences: ObservableObject {
         tabWidth = TabWidth(rawValue: store.string(forKey: "tabWidth") ?? "") ?? .fill
         closeButtons = CloseButtons(rawValue: store.string(forKey: "closeButtons") ?? "") ?? .hover
         showsLinkPreview = store.bool(forKey: "showsLinkPreview")
+        showsTabPreviews = store.bool(forKey: "tabPreviews")
         autoPictureInPicture = store.bool(forKey: "autoPiP")
         sleepsTabs = store.bool(forKey: "sleepsTabs")
         keepsClaudeReady = store.bool(forKey: "warmClaude")
