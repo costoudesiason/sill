@@ -185,6 +185,11 @@ final class SillWebView: WKWebView {
         }
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { tab?.pageShown() }
+    }
+
     /// "New Window" reads "New Tab" here: that's what it does.
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         for item in menu.items {

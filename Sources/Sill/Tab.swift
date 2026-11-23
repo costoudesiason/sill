@@ -77,6 +77,8 @@ final class Tab: NSObject {
     /// that page is what's showing: it is not a visit to remember.
     private var errorNavigation: WKNavigation?
     private var showingError = false
+    /// Dialogs its page asked for while behind another tab, kept until it is seen.
+    private var heldPrompts: [(_ shown: Bool) -> Void] = []
     /// The title last given to history, for which page: a page that keeps
     /// setting the same title doesn't touch history again.
     private var lastRetitled: (url: URL, title: String)?
@@ -214,6 +216,7 @@ final class Tab: NSObject {
         guard let webView, !webView.isLoading else { return }
         // Waking reloads it anyway: a crash noted before sleeping mustn't reload it twice.
         needsReload = false
+        dropHeldPrompts()
         pending = webView.url ?? url
         savedState = webView.interactionState
         playingVideo = false
@@ -300,6 +303,30 @@ final class Tab: NSObject {
         endedHungProcess = true
         afterHungProcess = url
         webView.endProcess()
+    }
+
+    /// Runs `present` once this tab's page is in a window; at once if it is.
+    /// A dialog from a tab behind another waits for that tab rather than
+    /// landing on whatever page is in front. `shown` is false if the page
+    /// went away first, and the dialog is to be answered unseen.
+    func whenShown(_ present: @escaping (_ shown: Bool) -> Void) {
+        if webView?.window != nil { present(true) } else { heldPrompts.append(present) }
+    }
+
+    /// The page is in a window (again): what waited for that goes ahead.
+    func pageShown() {
+        guard !heldPrompts.isEmpty else { return }
+        let held = heldPrompts
+        heldPrompts = []
+        held.forEach { $0(true) }
+    }
+
+    /// The page is going away: its waiting dialogs are answered as cancelled.
+    func dropHeldPrompts() {
+        guard !heldPrompts.isEmpty else { return }
+        let held = heldPrompts
+        heldPrompts = []
+        held.forEach { $0(false) }
     }
 
     // MARK: - from the page script
@@ -467,6 +494,7 @@ extension Tab: WKNavigationDelegate {
     /// back at once; behind another tab, when it's next shown. Twice in a
     /// minute, it says so rather than reloading into the same crash forever.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        dropHeldPrompts()
         asked = nil
         if endedHungProcess {
             endedHungProcess = false
@@ -537,17 +565,35 @@ extension Tab: WKUIDelegate {
 
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
-        Prompts.alert(message, from: frame, in: host?.window) { completionHandler() }
+        whenShown { [weak self] shown in
+            guard shown else { return completionHandler() }
+            Prompts.alert(message, from: frame, in: self?.host?.window) { completionHandler() }
+        }
     }
 
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
-        Prompts.confirm(message, from: frame, in: host?.window, completionHandler)
+        whenShown { [weak self] shown in
+            guard shown else { return completionHandler(false) }
+            Prompts.confirm(message, from: frame, in: self?.host?.window, completionHandler)
+        }
     }
 
     func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
-        Prompts.input(prompt, defaultText: defaultText, from: frame, in: host?.window, completionHandler)
+        whenShown { [weak self] shown in
+            guard shown else { return completionHandler(nil) }
+            Prompts.input(prompt, defaultText: defaultText, from: frame, in: self?.host?.window, completionHandler)
+        }
+    }
+
+    /// A page with something unsaved (it listens for beforeunload) asks
+    /// before it is left or reloaded, as it does in Safari.
+    @objc(_webView:runBeforeUnloadConfirmPanelWithMessage:initiatedByFrame:completionHandler:)
+    func webView(_ webView: WKWebView, runBeforeUnloadConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        guard webView.window != nil else { return completionHandler(true) }
+        Prompts.leave(in: host?.window, completionHandler)
     }
 
     func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,

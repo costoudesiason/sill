@@ -56,18 +56,27 @@ enum Prompts {
         alert.addButton(withTitle: "Sign In")
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = user
-        alert.beginSheetModal(for: window) { response in
+        present(alert, in: window) { response in
             guard response == .alertFirstButtonReturn else { return done(nil) }
             done(URLCredential(user: user.stringValue, password: password.stringValue, persistence: .forSession))
         }
     }
 
+    static func leave(in window: NSWindow?, _ done: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "Are you sure you want to leave this page?"
+        alert.informativeText = "Changes you made may not be saved."
+        alert.addButton(withTitle: "Leave Page")
+        alert.addButton(withTitle: "Stay on Page")
+        present(alert, in: window) { done($0 == .alertFirstButtonReturn) }
+    }
+
+    /// Always a sheet on its window. A dialog asked for while another is up
+    /// follows it (AppKit queues sheets) instead of stopping the whole app
+    /// with a loose alert on top of the first.
     private static func present(_ alert: NSAlert, in window: NSWindow?, _ done: @escaping (NSApplication.ModalResponse) -> Void) {
-        if let window, window.attachedSheet == nil {
-            alert.beginSheetModal(for: window, completionHandler: done)
-        } else {
-            done(alert.runModal())
-        }
+        guard let window else { return done(alert.runModal()) }
+        alert.beginSheetModal(for: window, completionHandler: done)
     }
 }
 

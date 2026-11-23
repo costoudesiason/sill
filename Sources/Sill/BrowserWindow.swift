@@ -569,6 +569,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// Stops everything a page is playing, ends its picture in picture, and
     /// unloads it, for a tab or window being closed.
     static func silence(_ tab: Tab) {
+        tab.dropHeldPrompts()
         guard let view = tab.webView else { return }
         // A page stuck in a script never takes the unload below, and its
         // process would spin on with no tab: it is ended, now if WebKit
