@@ -1338,10 +1338,16 @@ extension BrowserWindowController {
 
     /// The tabs either side of the one in front, a moment after it changes:
     /// the next ⌃Tab, or a click next door, finds its page already there.
-    fileprivate func warmNeighbours(of tab: Tab) {
+    fileprivate func warmNeighbours(of tab: Tab, waited: TimeInterval = 0) {
         neighbourWarming?.cancel()
+        let pause: TimeInterval = waited == 0 ? 1.0 : 0.5
         let work = DispatchWorkItem { [weak self, weak tab] in
             guard let self, let tab, tab === self.selected, let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
+            // Not while the page in front is still coming in: two more pages
+            // loading beside it would share its network and processor, and
+            // it's the one being looked at. A page that never settles doesn't
+            // hold them off for more than a few seconds.
+            if tab.isLoading, waited < 6 { return self.warmNeighbours(of: tab, waited: waited + pause) }
             for i in [index - 1, index + 1] where self.tabs.indices.contains(i) {
                 let neighbour = self.tabs[i]
                 guard neighbour.webView == nil, !neighbour.warmedUnseen else { continue }
@@ -1350,7 +1356,7 @@ extension BrowserWindowController {
             }
         }
         neighbourWarming = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + pause, execute: work)
     }
 
     /// A click into the other half of a split makes that page the one in

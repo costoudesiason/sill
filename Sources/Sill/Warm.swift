@@ -21,6 +21,8 @@ final class WarmSite: NSObject, WKNavigationDelegate {
     private var ready = false
     private var loadedAt = Date.distantPast
     private var pendingWarm: DispatchWorkItem?
+    /// Times in a row the page has waited for the one in front to load.
+    private var putOff = 0
     /// A page older than this may be out of date: it is loaded again rather than shown.
     private let freshFor: TimeInterval = 45 * 60
 
@@ -46,6 +48,17 @@ final class WarmSite: NSObject, WKNavigationDelegate {
     private func make() {
         guard wanted else { return drop() }
         if let view, ready, Date().timeIntervalSince(loadedAt) < freshFor, Self.usable(view.url) { return }
+        // Not while the page you're looking at is still coming in (at launch,
+        // the restored tab): an unseen claude.ai loading beside it would
+        // share its network and processor. For a few seconds at most.
+        if putOff < 8, NSApp.windows.contains(where: { window in
+            guard window.isVisible, let browser = window.windowController as? BrowserWindowController else { return false }
+            return browser.selected?.isLoading == true
+        }) {
+            putOff += 1
+            return warm(after: 1)
+        }
+        putOff = 0
         let page = view ?? SillWebView(frame: NSRect(x: 0, y: 0, width: 1280, height: 800),
                                        configuration: Web.configuration(private: false))
         page.navigationDelegate = self
