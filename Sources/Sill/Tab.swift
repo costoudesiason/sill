@@ -66,6 +66,19 @@ final class Tab: NSObject {
     private var crashes: [Date] = []
     /// Its process died while it was out of sight: it reloads when shown.
     private var needsReload = false
+    /// Sill ended this page's process itself (it had stopped answering):
+    /// not a crash to count, and what to load in its place, if not the same page.
+    private var endedHungProcess = false
+    private var afterHungProcess: URL?
+    /// A reload (nil address) or address asked for and not yet begun by the
+    /// page: if the page turns out to be hung, it is what to do after.
+    private var asked: (url: URL?, at: Date)?
+    /// The navigation that put Sill's own "can't open" page up, and whether
+    /// that page is what's showing: it is not a visit to remember.
+    private var errorNavigation: WKNavigation?
+    private var showingError = false
+    /// Dialogs its page asked for while behind another tab, kept until it is seen.
+    private var heldPrompts: [(_ shown: Bool) -> Void] = []
     /// The title last given to history, for which page: a page that keeps
     /// setting the same title doesn't touch history again.
     private var lastRetitled: (url: URL, title: String)?
@@ -157,7 +170,7 @@ final class Tab: NSObject {
                 MainActor.assumeIsolated {
                     guard let self, let title = view.title, !title.isEmpty || view.url != nil else { return }
                     self.title = title
-                    if !self.isPrivate, let url = view.url, self.lastRetitled?.url != url || self.lastRetitled?.title != title {
+                    if !self.isPrivate, !self.showingError, let url = view.url, self.lastRetitled?.url != url || self.lastRetitled?.title != title {
                         self.lastRetitled = (url, title)
                         History.shared.retitle(url, title)
                     }
@@ -203,6 +216,7 @@ final class Tab: NSObject {
         guard let webView, !webView.isLoading else { return }
         // Waking reloads it anyway: a crash noted before sleeping mustn't reload it twice.
         needsReload = false
+        dropHeldPrompts()
         pending = webView.url ?? url
         savedState = webView.interactionState
         playingVideo = false
@@ -250,7 +264,10 @@ final class Tab: NSObject {
     func load(_ url: URL, typed: Bool = false) {
         typedNavigation = typed
         self.url = url
-        if let webView {
+        if let webView, !webView.processIsResponsive {
+            endHungProcess(of: webView, thenLoad: url)
+        } else if let webView {
+            asked = (url, Date())
             Shield.shared.whenReady { [weak self, weak webView] in
                 guard let webView, self?.webView === webView else { return }
                 webView.load(URLRequest(url: url))
@@ -273,10 +290,44 @@ final class Tab: NSObject {
     func goForward() { webView?.goForward() }
     func reload(fromOrigin: Bool = false) {
         guard let webView else { return }
+        if !webView.processIsResponsive { return endHungProcess(of: webView, thenLoad: nil) }
+        asked = (nil, Date())
         if webView.url == nil, let url { webView.load(URLRequest(url: url)) }
         else if fromOrigin { webView.reloadFromOrigin() } else { webView.reload() }
     }
     func stop() { webView?.stopLoading() }
+
+    /// A page stuck in a script answers nothing, a reload or a new address
+    /// included: its process is ended, and the page loads in a fresh one.
+    private func endHungProcess(of webView: SillWebView, thenLoad url: URL?) {
+        endedHungProcess = true
+        afterHungProcess = url
+        webView.endProcess()
+    }
+
+    /// Runs `present` once this tab's page is in a window; at once if it is.
+    /// A dialog from a tab behind another waits for that tab rather than
+    /// landing on whatever page is in front. `shown` is false if the page
+    /// went away first, and the dialog is to be answered unseen.
+    func whenShown(_ present: @escaping (_ shown: Bool) -> Void) {
+        if webView?.window != nil { present(true) } else { heldPrompts.append(present) }
+    }
+
+    /// The page is in a window (again): what waited for that goes ahead.
+    func pageShown() {
+        guard !heldPrompts.isEmpty else { return }
+        let held = heldPrompts
+        heldPrompts = []
+        held.forEach { $0(true) }
+    }
+
+    /// The page is going away: its waiting dialogs are answered as cancelled.
+    func dropHeldPrompts() {
+        guard !heldPrompts.isEmpty else { return }
+        let held = heldPrompts
+        heldPrompts = []
+        held.forEach { $0(false) }
+    }
 
     // MARK: - from the page script
 
@@ -377,8 +428,13 @@ extension Tab: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         scrolled(false)
         playingVideo = false
+        asked = nil
+        // The link the pointer was on went with the old page.
+        hovered(link: nil)
+        showingError = errorNavigation != nil && navigation === errorNavigation
+        errorNavigation = nil
         guard let url = webView.url else { return }
-        if !isPrivate { History.shared.record(url, title: webView.title, typed: typedNavigation) }
+        if !isPrivate, !showingError { History.shared.record(url, title: webView.title, typed: typedNavigation) }
         typedNavigation = false
         if favicon == nil || Favicons.shared.cached(for: url) == nil {
             favicon = Favicons.shared.cached(for: url)
@@ -403,11 +459,12 @@ extension Tab: WKNavigationDelegate {
 
     private func showError(_ error: Error, in webView: WKWebView) {
         let error = error as NSError
+        asked = nil
         // Cancelled, or a download taking over, or a plug-in: not a failure to show.
         if error.code == NSURLErrorCancelled || (error.domain == "WebKitErrorDomain" && [102, 204].contains(error.code)) { return }
         guard let failed = (error.userInfo[NSURLErrorFailingURLErrorKey] as? URL) ?? url else { return }
         let html = ErrorPage.html(title: "Can’t open this page", detail: error.localizedDescription, url: failed)
-        webView.loadSimulatedRequest(URLRequest(url: failed), responseHTML: html)
+        errorNavigation = webView.loadSimulatedRequest(URLRequest(url: failed), responseHTML: html)
     }
 
     func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
@@ -420,10 +477,32 @@ extension Tab: WKNavigationDelegate {
         }
     }
 
+    /// The page's process has stopped answering (a script that never ends).
+    /// A reload or address asked of it in the last moments is what found
+    /// that out, and would wait for ever: the process is ended for it.
+    @objc(_webViewWebProcessDidBecomeUnresponsive:)
+    func webViewWebProcessDidBecomeUnresponsive(_ webView: WKWebView) {
+        guard let view = webView as? SillWebView, view === self.webView else { return }
+        if let asked, Date().timeIntervalSince(asked.at) < 15 {
+            self.asked = nil
+            return endHungProcess(of: view, thenLoad: asked.url)
+        }
+        view.processStoppedAnswering()
+    }
+
     /// The page's process died (out of memory, or a crash). Shown, it comes
     /// back at once; behind another tab, when it's next shown. Twice in a
     /// minute, it says so rather than reloading into the same crash forever.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        dropHeldPrompts()
+        asked = nil
+        if endedHungProcess {
+            endedHungProcess = false
+            if let next = afterHungProcess { webView.load(URLRequest(url: next)) }
+            else if webView.window == nil { needsReload = true } else { webView.reload() }
+            afterHungProcess = nil
+            return
+        }
         let now = Date()
         crashes = crashes.filter { now.timeIntervalSince($0) < 60 } + [now]
         if crashes.count >= 2, let url = webView.url ?? url {
@@ -431,7 +510,7 @@ extension Tab: WKNavigationDelegate {
             needsReload = false
             let html = ErrorPage.html(title: "This page keeps crashing",
                                       detail: "Its content process stopped twice in a minute, so Sill didn’t reload it again.", url: url)
-            webView.loadSimulatedRequest(URLRequest(url: url), responseHTML: html)
+            errorNavigation = webView.loadSimulatedRequest(URLRequest(url: url), responseHTML: html)
             return
         }
         if webView.window == nil { needsReload = true } else { webView.reload() }
@@ -486,17 +565,35 @@ extension Tab: WKUIDelegate {
 
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
-        Prompts.alert(message, from: frame, in: host?.window) { completionHandler() }
+        whenShown { [weak self] shown in
+            guard shown else { return completionHandler() }
+            Prompts.alert(message, from: frame, in: self?.host?.window) { completionHandler() }
+        }
     }
 
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
-        Prompts.confirm(message, from: frame, in: host?.window, completionHandler)
+        whenShown { [weak self] shown in
+            guard shown else { return completionHandler(false) }
+            Prompts.confirm(message, from: frame, in: self?.host?.window, completionHandler)
+        }
     }
 
     func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
-        Prompts.input(prompt, defaultText: defaultText, from: frame, in: host?.window, completionHandler)
+        whenShown { [weak self] shown in
+            guard shown else { return completionHandler(nil) }
+            Prompts.input(prompt, defaultText: defaultText, from: frame, in: self?.host?.window, completionHandler)
+        }
+    }
+
+    /// A page with something unsaved (it listens for beforeunload) asks
+    /// before it is left or reloaded, as it does in Safari.
+    @objc(_webView:runBeforeUnloadConfirmPanelWithMessage:initiatedByFrame:completionHandler:)
+    func webView(_ webView: WKWebView, runBeforeUnloadConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        guard webView.window != nil else { return completionHandler(true) }
+        Prompts.leave(in: host?.window, completionHandler)
     }
 
     func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,

@@ -588,7 +588,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// Stops everything a page is playing, ends its picture in picture, and
     /// unloads it, for a tab or window being closed.
     static func silence(_ tab: Tab) {
+        tab.dropHeldPrompts()
         guard let view = tab.webView else { return }
+        // A page stuck in a script never takes the unload below, and its
+        // process would spin on with no tab: it is ended, now if WebKit
+        // already knows, or once it finds out.
+        if !view.processIsResponsive { view.endProcess() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [view] in
+            if !view.processIsResponsive { view.endProcess() }
+        }
         let stop = "document.querySelectorAll('video, audio').forEach(m => { try { m.pause(); } catch (_) {} });"
             + " if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});"
         view.evaluateJavaScript(stop, in: nil, in: .page) { _ in }
@@ -822,6 +830,12 @@ extension BrowserWindowController: TabHost {
         let content = NSSize(width: max(360, min(size.width, 1000)), height: max(320, min(size.height, 900)) + TopBar.height)
         var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: content))
         frame.origin = NSPoint(x: parent.frame.midX - frame.width / 2, y: parent.frame.midY - frame.height / 2)
+        // Several at once step down and across, so none hides another.
+        let others = AppDelegate.shared.browsers.filter { $0.isPopup && $0 !== popup }.compactMap { $0.window?.frame.origin }
+        while others.contains(where: { abs($0.x - frame.origin.x) < 1 && abs($0.y - frame.origin.y) < 1 }) {
+            frame.origin.x += 24
+            frame.origin.y -= 24
+        }
         window.setFrame(frame, display: false)
         let made = popup.addTab(url: nil, configuration: configuration, opener: tab)
         popup.showWindow(nil)
@@ -1099,7 +1113,7 @@ extension BrowserWindowController {
     func tabHovered(_ tab: Tab, in item: NSView) {
         previewLeave?.cancel()
         previewWait?.cancel()
-        guard Preferences.shared.showsTabPreviews, !paletteOpen,
+        guard Preferences.shared.showsTabPreviews, !paletteOpen, !GlassMenu.isOpen,
               window?.isKeyWindow == true, NSEvent.pressedMouseButtons == 0 else { return hidePreview() }
         if preview.isShowing { return showPreview(tab, under: item) }
         // The picture is taken now, so it's there when the card comes.

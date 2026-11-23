@@ -96,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         session.flush(sessionState())
         History.shared.flush()
+        Downloads.shared.discardUnfinished()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
@@ -148,6 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func windowClosed(_ browser: BrowserWindowController) {
         browsers.removeAll { $0 === browser }
+        if browser.isPrivate, !browsers.contains(where: { $0.isPrivate }) { Downloads.shared.forgetPrivate() }
         saveSession()
     }
 

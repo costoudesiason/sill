@@ -56,18 +56,27 @@ enum Prompts {
         alert.addButton(withTitle: "Sign In")
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = user
-        alert.beginSheetModal(for: window) { response in
+        present(alert, in: window) { response in
             guard response == .alertFirstButtonReturn else { return done(nil) }
             done(URLCredential(user: user.stringValue, password: password.stringValue, persistence: .forSession))
         }
     }
 
+    static func leave(in window: NSWindow?, _ done: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "Are you sure you want to leave this page?"
+        alert.informativeText = "Changes you made may not be saved."
+        alert.addButton(withTitle: "Leave Page")
+        alert.addButton(withTitle: "Stay on Page")
+        present(alert, in: window) { done($0 == .alertFirstButtonReturn) }
+    }
+
+    /// Always a sheet on its window. A dialog asked for while another is up
+    /// follows it (AppKit queues sheets) instead of stopping the whole app
+    /// with a loose alert on top of the first.
     private static func present(_ alert: NSAlert, in window: NSWindow?, _ done: @escaping (NSApplication.ModalResponse) -> Void) {
-        if let window, window.attachedSheet == nil {
-            alert.beginSheetModal(for: window, completionHandler: done)
-        } else {
-            done(alert.runModal())
-        }
+        guard let window else { return done(alert.runModal()) }
+        alert.beginSheetModal(for: window, completionHandler: done)
     }
 }
 
@@ -83,9 +92,12 @@ final class DownloadItem: ObservableObject, Identifiable {
     @Published var finished = false
     @Published var failed = false
     weak var download: WKDownload?
+    /// From a private window: off the list once those are all closed.
+    let isPrivate: Bool
 
-    init(download: WKDownload) {
+    init(download: WKDownload, isPrivate: Bool) {
         self.download = download
+        self.isPrivate = isPrivate
         name = download.originalRequest?.url?.lastPathComponent ?? "Download"
     }
 
@@ -112,8 +124,10 @@ final class DownloadItem: ObservableObject, Identifiable {
     }
 
     func cancel() {
-        download?.cancel { _ in }
+        let url = url
+        if let download { download.cancel { _ in Downloads.discard(url) } } else { Downloads.discard(url) }
         failed = true
+        Downloads.shared.cancelled(self)
     }
 }
 
@@ -162,8 +176,11 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
     func track(_ download: WKDownload, in window: NSWindow?) {
         download.delegate = self
         windows[ObjectIdentifier(download)] = window
-        items.insert(DownloadItem(download: download), at: 0)
-        if items.count > 30 { items.removeLast() }
+        let isPrivate = (window?.windowController as? BrowserWindowController)?.isPrivate == true
+        items.insert(DownloadItem(download: download, isPrivate: isPrivate), at: 0)
+        // The list keeps 30, oldest out first, but never drops one still
+        // coming down: its row is what stops it and clears up after it.
+        while items.count > 30, let old = items.lastIndex(where: { !$0.active }) { items.remove(at: old) }
         retime()
     }
 
@@ -171,25 +188,100 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
         items.removeAll { $0.finished || $0.failed }
     }
 
-    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String,
-                  completionHandler: @escaping (URL?) -> Void) {
-        let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
-        let name = suggestedFilename.isEmpty ? "Download" : suggestedFilename
+    /// The last private window closed: what it downloaded, done or stopped,
+    /// leaves the list with it. The files stay where they were saved.
+    func forgetPrivate() {
+        items.removeAll { $0.isPrivate && !$0.active }
+    }
+
+    /// Quitting stops what was still coming down; the half files go too.
+    func discardUnfinished() {
+        for item in items where item.active {
+            if let url = item.url { try? FileManager.default.removeItem(at: url) }
+        }
+    }
+
+    /// A download that stopped part-way leaves no half file under its real name.
+    nonisolated static func discard(_ url: URL?) {
+        guard let url else { return }
+        // On the naming queue, and the name freed only after: a new download
+        // can't be given this name and then lose its file to this removal.
+        naming.async {
+            try? FileManager.default.removeItem(at: url)
+            promised.remove(url.path.lowercased())
+        }
+    }
+
+    /// Names are picked one at a time, off the main thread: the first look
+    /// into Downloads can wait on the system asking for permission, and the
+    /// window must not hang (or lose ⌘W) while it does.
+    private nonisolated static let naming = DispatchQueue(label: "sill.downloads.naming", qos: .userInitiated)
+    /// Names given out to downloads that haven't written a byte yet, in
+    /// lower case: Downloads usually doesn't tell "A.pdf" from "a.pdf".
+    private nonisolated(unsafe) static var promised: Set<String> = []
+
+    /// A free name in Downloads, or nil if Sill isn't allowed in there.
+    private nonisolated static func destination(named name: String) -> URL? {
+        let files = FileManager.default
+        let folder = files.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+        guard (try? files.contentsOfDirectory(atPath: folder.path)) != nil else { return nil }
         var url = folder.appendingPathComponent(name)
         let base = url.deletingPathExtension().lastPathComponent
         let ext = url.pathExtension
         var n = 2
-        while FileManager.default.fileExists(atPath: url.path) {
+        while files.fileExists(atPath: url.path) || promised.contains(url.path.lowercased()) {
             url = folder.appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)")
             n += 1
         }
-        if let item = item(for: download) {
-            item.name = url.lastPathComponent
-            item.url = url
+        promised.insert(url.path.lowercased())
+        return url
+    }
+
+    func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String,
+                  completionHandler: @escaping (URL?) -> Void) {
+        let name = suggestedFilename.isEmpty ? "Download" : suggestedFilename
+        nonisolated(unsafe) let completionHandler = completionHandler
+        Self.naming.async {
+            let url = Self.destination(named: name)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let window = self.windows[ObjectIdentifier(download)]
+                    let browser = window?.windowController as? BrowserWindowController
+                    guard let url else {
+                        // No way into Downloads: stopped, and said so, rather
+                        // than a row that sits at nothing for good.
+                        self.windows[ObjectIdentifier(download)] = nil
+                        let item = self.item(for: download)
+                        item?.failed = true
+                        self.settled(item)
+                        completionHandler(nil)
+                        browser?.toast("Download failed: Sill isn’t allowed to save to Downloads")
+                        return
+                    }
+                    if let item = self.item(for: download) {
+                        item.name = url.lastPathComponent
+                        item.url = url
+                        // Cancelled while its name was being picked.
+                        if item.failed { Self.naming.async { Self.promised.remove(url.path.lowercased()) }; return completionHandler(nil) }
+                    }
+                    completionHandler(url)
+                    browser?.toast("Downloading “\(url.lastPathComponent)”")
+                }
+            }
         }
-        completionHandler(url)
-        let window = windows[ObjectIdentifier(download)]
-        (window?.windowController as? BrowserWindowController)?.toast("Downloading “\(url.lastPathComponent)”")
+    }
+
+    /// A cancelled download reports nothing more: its name is free again.
+    func cancelled(_ item: DownloadItem) {
+        if let download = item.download { windows[ObjectIdentifier(download)] = nil }
+        settled(item, freesName: false)
+    }
+
+    private func settled(_ item: DownloadItem?, freesName: Bool = true) {
+        if freesName, let path = item?.url?.path { Self.naming.async { Self.promised.remove(path.lowercased()) } }
+        if let item, item.isPrivate, !AppDelegate.shared.browsers.contains(where: { $0.isPrivate }) {
+            items.removeAll { $0 === item }
+        }
     }
 
     func downloadDidFinish(_ download: WKDownload) {
@@ -197,6 +289,7 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
         guard let item = item(for: download), let url = item.url else { return }
         item.finished = true
         item.fraction = 1
+        settled(item)
         DistributedNotificationCenter.default().post(name: .init("com.apple.DownloadFileFinished"), object: url.path)
         (window?.windowController as? BrowserWindowController)?.toast("Downloaded “\(url.lastPathComponent)”",
                                                                     action: ("Show in Finder", { NSWorkspace.shared.activateFileViewerSelecting([url]) }))
@@ -204,7 +297,10 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         let window = windows.removeValue(forKey: ObjectIdentifier(download))
-        item(for: download)?.failed = true
+        let item = item(for: download)
+        item?.failed = true
+        Self.discard(item?.url)
+        settled(item)
         if (error as NSError).code != NSURLErrorCancelled {
             (window?.windowController as? BrowserWindowController)?.toast("Download failed: \(error.localizedDescription)")
         }

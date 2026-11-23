@@ -110,6 +110,8 @@ enum Web {
         configuration.preferences.isTextInteractionEnabled = true
         configuration.allowsAirPlayForMediaPlayback = true
         configuration.defaultWebpagePreferences.preferredContentMode = .desktop
+        // A page opens windows when you click, not on its own.
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         // Pages out of sight are left to WebKit's default, which suspends a
         // page once it is idle and in no window: a tab behind another costs
         // nothing. A page playing sound or video, or still loading, isn't
@@ -141,6 +143,53 @@ final class SillWebView: WKWebView {
         let became = super.becomeFirstResponder()
         if became, let tab, let host = tab.host as? BrowserWindowController { host.paneFocused(tab) }
         return became
+    }
+
+    /// False once WebKit has found the page's process isn't answering
+    /// (a script that never ends).
+    var processIsResponsive: Bool {
+        let selector = NSSelectorFromString("_webProcessIsResponsive")
+        guard responds(to: selector) else { return true }
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Bool
+        return unsafeBitCast(method(for: selector), to: Getter.self)(self, selector)
+    }
+
+    /// Ends the page's process, as a crash would. By its pid: a process
+    /// that isn't answering doesn't take WebKit's own request to stop.
+    func endProcess() {
+        let selector = NSSelectorFromString("_webProcessIdentifier")
+        guard responds(to: selector) else { return }
+        typealias Getter = @convention(c) (AnyObject, Selector) -> pid_t
+        let pid = unsafeBitCast(method(for: selector), to: Getter.self)(self, selector)
+        if pid > 0 { kill(pid, SIGKILL) }
+    }
+
+    /// A page that isn't answering would swallow ⌘W, ⌘T and ⌘R for good:
+    /// they go to the menu instead.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard processIsResponsive else { return false }
+        let taken = super.performKeyEquivalent(with: event)
+        unanswered = taken ? event : nil
+        return taken
+    }
+
+    /// The last shortcut handed to the page, which hands it back if it has
+    /// no use for it. A page that hangs never does.
+    private var unanswered: NSEvent?
+
+    /// WebKit has found the page isn't answering: the shortcut it was just
+    /// given (within the few seconds that takes to notice) goes to the menu.
+    func processStoppedAnswering() {
+        guard let event = unanswered else { return }
+        unanswered = nil
+        if ProcessInfo.processInfo.systemUptime - event.timestamp < 10, window?.isKeyWindow == true {
+            NSApp.mainMenu?.performKeyEquivalent(with: event)
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { tab?.pageShown() }
     }
 
     /// "New Window" reads "New Tab" here: that's what it does.

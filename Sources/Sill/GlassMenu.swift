@@ -127,6 +127,8 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
     /// down from it, or up from it when `above`, kept inside the window.
     func show(in window: NSWindow, at point: NSPoint, above: Bool = false, alignRight: Bool = false, from source: AnyObject? = nil) {
         guard let host = window.contentView else { return }
+        // A tab's preview card doesn't stay up over its menu.
+        (window.windowController as? BrowserWindowController)?.hidePreview(animated: false)
         Self.current?.dismiss(animated: false)
         Self.current = self
         self.source = source.map(ObjectIdentifier.init)
