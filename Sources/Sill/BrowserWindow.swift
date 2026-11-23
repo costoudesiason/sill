@@ -910,6 +910,53 @@ final class BrowserNSWindow: NSWindow {
     override func cancelOperation(_ sender: Any?) {
         (windowController as? BrowserWindowController)?.escape()
     }
+
+    /// The shortcuts worth holding down. The menu bar flashes its title for every repeat and
+    /// sleeps the main thread some 50 ms each time to do it, so a held key steps at a third of
+    /// the repeat rate with nothing drawn in between. The repeats go straight to the action;
+    /// the first press still goes through the menu.
+    private static let held: Set<Selector> = [
+        #selector(BrowserWindowController.nextTab(_:)), #selector(BrowserWindowController.previousTab(_:)),
+        #selector(BrowserWindowController.findNext(_:)), #selector(BrowserWindowController.findPrevious(_:)),
+        #selector(BrowserWindowController.zoomIn(_:)), #selector(BrowserWindowController.zoomOut(_:)),
+        #selector(BrowserWindowController.goBack(_:)), #selector(BrowserWindowController.goForward(_:)),
+    ]
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // A page in front takes Control-Tab for itself and the menu never hears of it.
+        if event.type == .keyDown, event.keyCode == 48,
+           let controller = windowController as? BrowserWindowController {
+            switch event.modifierFlags.intersection([.command, .shift, .control, .option]) {
+            case .control: controller.nextTab(nil); return true
+            case [.control, .shift]: controller.previousTab(nil); return true
+            default: break
+            }
+        }
+        if super.performKeyEquivalent(with: event) { return true }
+        guard event.type == .keyDown, event.isARepeat,
+              let controller = windowController as? BrowserWindowController,
+              let key = event.characters(byApplyingModifiers: .command), !key.isEmpty,
+              let item = Self.item(for: key, event.modifierFlags.intersection([.command, .shift, .control, .option]),
+                                   in: NSApp.mainMenu) else { return false }
+        if controller.validateMenuItem(item), let action = item.action {
+            NSApp.sendAction(action, to: controller, from: item)
+        }
+        return true
+    }
+
+    private static func item(for key: String, _ modifiers: NSEvent.ModifierFlags, in menu: NSMenu?) -> NSMenuItem? {
+        for item in menu?.items ?? [] {
+            if let found = Self.item(for: key, modifiers, in: item.submenu) { return found }
+            guard let action = item.action, held.contains(action) else { continue }
+            // "+" is the key "=" with Shift, and is reached without it too.
+            let plus = item.keyEquivalent == "+"
+            if (plus ? "=" : item.keyEquivalent) == key,
+               item.keyEquivalentModifierMask == modifiers || (plus && item.keyEquivalentModifierMask.union(.shift) == modifiers) {
+                return item
+            }
+        }
+        return nil
+    }
 }
 
 extension BrowserWindowController {
