@@ -114,6 +114,9 @@ final class History {
                 flat?.spans[(at * Flat.fields + Flat.title) * 2] = end
                 flat?.spans[(at * Flat.fields + Flat.title) * 2 + 1] = Int32(read.titleBytes.count)
                 flat?.bytes.append(contentsOf: read.titleBytes)
+                // A page that keeps renaming itself leaves a title behind each
+                // time: past a point the whole is made again without them.
+                if let flat, flat.bytes.count > flat.live * 2 + 65_536 { self.flat = nil }
             }
         } else {
             places[visit.url] = shelf?.count ?? 0
@@ -209,6 +212,8 @@ final class History {
         var spans = ContiguousArray<Int32>()
         /// Three to an entry, what its score is made of: visits counted, when last, how deep.
         var weights = ContiguousArray<Double>()
+        /// How many of the bytes were there when it was made, none of them left behind.
+        var live = 0
 
         mutating func add(_ visit: Visit, _ read: Reading) {
             weights.append(Double(visit.count) + Double(visit.typed) * 2)
@@ -228,6 +233,7 @@ final class History {
         var made = Flat()
         made.spans.reserveCapacity(entries.count * Flat.fields * 2)
         for (visit, read) in entries { made.add(visit, read) }
+        made.live = made.bytes.count
         flat = made
         return made
     }
