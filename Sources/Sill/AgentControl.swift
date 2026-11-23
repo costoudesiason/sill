@@ -328,7 +328,7 @@ enum AgentCommands {
         case "page.click":
             let (view, tab, browser) = try webView(args)
             let target = try await locate(args, in: view)
-            if view.window != nil, tab === browser.selected || browser.split?.contains(tab) == true, args["real"] as? Bool ?? true {
+            if view.window != nil, !view.isHidden, tab === browser.selected || browser.split?.contains(tab) == true, args["real"] as? Bool ?? true {
                 realClick(at: target.point, in: view, double: args["double"] as? Bool ?? false)
             } else {
                 _ = try await evaluate("return window.__sillAgent.click(ref)", in: view, world: Web.world, arguments: ["ref": target.ref])

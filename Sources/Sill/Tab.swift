@@ -19,16 +19,13 @@ protocol TabHost: AnyObject {
     func focused(_ tab: Tab, field: LoginField)
     /// The question its page has for you changed (Permissions.swift).
     func promptsChanged(_ tab: Tab)
-    /// Whether its page is the one in front, or one half of the split in
-    /// front. Not the same as its view being in the window.
-    func isInFront(_ tab: Tab) -> Bool
 }
 
 /// One page and its history. Its web view is made the first time it is
 /// shown, so restored tabs cost nothing until they're clicked.
 @MainActor
 final class Tab: NSObject {
-    enum Change { case title, url, loading, icon, navigation, scroll }
+    enum Change { case title, url, loading, icon, navigation, scroll, progress }
 
     let id = UUID()
     let isPrivate: Bool
@@ -41,6 +38,8 @@ final class Tab: NSObject {
     /// (TabPreview.swift): a picture while the page runs, let go when the
     /// card goes; squeezed small while the tab sleeps.
     var picture: CGImage?
+    /// How far the page has loaded, 0 to 1, for the line under the bar.
+    var progress: Double = 0
     var pictureTakenAt: CFTimeInterval = 0
     var sleepingPicture: Data?
     /// The tab this one was opened from, for placing and for going back to it.
@@ -208,6 +207,13 @@ final class Tab: NSObject {
                     self.host?.tabChanged(self, .url)
                 }
             },
+            view.observe(\.estimatedProgress, options: [.new]) { [weak self] view, _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.progress = view.estimatedProgress
+                    self.host?.tabChanged(self, .progress)
+                }
+            },
             view.observe(\.isLoading, options: [.new]) { [weak self] view, _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
@@ -354,7 +360,7 @@ final class Tab: NSObject {
     /// landing on whatever page is in front. `shown` is false if the page
     /// went away first, and the dialog is to be answered unseen.
     func whenShown(_ present: @escaping (_ shown: Bool) -> Void) {
-        if webView?.window != nil { present(true) } else { heldPrompts.append(present) }
+        if (webView as? SillWebView)?.isShown == true { present(true) } else { heldPrompts.append(present) }
     }
 
     /// The page is in a window (again): what waited for that goes ahead.
@@ -696,7 +702,7 @@ extension Tab: WKNavigationDelegate {
         if endedHungProcess {
             endedHungProcess = false
             if let next = afterHungProcess { webView.load(URLRequest(url: next)) }
-            else if webView.window == nil { needsReload = true } else { webView.reload() }
+            else if (webView as? SillWebView)?.isShown != true { needsReload = true } else { webView.reload() }
             afterHungProcess = nil
             return
         }
@@ -710,7 +716,7 @@ extension Tab: WKNavigationDelegate {
             errorNavigation = webView.loadSimulatedRequest(URLRequest(url: url), responseHTML: html)
             return
         }
-        if webView.window == nil { needsReload = true } else { webView.reload() }
+        if (webView as? SillWebView)?.isShown != true { needsReload = true } else { webView.reload() }
     }
 }
 
@@ -795,10 +801,11 @@ extension Tab: WKUIDelegate {
     @objc(_webView:runBeforeUnloadConfirmPanelWithMessage:initiatedByFrame:completionHandler:)
     func webView(_ webView: WKWebView, runBeforeUnloadConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
-        guard webView.window != nil || closing != nil else { return completionHandler(true) }
+        let shown = (webView as? SillWebView)?.isShown == true
+        guard shown || closing != nil else { return completionHandler(true) }
         // Asked because its tab, window or Sill is closing: a tab behind
         // another comes to the front, so it is plain which page is meant.
-        if closing != nil, host?.isInFront(self) != true { host?.bringBack(self) }
+        if closing != nil, !shown { host?.bringBack(self) }
         Prompts.leave(closing: closing == nil ? nil : displayTitle, in: host?.window) { [weak self] leave in
             if !leave, let closing = self?.closing {
                 self?.closing = nil

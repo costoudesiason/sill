@@ -84,6 +84,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private lazy var peek: Peek = { let peek = Peek(); stage.addSubview(peek); return peek }()
     /// The card over a tab the pointer rests on (TabPreview.swift).
     private lazy var preview = TabPreview()
+    /// The thin line between the bar and the page while the page loads.
+    private let loadingLine = LoadingLine()
     private var previewWait: DispatchWorkItem?
     private var previewLeave: DispatchWorkItem?
     private var previewRefresh: Timer?
@@ -321,6 +323,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     var topInset: CGFloat { TopBar.height }
 
     private func stageLaidOut() {
+        if loadingLine.superview !== stage { stage.addSubview(loadingLine) }
+        loadingLine.frame = NSRect(x: 0, y: TopBar.height - LoadingLine.thickness, width: stage.bounds.width, height: LoadingLine.thickness)
         // Back and forward start after the traffic lights where there are some.
         if isPopup, let window, let zoom = window.standardWindowButton(.zoomButton), !zoom.isHidden,
            !window.styleMask.contains(.fullScreen) {
@@ -417,13 +421,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
                     if previous === self.selected { PictureInPicture.return(to: previous) } else { self.pictured = previous }
                 }
                 guard let old, old !== self.selected?.webView else { return }
-                old.removeFromSuperview()
+                if old.superview === self.pageHost, let page = old as? SillWebView { page.park() } else { old.removeFromSuperview() }
             }
         }
         selected = tab
         tab.lastShown = Date()
         let webView = tab.materialize()
         placePages(keep: keep)
+        loadingLine.show(progress: tab.progress, loading: tab.isLoading, jump: true)
         tab.reloadIfCrashed()
         tab.loadIfEmpty()
         // Back from picture in picture: WebKit puts a video back in its page
@@ -435,7 +440,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // Clicks, ⌘1–9 and ⌃Tab only move the selection; a tab added or
         // closed changes the row.
         if strip.matches(tabs) { strip.select(tab) } else { strip.sync(animated: animated) }
-        strip.markPaired(split?.contains(tab) == true ? split?.other(than: tab) : nil)
+        strip.showPair(split?.left, split?.right)
         warmNeighbours(of: tab)
         window?.title = tab.displayTitle
         updateNavigation()
@@ -485,7 +490,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
         tabs.remove(at: index)
         // A split loses one side: the page left over has the window to itself.
-        if let split, split.contains(tab) { self.split = nil; strip.markPaired(nil) }
+        if let split, split.contains(tab) { self.split = nil; strip.showPair(nil, nil) }
         // Its sound and video go with it, floating or not: nothing keeps
         // playing from a tab that's gone.
         if pictured === tab { pictured = nil }
@@ -646,7 +651,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         let now = Date()
         for tab in tabs where tab !== selected && tab !== pictured {
             // A floating video may be muted, so not "playing audio": it counts anyway.
-            guard let webView = tab.webView, webView.window == nil, now.timeIntervalSince(tab.lastShown) > after,
+            guard let webView = tab.webView, !webView.isShown, now.timeIntervalSince(tab.lastShown) > after,
                   webView.cameraCaptureState == .none, webView.microphoneCaptureState == .none,
                   webView.fullscreenState == .notInFullscreen, !Self.isPlayingAudio(webView)
             else { continue }
@@ -847,6 +852,9 @@ extension BrowserWindowController: TabHost {
         switch what {
         case .icon, .loading:
             strip.refresh(tab)
+            if what == .loading, tab === selected { loadingLine.show(progress: tab.progress, loading: tab.isLoading) }
+        case .progress:
+            if tab === selected { loadingLine.show(progress: tab.progress, loading: tab.isLoading) }
         case .title:
             // Not a session save: titles are read when it's written, and a
             // page ticking its title would put the save off forever.
@@ -916,7 +924,8 @@ extension BrowserWindowController: TabHost {
 
     func promptsChanged(_ tab: Tab) { placePrompts() }
 
-    func isInFront(_ tab: Tab) -> Bool {
+    /// The tab in front, or the other half of its split.
+    private func isInFront(_ tab: Tab) -> Bool {
         tab === selected || (split?.contains(tab) == true && split?.contains(selected) == true)
     }
 
@@ -929,7 +938,7 @@ extension BrowserWindowController: TabHost {
                 tab.card = nil
                 continue
             }
-            guard isInFront(tab), let view = tab.webView, view.window != nil else {
+            guard isInFront(tab), let view = tab.webView, view.isShown else {
                 tab.card?.removeFromSuperview()
                 continue
             }
@@ -1110,9 +1119,9 @@ extension BrowserWindowController {
             let shown = selected.webView as? SillWebView
             let under = keep == nil && leaving?.superview !== pageHost
                 && shown?.shownBefore == true && splitView.superview !== pageHost
-                && pageHost.subviews.contains { $0 is WKWebView }
+                && pageHost.subviews.contains { $0 is WKWebView && !$0.isHidden }
             if !under {
-                for view in pageHost.subviews where view !== keep && view !== splitView { view.removeFromSuperview() }
+                putAside(except: splitView, keep)
             }
             if splitView.superview !== pageHost {
                 splitView.frame = pageHost.bounds
@@ -1124,7 +1133,7 @@ extension BrowserWindowController {
                 shown.afterNextFrame { [weak self, weak shown] in
                     guard let self, shown != nil, self.split?.contains(self.selected) == true,
                           self.splitView.superview === self.pageHost else { return }
-                    for view in self.pageHost.subviews where view !== self.splitView && view !== self.leaving { view.removeFromSuperview() }
+                    self.putAside(except: self.splitView, self.leaving)
                 }
             }
             for (pane, tab) in [(splitView.leftPane, split.left), (splitView.rightPane, split.right)] {
@@ -1141,31 +1150,57 @@ extension BrowserWindowController {
             splitView.apply(fraction: split.fraction)
         } else {
             let webView = selected.materialize()
+            let placed = webView.superview === pageHost && !webView.isHidden
             // A page that has been shown before comes back under the one
             // being left, which goes once the new one has drawn: nothing
             // waits, and the window never shows through between the two.
             let under = keep == nil && leaving?.superview !== pageHost
-                && webView.shownBefore && webView.superview !== pageHost
+                && webView.shownBefore && !placed
                 && !webView.isDescendant(of: splitView)
-                && pageHost.subviews.contains { $0 is WKWebView || $0 === splitView }
-            if !under {
-                for view in pageHost.subviews where view !== keep && view !== webView { view.removeFromSuperview() }
-            }
+                && pageHost.subviews.contains { ($0 is WKWebView && !$0.isHidden && $0 !== webView) || $0 === splitView }
+            if !under { putAside(except: webView, keep) }
             if webView.superview !== pageHost {
                 webView.frame = pageHost.bounds
-                webView.autoresizingMask = [.width, .height]
                 pageHost.addSubview(webView, positioned: under ? .below : .above, relativeTo: nil)
+            } else if !placed {
+                // Only hidden since it was last in front (see SillWebView.park).
+                webView.frame = pageHost.bounds
+                order(webView, below: under)
+                webView.isHidden = false
             }
+            webView.autoresizingMask = [.width, .height]
             webView.shownBefore = true
             webView.outgoing = false
             if under {
                 for case let old as SillWebView in pageHost.subviews where old !== webView { old.outgoing = true }
                 webView.afterNextFrame { [weak self, weak webView] in
                     guard let self, let webView, self.selected?.webView === webView,
-                          webView.superview === self.pageHost else { return }
-                    for view in self.pageHost.subviews where view !== webView && view !== self.leaving { view.removeFromSuperview() }
+                          webView.superview === self.pageHost, !webView.isHidden else { return }
+                    self.putAside(except: webView, self.leaving)
                 }
             }
+        }
+    }
+
+    /// Every page in the page area but these is hidden where it is; the
+    /// split's two halves, which hold their own pages, leave the window.
+    private func putAside(except shown: NSView?, _ kept: NSView?) {
+        for view in pageHost.subviews where view !== shown && view !== kept {
+            if let page = view as? SillWebView { page.park() } else { view.removeFromSuperview() }
+        }
+    }
+
+    /// Moves a page already in the page area to the back or the front of it
+    /// without taking it out of the window.
+    private func order(_ view: NSView, below: Bool) {
+        var context = (Unmanaged.passUnretained(view).toOpaque(), below)
+        withUnsafeMutablePointer(to: &context) { pointer in
+            pageHost.sortSubviews({ a, b, raw in
+                let (target, below) = raw!.assumingMemoryBound(to: (UnsafeMutableRawPointer, Bool).self).pointee
+                let isA = Unmanaged.passUnretained(a).toOpaque() == target, isB = Unmanaged.passUnretained(b).toOpaque() == target
+                if isA == isB { return .orderedSame }
+                return (isA == below) ? .orderedAscending : .orderedDescending
+            }, context: pointer)
         }
     }
 
@@ -1175,7 +1210,7 @@ extension BrowserWindowController {
         split = onLeft ? SplitPair(left: tab, right: nil) : SplitPair(left: nil, right: tab)
         if selected === tab {
             placePages(keep: nil)
-            strip.markPaired(nil)
+            strip.showPair(nil, nil)
         } else {
             select(tab)
         }
@@ -1184,15 +1219,24 @@ extension BrowserWindowController {
     fileprivate func fillSplit(with tab: Tab) {
         guard let split else { return }
         if split.left == nil { split.left = tab } else { split.right = tab }
+        // The pair sits together in the row, left then right, in one capsule.
+        if let left = split.left, let right = split.right,
+           let l = tabs.firstIndex(where: { $0 === left }), let r = tabs.firstIndex(where: { $0 === right }), r != l + 1 {
+            tabs.remove(at: r)
+            let at = (tabs.firstIndex(where: { $0 === left }) ?? l) + 1
+            tabs.insert(right, at: at)
+            strip.sync(animated: true)
+            changed()
+        }
         select(tab)
         placePages(keep: nil)
-        strip.markPaired(split.other(than: tab))
+        strip.showPair(split.left, split.right)
     }
 
     @objc func unsplit() {
         guard split != nil else { return }
         split = nil
-        strip.markPaired(nil)
+        strip.showPair(nil, nil)
         placePages(keep: nil)
         if let webView = selected?.webView { window?.makeFirstResponder(webView) }
     }
@@ -1302,7 +1346,7 @@ extension BrowserWindowController {
         selected = tab
         tab.lastShown = Date()
         strip.select(tab)
-        strip.markPaired(split.other(than: tab))
+        strip.showPair(split.left, split.right)
         window?.title = tab.displayTitle
         updateNavigation()
         changed()

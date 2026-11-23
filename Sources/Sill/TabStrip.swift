@@ -147,10 +147,37 @@ final class TabStripView: NSView {
         items.count == tabs.count && zip(items, tabs).allSatisfy { $0.tab === $1 }
     }
 
-    /// The other half of the split in front wears a lighter fill, so the
-    /// pair reads as one.
-    func markPaired(_ tab: Tab?) {
-        for item in items { item.isPaired = item.tab === tab }
+    /// Two tabs side by side in a split share one capsule in the row, so
+    /// the pair reads as one, whichever tab is in front.
+    private var pair: (Tab, Tab)?
+    private lazy var pairBackdrop: NSView = {
+        let view = PairBackdrop()
+        addSubview(view, positioned: .below, relativeTo: nil)
+        return view
+    }()
+
+    func showPair(_ left: Tab?, _ right: Tab?) {
+        if let left, let right { pair = (left, right) } else { pair = nil }
+        placeBackdrop(animated: true)
+    }
+
+    private func placeBackdrop(animated: Bool, frames: [ObjectIdentifier: NSRect]? = nil) {
+        guard let pair,
+              let a = items.first(where: { $0.tab === pair.0 }), let b = items.first(where: { $0.tab === pair.1 }),
+              let ia = items.firstIndex(of: a), let ib = items.firstIndex(of: b), abs(ia - ib) == 1 else {
+            if !pairBackdrop.isHidden { pairBackdrop.isHidden = true }
+            return
+        }
+        let frames = frames ?? targetFrames()
+        guard let fa = frames[ObjectIdentifier(a)], let fb = frames[ObjectIdentifier(b)] else { return }
+        let target = fa.union(fb).insetBy(dx: -2, dy: 0)
+        let wasHidden = pairBackdrop.isHidden
+        pairBackdrop.isHidden = false
+        if animated && animates && !wasHidden {
+            Motion.animate(Self.reflow) { pairBackdrop.animator().frame = target }
+        } else {
+            Motion.still { pairBackdrop.frame = target }
+        }
     }
 
     func prefsChanged() {
@@ -186,6 +213,7 @@ final class TabStripView: NSView {
             }
         }
         if animated && animates { Motion.animate(Self.reflow, apply) } else { Motion.still(apply) }
+        if dragged == nil { placeBackdrop(animated: animated, frames: frames) }
     }
 
     private func slot(at x: CGFloat) -> Int {
@@ -220,15 +248,28 @@ final class TabStripView: NSView {
                 guard abs(point.x - start.x) > 4 else { continue }
                 moved = true
                 dragged = item
-                item.layer?.zPosition = 10
+                // Above its neighbours (a glass tab ignores a layer's z-position).
+                addSubview(item, positioned: .above, relativeTo: nil)
+                pairBackdrop.isHidden = true
             }
             // The tab stays under the pointer, along the row, no further than its ends.
             let x = max(0, min(bounds.width - item.frame.width, point.x - grab))
             Motion.still { item.setFrameOrigin(NSPoint(x: x, y: 0)) }
-            let target = slot(at: x + item.frame.width / 2)
-            if let index = items.firstIndex(of: item), index != target {
-                items.remove(at: index)
-                items.insert(item, at: target)
+            // It trades places with a neighbour once its middle passes the
+            // neighbour's middle, not at a slot's edge, so it never flickers
+            // back and forth there.
+            let center = x + item.frame.width / 2
+            guard var index = items.firstIndex(of: item) else { continue }
+            let start = index
+            let frames = targetFrames()
+            while index + 1 < items.count, let next = frames[ObjectIdentifier(items[index + 1])], center > next.midX {
+                items.swapAt(index, index + 1); index += 1
+            }
+            while index > 0, let previous = frames[ObjectIdentifier(items[index - 1])], center < previous.midX {
+                items.swapAt(index, index - 1); index -= 1
+            }
+            if index != start {
+                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
                 layoutItems(animated: true)
             }
         }
@@ -242,7 +283,7 @@ final class TabStripView: NSView {
         if let index = items.firstIndex(of: item) { browser?.move(item.tab, to: index) }
         // Settles into its slot, then drops back to the row's level.
         if let target = targetFrames()[ObjectIdentifier(item)] {
-            Motion.animate(0.18, { item.animator().frame = target }, completion: { item.layer?.zPosition = 0 })
+            Motion.animate(0.18, { item.animator().frame = target }, completion: { [weak self] in self?.placeBackdrop(animated: false) })
         }
     }
 }
@@ -288,6 +329,18 @@ final class TabItemView: NSView {
     override var mouseDownCanMoveWindow: Bool { false }
     override var wantsUpdateLayer: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// A click anywhere on the tab is the tab's (its close button aside):
+    /// its label and glass are see-through views, which AppKit lets drag
+    /// the window, so dragging a tab dragged the window with it.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, let superview, frame.contains(point) else { return nil }
+        let local = convert(point, from: superview)
+        if !closeButton.isHidden, closeButton.frame.contains(closeButton.superview.map { convert(local, to: $0) } ?? local) {
+            return closeButton
+        }
+        return self
+    }
 
     /// The tab in front is a piece of Liquid Glass. Its title and icon live
     /// inside the glass's own content view (a glass view only promises that
@@ -347,6 +400,8 @@ final class TabItemView: NSView {
     private var warming: DispatchWorkItem?
 
     override func mouseEntered(with event: NSEvent) {
+        // Passing over tabs while dragging one isn't pointing at them.
+        guard NSEvent.pressedMouseButtons == 0 else { return }
         isHovered = true
         needsLayout = true
         // A moment's pause over a sleeping tab starts loading it, so it's ready
@@ -589,5 +644,31 @@ final class TabCloseButton: NSButton {
     override func viewDidHide() {
         super.viewDidHide()
         hovering = false
+    }
+}
+
+/// The capsule behind a split's two tabs.
+private final class PairBackdrop: NSView {
+    override var wantsUpdateLayer: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        isHidden = true
+        layer?.cornerCurve = .continuous
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func updateLayer() {
+        guard let layer else { return }
+        layer.cornerRadius = bounds.height / 2
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer.backgroundColor = NSColor.labelColor.withAlphaComponent(0.07).cgColor
+            layer.borderColor = NSColor.labelColor.withAlphaComponent(0.1).cgColor
+        }
+        layer.borderWidth = 1
+    }
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsDisplay = true
     }
 }
