@@ -798,7 +798,15 @@ enum PictureInPicture {
     /// The largest video playing, pumped to Sill. "in", or "none".
     fileprivate static let pump = """
     (() => {
-      if (window.__sillPip && window.__sillPip.on) return 'in';
+      // Where the picture is on the page, in CSS pixels, as the video
+      // draws it (letterboxed inside its box): the float flies from there.
+      const place = (v) => {
+        const b = v.getBoundingClientRect(), a = (v.videoWidth / v.videoHeight) || (16 / 9);
+        let w = b.width, h = w / a;
+        if (h > b.height) { h = b.height; w = h * a; }
+        return JSON.stringify({ x: b.left + (b.width - w) / 2, y: b.top + (b.height - h) / 2, w, h });
+      };
+      if (window.__sillPip && window.__sillPip.on) return place(window.__sillPip.v);
       if (typeof __sillPipFrame !== 'function') return 'none';
       let best = null, area = 0;
       for (const v of document.querySelectorAll('video')) {
@@ -830,7 +838,7 @@ enum PictureInPicture {
       pip.beat = setInterval(() => { if (pip.on && v.paused) __sillPipFrame(null, 0, 0, ...state()); }, 500);
       pip.stop = () => { pip.on = false; clearInterval(pip.beat); };
       window.__sillPip = pip;
-      return 'in';
+      return place(v);
     })()
     """
 
@@ -841,11 +849,19 @@ enum PictureInPicture {
         guard let webView = tab.webView, let window = tab.host?.window else { return done(false) }
         webView.evaluateJavaScript(pump, completion: { value, _ in
             MainActor.assumeIsolated {
-                guard (value as? String) == "in" else { return done(false) }
-                Floating.shared.start(tab, in: window, done: done)
+                guard let json = value as? String, json != "none", let data = json.data(using: .utf8),
+                      let place = try? JSONDecoder().decode(Place.self, from: data) else { return done(false) }
+                // CSS pixels to the window's points, flipped: AppKit counts up from the bottom.
+                let zoom = webView.pageZoom > 0 ? webView.pageZoom : 1
+                let inView = NSRect(x: place.x * zoom, y: webView.bounds.height - (place.y + place.h) * zoom,
+                                    width: place.w * zoom, height: place.h * zoom)
+                let inWindow = window.contentView?.convert(inView, from: webView) ?? inView
+                Floating.shared.start(tab, in: window, from: inWindow, done: done)
             }
         })
     }
+
+    private struct Place: Decodable { let x, y, w, h: Double }
 
     /// Back into the page: the floating window closes.
     static func `return`(to tab: Tab) {
@@ -853,7 +869,7 @@ enum PictureInPicture {
     }
 
     static func frame(from tab: Tab, rgba: UnsafeRawPointer?, width: Int, height: Int, time: Double, duration: Double, paused: Bool) {
-        Floating.shared.frame(from: tab, rgba: rgba, width: width, height: height, paused: paused)
+        Floating.shared.frame(from: tab, rgba: rgba, width: width, height: height, time: time, duration: duration, paused: paused)
     }
 }
 
@@ -862,6 +878,12 @@ import Accelerate
 import CoreMedia
 
 /// The one video floating, and AVKit's window for it.
+///
+/// The frames go into a sample-buffer layer that sits in the window exactly
+/// where the video is on the page, under everything: AVKit flies the float
+/// out of that spot and back into it. The layer's clock follows the
+/// video's, so the window's play button, its skip buttons and its progress
+/// show the video as it is.
 @MainActor
 final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureInPictureSampleBufferPlaybackDelegate {
     static let shared = Floating()
@@ -869,6 +891,7 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
     private(set) weak var tab: Tab?
     private var holder: NSView?
     private var layer: AVSampleBufferDisplayLayer?
+    private var timebase: CMTimebase?
     private var controller: AVPictureInPictureController?
     private var possible: NSKeyValueObservation?
     private var started: ((Bool) -> Void)?
@@ -876,40 +899,59 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
     private var poolSize = (0, 0)
     private var format: CMVideoFormatDescription?
     private var paused = false
+    private var duration = 0.0
     private var frames = 0
+    /// AVKit is putting the float back (its return button, or the tab chosen again).
+    private var returning = false
+    /// AVKit's floating panel, the layer host in it showing our video, and
+    /// what keeps that scaled to the panel while it floats.
+    private weak var panel: NSWindow?
+    private weak var host: CALayer?
+    private var ticker: Timer?
+    /// AVKit's flight in is over: the float shows.
+    private var landed = false
 
     var isFloating: Bool { controller?.isPictureInPictureActive == true }
 
-    func start(_ tab: Tab, in window: NSWindow, done: @escaping (Bool) -> Void) {
-        stop(nil)
+    func start(_ tab: Tab, in window: NSWindow, from place: NSRect, done: @escaping (Bool) -> Void) {
+        end()
         self.tab = tab
         started = done
         frames = 0
-        // The layer AVKit takes the frames from: video-sized, in the window,
-        // behind everything (AVKit draws the window from it; at a couple of
-        // pixels square, it showed black).
-        let holder = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 270))
+        paused = false
+        duration = 0
+        returning = false
+        landed = false
+        // The layer AVKit takes the picture from sits exactly where the
+        // float was last left: macOS flies a float out of its source, so from
+        // there to there it just appears.
+        let aspect = place.width > 1 && place.height > 1 ? place.width / place.height : 16 / 9
+        let spot = Self.spot(aspect: aspect, near: window)
+        // In the browser window (a layer of its own window draws nothing in
+        // the float), at the float's spot, under everything there is.
+        let inWindow = window.convertFromScreen(spot)
+        let holder = NSView(frame: window.contentView?.convert(inWindow, from: nil) ?? inWindow)
         holder.wantsLayer = true
+        window.contentView?.addSubview(holder, positioned: .below, relativeTo: nil)
         let layer = AVSampleBufferDisplayLayer()
         layer.frame = holder.bounds
         layer.videoGravity = .resizeAspect
         layer.preventsDisplaySleepDuringVideoPlayback = true
-        // Its own clock, running on the Mac's, as Apple's samples set one up.
         var timebase: CMTimebase?
         CMTimebaseCreateWithSourceClock(allocator: nil, sourceClock: CMClockGetHostTimeClock(), timebaseOut: &timebase)
         if let timebase {
-            CMTimebaseSetTime(timebase, time: CMClockGetTime(CMClockGetHostTimeClock()))
-            CMTimebaseSetRate(timebase, rate: 1)
+            CMTimebaseSetTime(timebase, time: .zero)
+            CMTimebaseSetRate(timebase, rate: 0)
             layer.controlTimebase = timebase
         }
+        self.timebase = timebase
         holder.layer?.addSublayer(layer)
-        window.contentView?.addSubview(holder, positioned: .below, relativeTo: nil)
         self.holder = holder
         self.layer = layer
         let controller = AVPictureInPictureController(contentSource: .init(sampleBufferDisplayLayer: layer, playbackDelegate: self))
         controller.delegate = self
         self.controller = controller
-        (tab.webView)?.floating = true
+        tab.webView?.floating = true
         // Floats once AVKit has frames to size its window by (started with
         // none, it works its size out as NaN and AppKit stops the app); if
         // it never can, the page is let go.
@@ -918,8 +960,7 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, weak tab] in
             guard let self, let tab, self.tab === tab, self.started != nil, !self.isFloating else { return }
-            self.finish(false)
-            self.stop(tab)
+            self.end()
         }
     }
 
@@ -929,25 +970,36 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
         started(floated)
     }
 
-    /// Ends it for `tab` (nil: whatever is floating).
+    /// Back into the page, for `tab` (nil: whatever is floating). The float
+    /// flies back into its spot; then everything goes.
     func stop(_ tab: Tab?) {
         guard self.tab != nil, tab == nil || tab === self.tab else { return }
-        let was = self.tab
-        if controller?.isPictureInPictureActive == true { controller?.stopPictureInPicture() }
-        cleanUp(was)
+        // Back to the tab: the float just goes, where it is. Its source
+        // gone first, there is nowhere for macOS to fly it back to.
+        remember()
+        holder?.removeFromSuperview()
+        end()
     }
 
-    private func cleanUp(_ was: Tab?) {
+    /// Everything goes at once, without the flight back.
+    private func end() {
+        guard tab != nil || controller != nil else { return }
+        let was = tab
         possible = nil
+        landed = false
+        untrack()
         controller?.delegate = nil
+        if controller?.isPictureInPictureActive == true { controller?.stopPictureInPicture() }
         controller = nil
         layer?.sampleBufferRenderer.flush()
         holder?.removeFromSuperview()
         holder = nil
         layer = nil
+        timebase = nil
         tab = nil
         pool = nil
         format = nil
+        returning = false
         finish(false)
         guard let was, let view = was.webView else { return }
         view.evaluateJavaScript(PictureInPicture.stopPump, completion: nil)
@@ -955,12 +1007,9 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
         (was.host as? BrowserWindowController)?.floatEnded(was)
     }
 
-    func frame(from tab: Tab, rgba: UnsafeRawPointer?, width: Int, height: Int, paused: Bool) {
+    func frame(from tab: Tab, rgba: UnsafeRawPointer?, width: Int, height: Int, time: Double, duration: Double, paused: Bool) {
         guard tab === self.tab, let layer else { return }
-        if paused != self.paused {
-            self.paused = paused
-            controller?.invalidatePlaybackState()
-        }
+        follow(time: time, duration: duration, paused: paused)
         guard let rgba, width > 0, height > 0, let buffer = pixelBuffer(width, height) else { return }
         CVPixelBufferLockBaseAddress(buffer, [])
         if let base = CVPixelBufferGetBaseAddress(buffer) {
@@ -980,8 +1029,8 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
             format = made
         }
         guard let format else { return }
-        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
-                                        decodeTimeStamp: .invalid)
+        let now = timebase.map(CMTimebaseGetTime) ?? CMTime(seconds: time, preferredTimescale: 600)
+        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: now, decodeTimeStamp: .invalid)
         var sample: CMSampleBuffer?
         CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: buffer, formatDescription: format,
                                                  sampleTiming: &timing, sampleBufferOut: &sample)
@@ -998,9 +1047,28 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
         if frames == 3 { startWhenReady() }
     }
 
+    /// The layer's clock kept on the video's: running while it plays, at
+    /// its time, so AVKit's progress and buttons match the page.
+    private func follow(time: Double, duration: Double, paused: Bool) {
+        var changed = false
+        let length = duration.isFinite && duration > 0 ? duration : 0
+        if abs(length - self.duration) > 1 { self.duration = length; changed = true }
+        if paused != self.paused { self.paused = paused; changed = true }
+        if let timebase {
+            CMTimebaseSetRate(timebase, rate: paused ? 0 : 1)
+            let at = CMTimebaseGetTime(timebase).seconds
+            if !at.isFinite || abs(at - time) > 0.3 {
+                CMTimebaseSetTime(timebase, time: CMTime(seconds: time, preferredTimescale: 600))
+                changed = true
+            }
+        }
+        if changed { controller?.invalidatePlaybackState() }
+    }
+
     private func startWhenReady() {
         guard let controller, started != nil, frames >= 3, controller.isPictureInPicturePossible,
               !controller.isPictureInPictureActive else { return }
+        track()
         controller.startPictureInPicture()
     }
 
@@ -1024,24 +1092,126 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
         tab?.webView?.evaluateJavaScript("(() => { const p = window.__sillPip; if (!p) return; const v = p.v; \(script) })()", completion: nil)
     }
 
-    // MARK: AVKit's window
-
-    nonisolated func pictureInPictureControllerDidStartPictureInPicture(_ controller: AVPictureInPictureController) {
-        MainActor.assumeIsolated { finish(true) }
+    /// AVKit's float shows our layer by reference (a layer host in its
+    /// panel) at the layer's own size, unscaled: left alone, a big video
+    /// shows cropped and a small one sits in a corner. Our layer stays where
+    /// the video is on the page, so the flight out starts there and the
+    /// flight back lands there; the picture in the panel is scaled to the
+    /// panel, every frame the panel is on screen, the flights included.
+    private func track() {
+        guard ticker == nil else { return fit() }
+        let ticker = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.fit() }
+        }
+        RunLoop.main.add(ticker, forMode: .common)
+        self.ticker = ticker
+        fit()
     }
 
-    nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController,
-                                                failedToStartPictureInPictureWithError error: Error) {
-        MainActor.assumeIsolated {
-            let was = tab
-            cleanUp(was)
+    /// Where the float shows: where it was last left (macOS keeps it
+    /// there too), else the bottom right of the screen, as macOS puts it.
+    private static func spot(aspect: CGFloat, near window: NSWindow) -> NSRect {
+        let defaults = UserDefaults.standard
+        if let saved = defaults.string(forKey: "PictureInPictureFrame") {
+            let frame = NSRectFromString(saved)
+            if frame.width > 40, NSScreen.screens.contains(where: { $0.frame.intersects(frame) }) {
+                return NSRect(x: frame.minX, y: frame.minY, width: frame.width, height: (frame.width / aspect).rounded())
+            }
+        }
+        let screen = (window.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let width: CGFloat = 362, height = (width / aspect).rounded()
+        return NSRect(x: screen.maxX - width - 20, y: screen.minY + 20, width: width, height: height)
+    }
+
+    private func remember() {
+        guard landed, let panel, panel.frame.width > 40 else { return }
+        let frame = NSStringFromRect(panel.frame)
+        if UserDefaults.standard.string(forKey: "PictureInPictureFrame") != frame {
+            UserDefaults.standard.set(frame, forKey: "PictureInPictureFrame")
         }
     }
 
-    /// The return button: the tab comes back to the front, then the window closes.
+    private func fit() {
+        remember()
+        guard let layer, let (host, size) = floatHost(), size.width > 1, size.height > 1 else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // Shown one to one in the panel: the layer is the panel's size...
+        if layer.bounds.size != size { layer.frame = CGRect(origin: .zero, size: size) }
+        // AVKit's video layer in the float works out its picture's scale and
+        // place for a layer the float's size, but stays at a size of its own
+        // (1600 × 900): the picture lands off to the side. It is put right.
+        for video in host.sublayers ?? [] where String(describing: type(of: video)).contains("VideoContainer") {
+            let bounds = CGRect(origin: .zero, size: size), middle = CGPoint(x: size.width / 2, y: size.height / 2)
+            if video.bounds != bounds { video.bounds = bounds }
+            if video.position != middle || video.anchorPoint != CGPoint(x: 0.5, y: 0.5) {
+                video.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+                video.position = middle
+            }
+        }
+        CATransaction.commit()
+    }
+
+    /// The layer host showing our video in AVKit's panel, and the panel's size.
+    private func floatHost() -> (CALayer, CGSize)? {
+        if let host, let panel, panel.isVisible, let size = panel.contentView?.bounds.size { return (host, size) }
+        host = nil
+        panel = nil
+        func find(_ layer: CALayer, _ depth: Int) -> CALayer? {
+            if String(describing: type(of: layer)) == "CALayerHost" { return layer }
+            guard depth < 8 else { return nil }
+            for sub in layer.sublayers ?? [] { if let found = find(sub, depth + 1) { return found } }
+            return nil
+        }
+        for window in NSApp.windows where window.isVisible && window.className.contains("PIPPanel") {
+            guard let root = window.contentView?.layer, let found = find(root, 0) else { continue }
+            host = found
+            panel = window
+            return (found, window.contentView?.bounds.size ?? window.frame.size)
+        }
+        return nil
+    }
+
+    private func untrack() {
+        ticker?.invalidate()
+        ticker = nil
+        host = nil
+        panel = nil
+    }
+
+    nonisolated func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) {
+        MainActor.assumeIsolated { track() }
+    }
+
+    nonisolated func pictureInPictureControllerWillStopPictureInPicture(_ controller: AVPictureInPictureController) {
+        MainActor.assumeIsolated { fit() }
+    }
+
+    // MARK: AVKit's window
+
+    nonisolated func pictureInPictureControllerDidStartPictureInPicture(_ controller: AVPictureInPictureController) {
+        MainActor.assumeIsolated {
+            finish(true)
+            landed = true
+            track()
+        }
+    }
+
+
+    nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController,
+                                                failedToStartPictureInPictureWithError error: Error) {
+        MainActor.assumeIsolated { end() }
+    }
+
+    /// The return button: the tab comes back to the front, and the float
+    /// flies back into its video.
     nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController,
                                                 restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
         MainActor.assumeIsolated {
+            remember()
+            returning = true
+            landed = false
+            holder?.removeFromSuperview()
             if let tab { tab.host?.bringBack(tab) }
             completionHandler(true)
         }
@@ -1050,7 +1220,9 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
     nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
         MainActor.assumeIsolated {
             guard controller === self.controller else { return }
-            cleanUp(tab)
+            // Closed with its ✕ rather than put back: the video stops, as in Safari.
+            if !returning { run("v.pause();") }
+            end()
         }
     }
 
@@ -1059,12 +1231,18 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
     nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController, setPlaying playing: Bool) {
         MainActor.assumeIsolated {
             paused = !playing
+            if let timebase { CMTimebaseSetRate(timebase, rate: playing ? 1 : 0) }
+            controller.invalidatePlaybackState()
             run(playing ? "v.play();" : "v.pause();")
         }
     }
 
     nonisolated func pictureInPictureControllerTimeRangeForPlayback(_ controller: AVPictureInPictureController) -> CMTimeRange {
-        CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
+        MainActor.assumeIsolated {
+            // A video of known length shows its progress; a live one, none.
+            duration > 0 ? CMTimeRange(start: .zero, duration: CMTime(seconds: duration, preferredTimescale: 600))
+                : CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
+        }
     }
 
     nonisolated func pictureInPictureControllerIsPlaybackPaused(_ controller: AVPictureInPictureController) -> Bool {
@@ -1072,12 +1250,22 @@ final class Floating: NSObject, AVPictureInPictureControllerDelegate, AVPictureI
     }
 
     nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController,
-                                                didTransitionToRenderSize newRenderSize: CMVideoDimensions) {}
+                                                didTransitionToRenderSize newRenderSize: CMVideoDimensions) {
+        MainActor.assumeIsolated {
+            track()
+        }
+    }
 
     nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController, skipByInterval interval: CMTime,
                                                 completion completionHandler: @escaping () -> Void) {
         MainActor.assumeIsolated {
-            run("v.currentTime = Math.max(0, v.currentTime + \(interval.seconds));")
+            let seconds = interval.seconds
+            if let timebase {
+                let to = max(0, CMTimebaseGetTime(timebase).seconds + seconds)
+                CMTimebaseSetTime(timebase, time: CMTime(seconds: to, preferredTimescale: 600))
+            }
+            run("v.currentTime = Math.max(0, v.currentTime + \(seconds));")
+            controller.invalidatePlaybackState()
             completionHandler()
         }
     }

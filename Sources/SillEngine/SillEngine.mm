@@ -53,6 +53,18 @@ static NSString* S(const CefString& s) { return [NSString stringWithUTF8String:s
   if (reply == NSTerminateLater) { terminating_ = NO; return; }
   [self finishTerminating];
 }
+// Quit sent from outside (the Dock, another app, logging out) takes the same
+// way: AppKit's own handling would wait for a reply that never reaches it.
+- (void)finishLaunching {
+  [super finishLaunching];
+  [[NSAppleEventManager sharedAppleEventManager] setEventHandler:self
+                                                     andSelector:@selector(handleQuitEvent:withReply:)
+                                                   forEventClass:kCoreEventClass
+                                                      andEventID:kAEQuitApplication];
+}
+- (void)handleQuitEvent:(NSAppleEventDescriptor*)event withReply:(NSAppleEventDescriptor*)reply {
+  [self terminate:nil];
+}
 - (void)replyToApplicationShouldTerminate:(BOOL)shouldTerminate {
   if (shouldTerminate) [self finishTerminating];
 }
@@ -536,6 +548,12 @@ class SEApp : public CefApp, public CefBrowserProcessHandler {
     // Drawing on the GPU, as Chrome and Dia do.
     line->AppendSwitch("enable-gpu-rasterization");
     line->AppendSwitch("enable-zero-copy");
+    // Sill says itself which pages are hidden. Chromium's own guess (a page
+    // covered by another view is hidden) would stop the video of a page
+    // floating in picture in picture, kept under the one in front.
+    std::string off = line->GetSwitchValue("disable-features").ToString();
+    off += off.empty() ? "" : ",";
+    line->AppendSwitchWithValue("disable-features", off + "MacWebContentsOcclusion");
   }
   void OnContextInitialized() override {
     CefRequestContextSettings settings;  // no cache path: kept in memory, gone when Sill quits
