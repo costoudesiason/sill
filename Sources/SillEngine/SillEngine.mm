@@ -602,6 +602,8 @@ static std::string InstallExtensions(NSString* profile) {
   NSString* installed = [profile stringByAppendingPathComponent:@"Extensions"];
   [files createDirectoryAtPath:installed withIntermediateDirectories:YES attributes:nil error:nil];
   std::string folders;
+  // Switched off in Sill's Extensions panel: installed, not loaded.
+  NSArray* off = [[NSUserDefaults standardUserDefaults] stringArrayForKey:@"disabledExtensions"] ?: @[];
   for (NSString* name in [files contentsOfDirectoryAtPath:shipped error:nil]) {
     NSString* from = [shipped stringByAppendingPathComponent:name];
     NSString* to = [installed stringByAppendingPathComponent:name];
@@ -616,6 +618,7 @@ static std::string InstallExtensions(NSString* profile) {
       [files removeItemAtPath:to error:nil];
       if (![files copyItemAtPath:from toPath:to error:nil]) continue;
     }
+    if ([off containsObject:name]) continue;
     if (!folders.empty()) folders += ",";
     folders += to.UTF8String;
   }

@@ -17,9 +17,13 @@ final class TopBar: NSView {
     private let actionsGlass = NSGlassEffectView()
     private let actionsContent = FlippedView()
     private let divider = NSView()
+    /// Your profile: its own round glass at the right end of the bar.
+    private let profileGlass = NSGlassEffectView()
+    let profile = ProfileButton()
 
     let back = BarButton(symbol: "chevron.backward", label: "Back")
     let forward = BarButton(symbol: "chevron.forward", label: "Forward")
+    let extensions = BarButton(symbol: "puzzlepiece.extension", label: "Extensions")
     let downloads = BarButton(symbol: "arrow.down.circle", label: "Downloads")
     let add = BarButton(symbol: "plus", label: "New Tab")
     let allTabs = BarButton(symbol: "square.on.square", label: "Show All Tabs")
@@ -34,6 +38,9 @@ final class TopBar: NSView {
         self.strip = strip
         super.init(frame: .zero)
 
+        profileGlass.effectIsInteractive = true
+        profileGlass.cornerRadius = Self.capsule / 2
+        profileGlass.contentView = profile
         for glass in [navGlass, actionsGlass] {
             glass.effectIsInteractive = true
             glass.cornerRadius = Self.capsule / 2
@@ -44,6 +51,7 @@ final class TopBar: NSView {
         navContent.addSubview(divider)
         navContent.addSubview(forward)
         divider.wantsLayer = true
+        actionsContent.addSubview(extensions)
         actionsContent.addSubview(downloads)
         actionsContent.addSubview(add)
         actionsContent.addSubview(allTabs)
@@ -56,11 +64,13 @@ final class TopBar: NSView {
         // without it, light and dark (captured and compared).
         addSubview(navGlass)
         addSubview(actionsGlass)
+        addSubview(profileGlass)
         addSubview(strip)
         strip.translatesAutoresizingMaskIntoConstraints = true
 
         back.toolTip = "Back"
         forward.toolTip = "Forward"
+        extensions.toolTip = "Extensions"
         downloads.toolTip = "Downloads"
         add.toolTip = "New Tab"
         allTabs.toolTip = "Show All Tabs"
@@ -89,12 +99,15 @@ final class TopBar: NSView {
             divider.layer?.backgroundColor = NSColor.separatorColor.cgColor
         }
 
-        let actionsWidth = w * 3
-        actionsGlass.frame = NSRect(x: bounds.width - Self.margin - actionsWidth, y: y, width: actionsWidth, height: c)
+        profileGlass.frame = NSRect(x: bounds.width - Self.margin - c, y: y, width: c, height: c)
+        profile.frame = profileGlass.bounds
+        let actionsWidth = w * 4
+        actionsGlass.frame = NSRect(x: profileGlass.frame.minX - 8 - actionsWidth, y: y, width: actionsWidth, height: c)
         actionsContent.frame = actionsGlass.bounds
-        downloads.frame = NSRect(x: 0, y: 0, width: w, height: c)
-        add.frame = NSRect(x: w, y: 0, width: w, height: c)
-        allTabs.frame = NSRect(x: w * 2, y: 0, width: w, height: c)
+        extensions.frame = NSRect(x: 0, y: 0, width: w, height: c)
+        downloads.frame = NSRect(x: w, y: 0, width: w, height: c)
+        add.frame = NSRect(x: w * 2, y: 0, width: w, height: c)
+        allTabs.frame = NSRect(x: w * 3, y: 0, width: w, height: c)
 
         let stripX = navGlass.frame.maxX + 8
         strip.frame = NSRect(x: stripX, y: y, width: max(0, actionsGlass.frame.minX - 8 - stripX), height: c)
@@ -104,8 +117,12 @@ final class TopBar: NSView {
     /// popover anchors to (a view inside glass reports its place unreliably
     /// while the glass lifts it).
     var downloadsRect: NSRect {
+        NSRect(x: actionsGlass.frame.minX + Self.buttonWidth, y: actionsGlass.frame.minY, width: Self.buttonWidth, height: Self.capsule)
+    }
+    var extensionsRect: NSRect {
         NSRect(x: actionsGlass.frame.minX, y: actionsGlass.frame.minY, width: Self.buttonWidth, height: Self.capsule)
     }
+    var profileRect: NSRect { profileGlass.frame }
 
     override func mouseDown(with event: NSEvent) {
         // A double-click on bare bar does what it does on any title bar.
@@ -140,4 +157,20 @@ final class BarButton: NSButton {
     override var isEnabled: Bool {
         didSet { if isEnabled != oldValue { contentTintColor = isEnabled ? .labelColor : .tertiaryLabelColor } }
     }
+}
+
+/// The profile button: your Mac account's picture, round, filling the
+/// glass; your initials where there is no picture.
+final class ProfileButton: NSButton {
+    init() {
+        super.init(frame: .zero)
+        isBordered = false
+        bezelStyle = .accessoryBarAction
+        imagePosition = .imageOnly
+        imageScaling = .scaleProportionallyUpOrDown
+        toolTip = Profile.name
+        setAccessibilityLabel("Profile, \(Profile.name)")
+        image = Profile.picture(size: 26)
+    }
+    required init?(coder: NSCoder) { fatalError() }
 }

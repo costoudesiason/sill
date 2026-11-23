@@ -203,6 +203,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         bar.back.action = #selector(goBack(_:))
         bar.forward.target = self
         bar.forward.action = #selector(goForward(_:))
+        bar.extensions.target = self
+        bar.extensions.action = #selector(showExtensions(_:))
+        bar.profile.target = self
+        bar.profile.action = #selector(showProfile(_:))
         bar.downloads.target = self
         bar.downloads.action = #selector(showDownloads(_:))
         bar.add.target = self
@@ -378,6 +382,48 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             }
         }
         popover.show(relativeTo: bar.downloadsRect, of: bar, preferredEdge: .maxY)
+    }
+
+    private var extensionsPopover: NSPopover?
+
+    /// The Extensions button: what's installed, on or off, and each one's controls.
+    @objc func showExtensions(_ sender: Any?) {
+        if extensionsPopover?.isShown == true { extensionsPopover?.close(); return }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        let site = selected?.webView?.url.flatMap { $0.scheme?.hasPrefix("http") == true ? $0.host() : nil }
+        let host = NSHostingController(rootView: ExtensionsView(open: { [weak self, weak popover] url in
+            popover?.close()
+            _ = self?.addTab(url: url)
+        }, site: site, reload: { [weak self] in self?.selected?.webView?.reload() }))
+        host.sizingOptions = .preferredContentSize
+        popover.contentViewController = host
+        popover.contentSize = host.view.fittingSize
+        extensionsPopover = popover
+        popover.show(relativeTo: bar.extensionsRect, of: bar, preferredEdge: .maxY)
+    }
+
+    /// The profile button: who's browsing, and the browser's everyday places.
+    @objc func showProfile(_ sender: Any?) {
+        guard let window, GlassMenu.shouldOpen(from: bar.profile) else { return }
+        let entries: [GlassMenu.Entry] = [
+            .item(.init(title: "New Window", symbol: "macwindow", keys: ["⌘", "N"]) { AppDelegate.shared.newWindow(nil) }),
+            .item(.init(title: "New Private Window", symbol: "eye.slash", keys: ["⇧", "⌘", "N"]) { AppDelegate.shared.newPrivateWindow(nil) }),
+            .separator,
+            .item(.init(title: "History", symbol: "clock", keys: ["⌘", "Y"]) { [weak self] in self?.showHistory(nil) }),
+            .item(.init(title: "Downloads", symbol: "arrow.down.circle") { [weak self] in self?.showDownloads(nil) }),
+            .item(.init(title: "Extensions", symbol: "puzzlepiece.extension") { [weak self] in self?.showExtensions(nil) }),
+            .item(.init(title: "Passwords", symbol: "key") {
+                if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Passwords") {
+                    NSWorkspace.shared.openApplication(at: app, configuration: .init())
+                }
+            }),
+            .separator,
+            .item(.init(title: "Settings…", symbol: "gearshape", keys: ["⌘", ","]) { AppDelegate.shared.showSettings(nil) }),
+        ]
+        let anchor = bar.convert(bar.profileRect, to: nil)
+        GlassMenu(title: Profile.name, entries: entries, searchable: false)
+            .show(in: window, at: NSPoint(x: anchor.maxX, y: anchor.minY - 6), alignRight: true, from: bar.profile)
     }
 
     @objc func showAllTabs(_ sender: Any?) {

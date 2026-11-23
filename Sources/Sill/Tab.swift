@@ -502,7 +502,7 @@ final class Tab: NSObject {
 extension Tab: SEWebViewDelegate {
     func webView(_ view: SEWebView, shouldLoad url: URL, userGesture: Bool) -> Bool {
         let scheme = url.scheme?.lowercased() ?? ""
-        let web = ["http", "https", "about", "data", "blob", "file", "javascript", "chrome", "devtools"].contains(scheme)
+        let web = ["http", "https", "about", "data", "blob", "file", "javascript", "chrome", "devtools", "chrome-extension"].contains(scheme)
         if !web {
             // mailto:, facetime:, zoommtg:… belong to other apps.
             NSWorkspace.shared.open(url)
