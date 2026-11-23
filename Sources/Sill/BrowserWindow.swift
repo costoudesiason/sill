@@ -187,6 +187,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         updateNavigation()
         applyLooks()
         // Settings apply as they change, to every window.
+        // Only what a change touches is redone: a switch for the ad blocker
+        // doesn't recompute the window's shadow or lay the tabs out again.
         watchingPrefs = Preferences.shared.objectWillChange.sink { [weak self] in
             DispatchQueue.main.async { self?.applyLooks() }
         }
@@ -203,9 +205,32 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     // MARK: - Looks
 
+    /// What the window's look depends on, to tell which parts a change of
+    /// settings touched.
+    private struct Looks: Equatable {
+        var theme: Theme, glassWash: Double, glassBar: Bool
+        var roundCorners: Bool, cornerRadius: Double
+        var tabWidth: TabWidth, closeButtons: CloseButtons, tabPreviews: Bool
+        init(_ p: Preferences) {
+            theme = p.theme; glassWash = p.glassWash; glassBar = p.glassBar
+            roundCorners = p.roundCorners; cornerRadius = p.cornerRadius
+            tabWidth = p.tabWidth; closeButtons = p.closeButtons; tabPreviews = p.showsTabPreviews
+        }
+    }
+
     private func applyLooks() {
         let prefs = Preferences.shared
-        if !isPrivate { window?.appearance = prefs.theme.appearance }
+        let looks = Looks(prefs)
+        let before = appliedLooks
+        guard looks != before else { return }
+        appliedLooks = looks
+        if before?.theme != looks.theme, !isPrivate { window?.appearance = prefs.theme.appearance }
+        if before?.tabWidth != looks.tabWidth || before?.closeButtons != looks.closeButtons || before?.tabPreviews != looks.tabPreviews {
+            strip.prefsChanged()
+        }
+        guard before?.glassWash != looks.glassWash || before?.glassBar != looks.glassBar
+            || before?.roundCorners != looks.roundCorners || before?.cornerRadius != looks.cornerRadius
+            || before?.theme != looks.theme else { return }
         let amount = CGFloat(prefs.glassWash)
         wash.effectiveAppearance.performAsCurrentDrawingAppearance {
             wash.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(amount).cgColor
@@ -227,9 +252,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         stage.layer?.backgroundColor = round && !prefs.glassBar ? NSColor.windowBackgroundColor.cgColor : nil
         Self.clip(top, radius: radius, corners: .top)
         Self.clip(pageHost, radius: radius, corners: .bottom)
-        window?.invalidateShadow()
-        strip.prefsChanged()
+        if before?.roundCorners != looks.roundCorners || before?.cornerRadius != looks.cornerRadius {
+            window?.invalidateShadow()
+        }
     }
+    private var appliedLooks: Looks?
 
     private enum Edge { case top, bottom }
 
@@ -394,6 +421,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         let webView = tab.materialize()
         placePages(keep: keep)
         tab.reloadIfCrashed()
+        tab.loadIfEmpty()
         // Back from picture in picture: WebKit puts a video back in its page
         // only once that page is in the window, so after it is.
         if tab === pictured {
@@ -476,6 +504,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private func changed() { onChange?() }
 
     // MARK: - Palette
+
+    /// The palette, turned to its settings.
+    func showSettings() {
+        if !paletteOpen { showPalette(.newTab); palette.showSettings(true, animated: false) } else { palette.showSettings(true) }
+    }
 
     func showPalette(_ mode: Palette.Mode) {
         hidePreview(animated: false)

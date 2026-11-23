@@ -76,9 +76,13 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
     private static let searchHeight: CGFloat = 44
     private static let inset: CGFloat = 9
 
-    init(title: String?, entries: [Entry]) {
+    /// A short list of choices (a setting's values) has no search field.
+    private let searchable: Bool
+
+    init(title: String?, entries: [Entry], searchable: Bool = true) {
         self.title = title
         self.entries = entries
+        self.searchable = searchable
         super.init()
         overlay.onOutsideClick = { [weak self] in self?.dismiss() }
         overlay.autoresizingMask = [.width, .height]
@@ -189,7 +193,7 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
         var h = Self.inset
         if title != nil, search.stringValue.isEmpty { h += Self.titleHeight }
         h += CGFloat(rows.count) * Self.rowHeight + CGFloat(rules.count) * Self.ruleHeight
-        return h + Self.inset + Self.searchHeight
+        return h + Self.inset + (searchable ? Self.searchHeight : 0)
     }
 
     private func rebuild(filter: String) {
@@ -254,8 +258,13 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
             }
         }
         y += Self.inset
+        searchRule.isHidden = !searchable
+        // Without its field showing, the field still takes the arrow keys and Return.
+        search.alphaValue = searchable ? 1 : 0
         searchRule.frame = NSRect(x: 0, y: y, width: w, height: 1)
-        search.frame = NSRect(x: Self.inset + 12, y: y + (Self.searchHeight - 20) / 2, width: w - 40, height: 20)
+        search.frame = searchable
+            ? NSRect(x: Self.inset + 12, y: y + (Self.searchHeight - 20) / 2, width: w - 40, height: 20)
+            : NSRect(x: 0, y: 0, width: 1, height: 1)
     }
 
     private func refit() {
