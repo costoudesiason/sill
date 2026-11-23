@@ -20,6 +20,8 @@ final class TabPreview: NSView {
     private let addressLabel = NSTextField(labelWithString: "")
     private(set) weak var tab: Tab?
     private var aspect: CGFloat = 0.6
+    /// Made once, not for each tab the pointer passes over.
+    private static let globe = NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
 
     override var isFlipped: Bool { true }
     /// A card to look at: clicks go through to the page under it.
@@ -69,7 +71,7 @@ final class TabPreview: NSView {
         if pageSize.width > 0 { aspect = min(0.8, max(0.45, pageSize.height / pageSize.width)) }
         titleLabel.stringValue = tab.displayTitle
         addressLabel.stringValue = tab.url.map { Domains.bare($0.host()).isEmpty ? Address.display($0) : Domains.bare($0.host()) } ?? ""
-        icon.image = tab.favicon ?? NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
+        icon.image = tab.favicon ?? Self.globe
         icon.contentTintColor = tab.favicon == nil ? .secondaryLabelColor : nil
         show(tab.previewPicture)
         needsLayout = true
