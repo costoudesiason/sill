@@ -286,6 +286,8 @@ enum PageScripts {
       };
       addEventListener('scroll', () => { scrolledAt = performance.now(); }, { passive: true, capture: true });
       document.addEventListener('mouseover', (e) => {
+        // Only the pointer itself: an event the page made up is not a hover.
+        if (!e.isTrusted) return;
         const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
         hover(a && a.href && !a.href.startsWith('javascript:') ? a.href : null);
       }, true);
