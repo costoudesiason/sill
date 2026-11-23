@@ -12,8 +12,6 @@ final class TopBar: NSView {
     private static let buttonWidth: CGFloat = 37
 
     let strip: TabStripView
-    private let container = NSGlassEffectContainerView()
-    private let containerContent = FlippedView()
     private let navGlass = NSGlassEffectView()
     private let navContent = FlippedView()
     private let actionsGlass = NSGlassEffectView()
@@ -50,10 +48,14 @@ final class TopBar: NSView {
         actionsContent.addSubview(add)
         actionsContent.addSubview(allTabs)
 
-        containerContent.addSubview(navGlass)
-        containerContent.addSubview(actionsGlass)
-        container.contentView = containerContent
-        addSubview(container)
+        // Straight on the bar, not in a glass container spanning it: the
+        // container was resized on every frame of a window resize and laid
+        // its glass out again each time, some 1.5 of the 5.7 ms a frame cost
+        // (median, a harness of this bar with 15 tabs), while the two
+        // capsules, too far apart to ever merge, drew to the same pixels
+        // without it, light and dark (captured and compared).
+        addSubview(navGlass)
+        addSubview(actionsGlass)
         addSubview(strip)
         strip.translatesAutoresizingMaskIntoConstraints = true
 
@@ -78,9 +80,6 @@ final class TopBar: NSView {
         let y = (h - c) / 2
         let w = Self.buttonWidth
 
-        container.frame = bounds
-        containerContent.frame = container.bounds
-
         navGlass.frame = NSRect(x: Self.margin + leadingInset, y: y, width: w * 2, height: c)
         navContent.frame = navGlass.bounds
         back.frame = NSRect(x: 0, y: 0, width: w, height: c)
@@ -102,8 +101,8 @@ final class TopBar: NSView {
     }
 
     /// Where the Downloads button is, in the bar's own coordinates: what a
-    /// popover anchors to (a view inside a glass container reports its place
-    /// unreliably while the container lifts it).
+    /// popover anchors to (a view inside glass reports its place unreliably
+    /// while the glass lifts it).
     var downloadsRect: NSRect {
         NSRect(x: actionsGlass.frame.minX, y: actionsGlass.frame.minY, width: Self.buttonWidth, height: Self.capsule)
     }

@@ -407,7 +407,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         wash.frame = ground.frame
         madePalette?.stageResized(stage)
         if let findBar = madeFindBar, findBar.isOpen { findBar.place(in: stage, top: topInset) }
-        status.place(in: stage)
+        // Out of sight it's placed when next shown, not measured each frame of a resize.
+        if !status.isHidden { status.place(in: stage) }
         if let toast = madeToast, !toast.isHidden { toast.place(in: stage) }
         placePrompts()
     }
@@ -417,7 +418,17 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         stage.needsLayout = true
     }
     func windowDidEnterFullScreen(_ notification: Notification) { stage.needsLayout = true }
-    func windowDidExitFullScreen(_ notification: Notification) { stage.needsLayout = true }
+    func windowDidExitFullScreen(_ notification: Notification) { stage.needsLayout = true; keepCorners() }
+    func windowDidChangeScreen(_ notification: Notification) { keepCorners() }
+    /// Rounder corners asked for again where AppKit might set its own. A
+    /// probe kept them through appearance changes, minimise and restore,
+    /// sheets, toolbars, style and key changes and moves; a second screen
+    /// and the way back from full screen weren't there to try. Only a
+    /// comparison when they stuck.
+    private func keepCorners() {
+        guard Preferences.shared.roundCorners, window?.styleMask.contains(.fullScreen) == false else { return }
+        _ = setCornerRadius(Preferences.shared.cornerRadius)
+    }
     // Square on a full screen, as every window is; round again on the way back.
     func windowWillEnterFullScreen(_ notification: Notification) {
         if Preferences.shared.roundCorners { _ = setCornerRadius(0) }
