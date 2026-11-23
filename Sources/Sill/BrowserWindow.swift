@@ -1164,7 +1164,7 @@ extension BrowserWindowController {
             // being left, which goes once the new one has drawn: nothing
             // waits, and the window never shows through between the two.
             let under = keep == nil && leaving?.superview !== pageHost
-                && webView.shownBefore && !placed
+                && (webView.shownBefore || webView.laidOutUnseen) && !placed
                 && !webView.isDescendant(of: splitView)
                 && pageHost.subviews.contains { ($0 is WKWebView && !$0.isHidden && $0 !== webView) || $0 === splitView }
             if !under { putAside(except: webView, keep) }

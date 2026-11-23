@@ -316,6 +316,13 @@ final class SillWebView: WKWebView {
     private var held = false
     /// Has been in a window before, so it has a page to draw the moment it's back.
     var shownBefore = false
+    /// Laid out a page while in no window (loaded behind another tab, ahead
+    /// in the palette, or claude.ai kept ready): it has something to draw but
+    /// hasn't drawn it, which takes WebKit a few frames once it's in the
+    /// window (50 to 150 ms measured for BBC News and Wikipedia). Its first
+    /// showing comes in under the page being left, as a page shown before
+    /// does (placePages), rather than blank until then.
+    var laidOutUnseen = false
 
     /// Runs once the view's next frame is in the window, or shortly after
     /// if WebKit never says.
@@ -345,12 +352,14 @@ final class SillWebView: WKWebView {
         held = true
         alphaValue = 0
         // A web process that dies before it draws never says so: in after a second regardless.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.showFirstFrame() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.showFirstFrame(laidOut: false) }
     }
 
     /// In, quickly, once that frame has reached the window: WebKit reports
     /// it a few frames before, and fading in then still shows the white.
-    func showFirstFrame() {
+    /// `laidOut`: WebKit said there's a page to see (not a time limit, or a failure).
+    func showFirstFrame(laidOut: Bool = true) {
+        if laidOut, window == nil { laidOutUnseen = true }
         guard held, !presenting else { return }
         presenting = true
         let fadeIn = { [weak self] in
