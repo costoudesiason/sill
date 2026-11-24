@@ -7,7 +7,8 @@ import WebKit
 // Sill listens on a Unix socket, agent.sock in its own Application Support
 // folder: the folder this user's alone (0700), the socket 0600, and every
 // connection's other end checked to be this same user before a byte is read.
-// Never on the network. `sill-mcp`, inside the app, is the MCP server an
+// Never on the network itself: claude.ai reaches it through your relay, by
+// way of Sill's own helper (Connector.swift). `sill-mcp`, inside the app, is the MCP server an
 // agent runs; it speaks to this socket. The design follows Search's
 // AgentControl (MIT, see NOTICE).
 //
@@ -95,7 +96,7 @@ final class AgentServer {
         connections[key] = connection
         connected = connections.count
         connection.start()
-        AppDelegate.shared.current?.toast("An agent connected to Sill")
+        if connected == 1 { AppDelegate.shared.current?.toast("An agent connected to Sill") }
     }
 }
 
@@ -188,20 +189,87 @@ enum AgentCommands {
         guard Preferences.shared.agentControl else { return ["ok": false, "error": "Agent control is off in Sill's settings."] }
         let command = request["cmd"] as? String ?? ""
         let args = request["args"] as? [String: Any] ?? [:]
+        AgentActivity.shared.began()
+        // Whatever the agent does in its hidden tabs, the keyboard stays where you left it.
+        let keyboard = Self.keyboards()
+        defer {
+            AgentActivity.shared.ended()
+            Self.giveBack(keyboard)
+        }
         do {
             let result = try await perform(command, args)
+            AgentLog.record(command: command, args: args, result: result, error: nil)
             return ["ok": true, "result": result]
         } catch let error as AgentError {
+            AgentLog.record(command: command, args: args, result: nil, error: error.message)
             return ["ok": false, "error": error.message]
         } catch {
+            AgentLog.record(command: command, args: args, result: nil, error: error.localizedDescription)
             return ["ok": false, "error": error.localizedDescription]
         }
     }
 
+    // MARK: your keyboard
+
+    /// Each window's first responder, before an agent command.
+    private static func keyboards() -> [(NSWindow, NSResponder?)] {
+        AppDelegate.shared.browsers.compactMap { $0.window.map { ($0, $0.firstResponder) } }
+    }
+
+    /// The page an agent clicked or focused in its hidden tab may have taken the
+    /// keyboard (Chromium focuses a page on input): handed back to what had it.
+    private static func giveBack(_ before: [(NSWindow, NSResponder?)]) {
+        for (window, previous) in before {
+            guard let now = window.firstResponder as? NSView, now !== previous,
+                  let page = sequence(first: now, next: { $0.superview }).first(where: { $0 is SillWebView }) as? SillWebView,
+                  page.agentAtWork, page.tab.map({ t in !browsers.contains { $0.selected === t } }) ?? true else { continue }
+            if let previous = previous as? NSView, previous.window === window { window.makeFirstResponder(previous) }
+            else if let front = AppDelegate.shared.browsers.first(where: { $0.window === window })?.selected?.webView { window.makeFirstResponder(front) }
+            else { window.makeFirstResponder(nil) }
+        }
+    }
+
+    /// Who has the keyboard in the front window: the tab in front, an agent's hidden tab, or something else.
+    private static var keyboardOwner: String {
+        guard let window = AppDelegate.shared.current?.window, let view = window.firstResponder as? NSView else { return "none" }
+        guard let page = sequence(first: view, next: { $0.superview }).first(where: { $0 is SillWebView }) as? SillWebView else { return "window" }
+        if page.tab === AppDelegate.shared.current?.selected { return "front tab" }
+        return page.agentAtWork ? "agent tab" : "other tab"
+    }
+
     // MARK: finding things
 
+    /// Normal windows and the popups their pages open (sign-in windows), never private ones.
     private static var browsers: [BrowserWindowController] {
-        AppDelegate.shared.browsers.filter { !$0.isPrivate && !$0.isPopup }
+        AppDelegate.shared.browsers.filter { !$0.isPrivate }
+    }
+
+    /// A tab a page opened while the agent worked in it: the agent's too, in the background.
+    static func adopt(_ tab: Tab) {
+        tab.openedByAgent = true
+        remember(tab)
+        adopted = (tab, Date())
+    }
+    private static var adopted: (tab: Tab, at: Date)?
+
+    /// Tabs the agent opened or named, the latest first. Leaving out "tab"
+    /// means the latest of these still open, so an agent's work stays in its
+    /// own tabs, out of sight, and never wanders into the one you're reading.
+    private static var agentTabs: [WeakTab] = []
+
+    private final class WeakTab {
+        weak var tab: Tab?
+        init(_ tab: Tab) { self.tab = tab }
+    }
+
+    private static func remember(_ tab: Tab) {
+        agentTabs.removeAll { $0.tab == nil || $0.tab === tab }
+        agentTabs.insert(WeakTab(tab), at: 0)
+        if agentTabs.count > 32 { agentTabs.removeLast(agentTabs.count - 32) }
+    }
+
+    private static func browser(of tab: Tab) -> BrowserWindowController? {
+        browsers.first { $0.tabs.contains { $0 === tab } }
     }
 
     private static func describe(_ tab: Tab, in browser: BrowserWindowController) -> [String: Any] {
@@ -214,6 +282,7 @@ enum AgentCommands {
             "selected": tab === browser.selected,
             "asleep": tab.webView == nil,
             "openedByAgent": tab.openedByAgent,
+            "agentCurrent": agentTabs.first { $0.tab.map { Self.browser(of: $0) != nil } ?? false }?.tab === tab,
         ]
     }
 
@@ -221,19 +290,76 @@ enum AgentCommands {
         if let id = args["tab"] as? String {
             for browser in browsers {
                 if let tab = browser.tabs.first(where: { $0.id.uuidString.caseInsensitiveCompare(id) == .orderedSame }) {
+                    if args["remember"] as? Bool ?? true { remember(tab) }
                     return (tab, browser)
                 }
             }
             throw AgentError("No tab with id \(id). Call tabs.list for current ids.")
+        }
+        for weak in agentTabs {
+            if let tab = weak.tab, let browser = browser(of: tab) { return (tab, browser) }
         }
         guard let browser = AppDelegate.shared.current.flatMap({ $0.isPrivate ? nil : $0 }) ?? browsers.last,
               let selected = browser.selected else { throw AgentError("No open tab. Use tabs.open first.") }
         return (selected, browser)
     }
 
-    private static func webView(_ args: [String: Any]) throws -> (SillWebView, Tab, BrowserWindowController) {
+    /// The tab's page, made if it was asleep, drawing even out of sight, and
+    /// marked as the agent's work in progress.
+    private static func webView(_ args: [String: Any]) async throws -> (SillWebView, Tab, BrowserWindowController) {
         let (tab, browser) = try tab(args)
-        return (tab.materialize(), tab, browser)
+        let view = tab.materialize()
+        keepDrawing(view, of: tab, in: browser)
+        AgentActivity.shared.touch(tab, view: view, in: browser)
+        view.holdsDialogs = true
+        await prepare(view)
+        await AgentPage.of(view).start()
+        return (view, tab, browser)
+    }
+
+    private static func onScreen(_ tab: Tab, in browser: BrowserWindowController) -> Bool {
+        tab === browser.selected || browser.split?.contains(tab) == true
+    }
+
+    /// A page out of sight goes under the one in front, unhidden: Chromium
+    /// draws it (screenshots need frames), and nobody sees it.
+    private static func keepDrawing(_ view: SillWebView, of tab: Tab, in browser: BrowserWindowController) {
+        guard !onScreen(tab, in: browser), let host = pageHost(of: browser) else { return }
+        if host.subviews.first !== view {
+            view.frame = browser.selected?.webView?.frame ?? host.bounds
+            host.addSubview(view, positioned: .below, relativeTo: nil)
+        }
+        view.agentAtWork = true
+        if view.pageHidden { view.insistShown() }
+    }
+
+    /// Put aside again once the agent has left it alone a while.
+    static func letGo(_ view: SillWebView, of tab: Tab) {
+        if view.openDialog == nil { view.holdsDialogs = false }
+        guard view.agentAtWork else { return }
+        view.agentAtWork = false
+        if let browser = browser(of: tab), onScreen(tab, in: browser) { return }
+        view.park()
+    }
+
+    private static func pageHost(of browser: BrowserWindowController) -> NSView? {
+        if let host = browser.selected?.webView?.superview as? PageHostView { return host }
+        func search(_ view: NSView) -> NSView? {
+            if view is PageHostView { return view }
+            for child in view.subviews { if let found = search(child) { return found } }
+            return nil
+        }
+        return browser.window?.contentView.flatMap(search)
+    }
+
+    /// Once per page: it believes it has focus, so keys and typing land
+    /// though Sill's window isn't the key one.
+    private static var prepared = Set<ObjectIdentifier>()
+    private static func prepare(_ view: SillWebView) async {
+        let key = ObjectIdentifier(view)
+        guard !prepared.contains(key) else { return }
+        prepared.insert(key)
+        _ = try? await devtools(view, "Emulation.setFocusEmulationEnabled", ["enabled": true], timeout: 3)
     }
 
     private static func webURL(_ text: Any?) throws -> URL {
@@ -251,20 +377,30 @@ enum AgentCommands {
         switch command {
         case "status":
             return ["app": "Sill", "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
-                    "windows": browsers.count, "tabs": browsers.reduce(0) { $0 + $1.tabs.count }]
+                    "windows": browsers.count, "tabs": browsers.reduce(0) { $0 + $1.tabs.count }, "keyboard": keyboardOwner]
 
         case "tabs.list":
             return browsers.flatMap { browser in browser.tabs.map { describe($0, in: browser) } }
 
         case "tabs.open":
             let url = try webURL(args["url"])
-            let background = args["background"] as? Bool ?? false
-            guard let browser = AppDelegate.shared.current.flatMap({ $0.isPrivate ? nil : $0 }) ?? browsers.last
-                ?? Optional(AppDelegate.shared.makeBrowser(isPrivate: false)) else { throw AgentError("No window.") }
-            browser.showWindow(nil)
+            // In the background unless asked: the tab appears, you stay where you are.
+            let background = args["background"] as? Bool ?? true
+            let existing = AppDelegate.shared.current.flatMap({ $0.isPrivate ? nil : $0 }) ?? browsers.last
+            let browser = existing ?? AppDelegate.shared.makeBrowser(isPrivate: false)
+            if existing == nil || !background { browser.showWindow(nil) }
             let tab = browser.addTab(url: url, select: !background)
             tab.openedByAgent = true
-            if args["wait"] as? Bool ?? true { try await waitForLoad(tab, timeout: args["timeout"] as? Double ?? 20) }
+            if args["remember"] as? Bool ?? true { remember(tab) }
+            let view = tab.materialize()
+            keepDrawing(view, of: tab, in: browser)
+            AgentActivity.shared.touch(tab, view: view, in: browser)
+            await prepare(view)
+            if args["wait"] as? Bool ?? true {
+                try await waitForLoad(tab, timeout: args["timeout"] as? Double ?? 20)
+                // A check page that sends you on (a bot check, a locale redirect) isn't the page: settle past it.
+                await settle(tab, view)
+            }
             return describe(tab, in: browser)
 
         case "tabs.select":
@@ -275,19 +411,31 @@ enum AgentCommands {
 
         case "tabs.close":
             let (tab, browser) = try tab(args)
+            agentTabs.removeAll { $0.tab == nil || $0.tab === tab }
+            AgentActivity.shared.forget(tab)
+            // Never the last of your windows: closing its last tab would close
+            // the window, and with no window left, utilities like Swift Quit
+            // quit Sill outright. A fresh empty tab takes its place instead.
+            let normalWindows = AppDelegate.shared.browsers.filter { !$0.isPrivate && !$0.isPopup && $0.window?.isVisible == true }
+            if browser.tabs.count == 1, !browser.isPopup, normalWindows.count <= 1 {
+                _ = browser.addTab(url: nil, select: true)
+            }
             // An agent's close is its own decision: the page isn't asked.
             browser.closeNow(tab)
             return ["closed": tab.id.uuidString]
 
         case "page.navigate":
             let url = try webURL(args["url"])
-            let (tab, browser) = try tab(args)
+            let (_, tab, browser) = try await webView(args)
             tab.load(url)
-            if args["wait"] as? Bool ?? true { try await waitForLoad(tab, timeout: args["timeout"] as? Double ?? 20) }
+            if args["wait"] as? Bool ?? true {
+                try await waitForLoad(tab, timeout: args["timeout"] as? Double ?? 20)
+                await settle(tab, tab.materialize())
+            }
             return describe(tab, in: browser)
 
         case "page.back", "page.forward", "page.reload", "page.stop":
-            let (tab, browser) = try tab(args)
+            let (_, tab, browser) = try await webView(args)
             switch command {
             case "page.back": tab.goBack()
             case "page.forward": tab.goForward()
@@ -301,96 +449,232 @@ enum AgentCommands {
             return describe(tab, in: browser)
 
         case "page.wait":
-            let (tab, browser) = try tab(args)
+            let (view, tab, browser) = try await webView(args)
             let timeout = args["timeout"] as? Double ?? 20
             if let selector = args["selector"] as? String {
-                try await waitFor(selector: selector, text: nil, in: tab.materialize(), timeout: timeout)
+                try await waitFor(selector: selector, text: nil, in: view, timeout: timeout)
             } else if let text = args["text"] as? String {
-                try await waitFor(selector: nil, text: text, in: tab.materialize(), timeout: timeout)
+                try await waitFor(selector: nil, text: text, in: view, timeout: timeout)
             } else {
                 try await waitForLoad(tab, timeout: timeout)
             }
             return describe(tab, in: browser)
 
         case "page.text":
-            let (view, _, _) = try webView(args)
+            let (view, _, _) = try await webView(args)
             let limit = args["maxChars"] as? Int ?? 40_000
             let text = try await evaluate("return (document.body ? document.body.innerText : '')", in: view, world: Web.world) as? String ?? ""
             return ["url": view.url?.absoluteString ?? "", "title": view.title ?? "",
                     "text": String(text.prefix(limit)), "truncated": text.count > limit]
 
         case "page.snapshot":
-            let (view, _, _) = try webView(args)
+            let (view, tab, _) = try await webView(args)
+            var answer: [String: Any] = ["tab": tab.id.uuidString, "url": view.url?.absoluteString ?? "", "title": view.title ?? ""]
+            if let dialog = view.openDialog {
+                answer["dialog"] = dialog
+                answer["elements"] = [Any]()
+                return answer
+            }
             let all = args["all"] as? Bool ?? false
-            let result = try await evaluate("return window.__sillAgent.snapshot(all)", in: view, world: Web.world, arguments: ["all": all])
-            return ["url": view.url?.absoluteString ?? "", "title": view.title ?? "", "elements": result ?? []]
+            // Mid-navigation (a redirect, a new document) the script answers
+            // nothing: wait for the page and look again, never report an empty page.
+            var listed = try? await evaluate("return window.__sillAgent.snapshot(all)", in: view, world: Web.world,
+                                             arguments: ["all": all]) as? [[String: Any]]
+            if listed == nil || (listed?.isEmpty == true && view.isLoading) {
+                try? await waitForLoad(tab, timeout: 8)
+                listed = try? await evaluate("return window.__sillAgent.snapshot(all)", in: view, world: Web.world,
+                                             arguments: ["all": all]) as? [[String: Any]]
+            }
+            var elements = listed ?? []
+            if listed == nil || view.isLoading { answer["loading"] = true }
+            answer["url"] = view.url?.absoluteString ?? ""
+            answer["title"] = view.title ?? ""
+            let page = AgentPage.of(view)
+            if let tokens = try? await evaluate("return window.__sillAgent.opaque()", in: view, world: Web.world) as? [String], !tokens.isEmpty {
+                elements += await page.hiddenElements(tokens: tokens)
+            }
+            elements += await page.frameElements(all: all)
+            answer["elements"] = elements
+            answer["walls"] = (try? await evaluate("return window.__sillAgent.walls()", in: view, world: Web.world)) as? [String] ?? []
+            return answer
 
         case "page.click":
-            let (view, tab, browser) = try webView(args)
-            let target = try await locate(args, in: view)
-            if view.window != nil, !view.isHidden, tab === browser.selected || browser.split?.contains(tab) == true, args["real"] as? Bool ?? true {
-                realClick(at: target.point, in: view, double: args["double"] as? Bool ?? false)
+            let (view, tab, _) = try await webView(args)
+            // A point (CSS pixels, from a screenshot or a box) when there's no element to name: canvases, maps.
+            let target: Target
+            if let x = args["x"] as? Double, let y = args["y"] as? Double, args["ref"] == nil, args["selector"] == nil, args["text"] == nil {
+                target = Target(ref: "\(Int(x)),\(Int(y))", x: x, y: y, name: "the point \(Int(x)), \(Int(y))")
             } else {
+                target = try await locate(args, in: view)
+                try target.mustBeClickable()
+            }
+            let double = args["double"] as? Bool ?? false
+            if let refused = await AgentJudge.clear(.init(action: "click", target: target.name, page: view.title ?? "",
+                                                          site: view.url?.host ?? "")) { throw AgentError(refused) }
+            let started = Date()
+            // Armed first: afterwards Sill can say whether the click reached it.
+            let answerURL = view.url?.absoluteString
+            let armRef = target.inner ?? target.ref
+            let armed: Bool
+            if let frame = target.frame {
+                armed = (try? await AgentPage.of(view).evaluate("window.__sillAgent.arm(\(json(armRef)), \(json(args["button"] as? String ?? "left")))", in: frame)) as? Bool == true
+            } else if target.backend == nil, target.ref.hasPrefix("e") {
+                armed = (try? await evaluate("return window.__sillAgent.arm(ref, button)", in: view, world: Web.world,
+                                             arguments: ["ref": armRef, "button": args["button"] as? String ?? "left"])) as? Bool == true
+            } else { armed = false }
+            do {
+                try await click(at: target.x, target.y, in: view, count: double ? 2 : 1,
+                                button: args["button"] as? String ?? "left", hold: args["hold"] as? Double ?? 0,
+                                modifiers: modifierMask(args["modifiers"]))
+            } catch where target.frame == nil && target.backend == nil && target.ref.hasPrefix("e") && view.openDialog == nil {
                 _ = try await evaluate("return window.__sillAgent.click(ref)", in: view, world: Web.world, arguments: ["ref": target.ref])
             }
-            try await Task.sleep(nanoseconds: 120_000_000)
-            return ["clicked": target.ref, "url": view.url?.absoluteString ?? ""]
+            var landed: [String: Any]?
+            if armed, view.openDialog == nil {
+                if let frame = target.frame {
+                    landed = (try? await AgentPage.of(view).evaluate("window.__sillAgent.landed()", in: frame)) as? [String: Any]
+                } else {
+                    landed = (try? await evaluate("return window.__sillAgent.landed()", in: view, world: Web.world)) as? [String: Any]
+                }
+            }
+            await settle(tab, view, since: started)
+            // A link may open a tab: Chromium makes it a moment after the click.
+            if target.name.hasPrefix("link"), adopted.map({ $0.at < started }) ?? true {
+                for _ in 0..<15 where adopted.map({ $0.at < started }) ?? true { try? await Task.sleep(nanoseconds: 10_000_000) }
+            }
+            var answer: [String: Any] = ["clicked": target.ref, "name": target.name]
+            if target.partial { answer["partial"] = true }
+            // No click arrived at all (and the page didn't move on): say so, never "clicked".
+            let urlBefore = answerURL
+            if armed, landed == nil, view.openDialog == nil, !view.isLoading, view.url?.absoluteString == urlBefore {
+                answer["missed"] = "No click reached “\(target.name)”: something on the page took it. Look again (page_screenshot marks=true shows what's where)."
+            }
+            // The page moved between finding it and clicking: say what was really clicked.
+            if let landed, landed["hit"] as? Bool == false {
+                answer["missed"] = "The click landed on “\(landed["on"] as? String ?? "something else")”, not on “\(target.name)”: the page moved. Look again before going on."
+            }
+            return outcome(answer, view, since: started)
+
+        case "page.hover":
+            let (view, _, _) = try await webView(args)
+            let target = try await locate(args, in: view)
+            try await devtools(view, "Input.dispatchMouseEvent", ["type": "mouseMoved", "x": target.x, "y": target.y])
+            try await Task.sleep(nanoseconds: 150_000_000)
+            return ["hovered": target.ref]
 
         case "page.type":
-            let (view, _, _) = try webView(args)
+            let (view, tab, _) = try await webView(args)
             guard let text = args["text"] as? String else { throw AgentError("Missing \"text\".") }
             // Here "text" is what to type; the field is found by ref, selector or its label.
-            let target = try await locate(["ref": args["ref"] as Any, "selector": args["selector"] as Any,
-                                           "text": args["label"] as Any], in: view)
-            let done = try await evaluate("return window.__sillAgent.type(ref, text, clear)", in: view, world: Web.world,
-                                          arguments: ["ref": target.ref, "text": text, "clear": args["clear"] as? Bool ?? true])
-            if args["submit"] as? Bool ?? false { press("Enter", in: view) }
-            return ["typed": done ?? false]
+            var lookup: [String: Any] = ["editable": true]
+            for (key, from) in [("ref", "ref"), ("selector", "selector"), ("text", "label"), ("wait", "wait")] { if let v = args[from] { lookup[key] = v } }
+            let target = try await locate(lookup, in: view)
+            if target.disabled { throw AgentError("“\(target.name)” is disabled.") }
+            // Card details are money: always past the judge, which asks.
+            if Self.paymentField.firstMatch(in: target.name, range: NSRange(location: 0, length: target.name.utf16.count)) != nil,
+               let refused = await AgentJudge.clear(.init(action: "enter card details", target: target.name, page: view.title ?? "",
+                                                          site: view.url?.host ?? "")) {
+                throw AgentError(refused)
+            }
+            let clear = args["clear"] as? Bool ?? true
+            let typingStarted = Date()
+            let typed = try await type(text, into: target, clear: clear, in: view)
+            // Suggestions, validation: what the typing set off, before answering.
+            await settle(tab, view, since: typingStarted)
+            if args["submit"] as? Bool ?? false {
+                try await judgeSending(view)
+                try await key("Enter", in: view)
+                await settle(tab, view)
+            }
+            var answer: [String: Any] = ["typed": typed.ok, "ref": target.ref]
+            if let value = typed.value { answer["value"] = value }
+            return outcome(answer, view, since: Date())
 
         case "page.select":
-            let (view, _, _) = try webView(args)
+            let (view, _, _) = try await webView(args)
             guard let value = args["value"] as? String else { throw AgentError("Missing \"value\".") }
             let target = try await locate(args, in: view)
-            let chosen = try await evaluate("return window.__sillAgent.choose(ref, value)", in: view, world: Web.world,
+            if target.disabled { throw AgentError("“\(target.name)” is disabled.") }
+            let chosen: Any?
+            if let frame = target.frame {
+                chosen = try await AgentPage.of(view).evaluate("window.__sillAgent.choose(\(json(target.inner)), \(json(value)))", in: frame)
+            } else {
+                chosen = try await evaluate("return window.__sillAgent.choose(ref, value)", in: view, world: Web.world,
                                             arguments: ["ref": target.ref, "value": value])
-            return ["selected": chosen ?? false]
+            }
+            if chosen as? Bool != true {
+                let options = (try? await evaluate("return window.__sillAgent.options(ref)", in: view, world: Web.world,
+                                                   arguments: ["ref": target.ref])) as? [String] ?? []
+                throw AgentError("No option “\(value)” in “\(target.name)”.\(options.isEmpty ? "" : " Options: " + options.prefix(30).joined(separator: ", "))")
+            }
+            return ["selected": true]
 
         case "page.press":
-            let (view, _, _) = try webView(args)
-            guard let key = args["key"] as? String else { throw AgentError("Missing \"key\".") }
-            guard press(key, in: view) else {
-                throw AgentError("Unknown key \(key). Use Enter, Tab, Escape, Backspace, Delete, Space, ArrowUp/Down/Left/Right, PageUp, PageDown, Home, End.")
-            }
-            return ["pressed": key]
-
-        case "page.scroll":
-            let (view, _, _) = try webView(args)
+            let (view, tab, _) = try await webView(args)
+            guard let name = args["key"] as? String else { throw AgentError("Missing \"key\".") }
+            // Aimed at an element (a slider, a grid cell): it gets the focus first.
             if args["ref"] != nil || args["selector"] != nil || args["text"] != nil {
                 let target = try await locate(args, in: view)
-                return ["scrolledTo": target.ref]
+                try await focus(target, in: view)
+            }
+            if ["enter", "return"].contains(name.lowercased()) { try await judgeSending(view) }
+            let started = Date()
+            try await key(name, in: view)
+            await settle(tab, view)
+            return outcome(["pressed": name], view, since: started)
+
+        case "page.scroll":
+            let (view, _, _) = try await webView(args)
+            let named = args["ref"] != nil || args["selector"] != nil || args["text"] != nil
+            var at: (x: Double, y: Double)?
+            if named {
+                let target = try await locate(args, in: view)
+                // Just a target: bring it into view. With dy/dx: turn the wheel over it (a list, a map, a panel).
+                if args["dy"] == nil && args["dx"] == nil { return ["scrolledTo": target.ref] }
+                at = (target.x, target.y)
             }
             let dy = args["dy"] as? Double ?? 600
-            _ = try await evaluate("window.scrollBy({top: dy, behavior: 'instant'}); return window.scrollY", in: view, world: Web.world,
-                                   arguments: ["dy": dy])
-            return ["scrolled": dy]
+            let dx = args["dx"] as? Double ?? 0
+            // A real wheel turn in the middle of the page: what's under it
+            // scrolls, inner panels too, as with a trackpad.
+            let size = try await evaluate("return [innerWidth, innerHeight]", in: view, world: Web.world) as? [Double] ?? [800, 600]
+            let x = at?.x ?? args["x"] as? Double ?? size[0] / 2, y = at?.y ?? args["y"] as? Double ?? size[1] / 2
+            do {
+                try await devtools(view, "Input.dispatchMouseEvent",
+                                   ["type": "mouseWheel", "x": x, "y": y, "deltaX": dx, "deltaY": dy])
+            } catch {
+                _ = try await evaluate("window.scrollBy({left: dx, top: dy, behavior: 'instant'})", in: view, world: Web.world,
+                                       arguments: ["dx": dx, "dy": dy])
+            }
+            try await Task.sleep(nanoseconds: 120_000_000)
+            let position = try await evaluate("return [scrollY, document.documentElement.scrollHeight - innerHeight]", in: view,
+                                              world: Web.world) as? [Double] ?? []
+            return ["scrolled": dy, "scrollY": position.first ?? 0, "maxScrollY": position.last ?? 0]
 
         case "page.eval":
-            let (view, _, _) = try webView(args)
+            let (view, _, _) = try await webView(args)
             guard let script = args["script"] as? String else { throw AgentError("Missing \"script\" (a function body; use return).") }
+            // A script can do anything the page can, unjudged: from claude.ai only if you've allowed it.
+            if args["_via"] as? String == "relay", !Preferences.shared.remoteScripts {
+                throw AgentError("Running scripts is off for claude.ai (Sill › Settings › Agents). Use the other tools: page_snapshot, page_text, page_click, page_type.")
+            }
             let value = try await evaluate(script, in: view, world: .page)
             return ["value": sanitize(value)]
 
         case "page.screenshot":
-            let (view, _, _) = try webView(args)
-            let configuration = WKSnapshotConfiguration()
-            if let width = args["maxWidth"] as? Double { configuration.snapshotWidth = NSNumber(value: min(width, Double(view.bounds.width))) }
-            let image = try await view.takeSnapshot(configuration: configuration)
-            guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
-                  let png = bitmap.representation(using: .png, properties: [:]) else { throw AgentError("The page couldn't be captured.") }
-            return ["png": png.base64EncodedString(), "width": bitmap.pixelsWide, "height": bitmap.pixelsHigh]
+            let (view, _, _) = try await webView(args)
+            var marks: [[String: Any]] = []
+            if args["marks"] as? Bool == true {
+                marks = (try? await evaluate("return window.__sillAgent.snapshot(false)", in: view, world: Web.world)) as? [[String: Any]] ?? []
+                marks += await AgentPage.of(view).frameElements(all: false)
+                marks = marks.filter { $0["ref"] != nil }
+            }
+            let cssWidth = (try? await evaluate("return innerWidth", in: view, world: Web.world)) as? Double ?? Double(view.bounds.width)
+            return try await screenshot(of: view, maxWidth: args["maxWidth"] as? Double ?? 1280,
+                                        quality: args["quality"] as? Double ?? 0.75, marks: marks, cssWidth: cssWidth)
 
         case "page.find":
-            let (view, _, _) = try webView(args)
+            let (view, _, _) = try await webView(args)
             guard let text = args["text"] as? String else { throw AgentError("Missing \"text\".") }
             let configuration = WKFindConfiguration()
             configuration.caseSensitive = false
@@ -404,8 +688,578 @@ enum AgentCommands {
             return visits.map { ["url": $0.url, "title": $0.title, "visits": $0.count,
                                  "last": ISO8601DateFormatter().string(from: $0.last)] }
 
+        case "page.drag":
+            // Press, move along a path, let go: sliders, canvases, maps, sortable lists.
+            let (view, tab, _) = try await webView(args)
+            let source = try await target(args, prefix: "from", in: view)
+            let from = (x: source.x, y: source.y)
+            // A path relative to where it starts (drawing, a gesture), or a destination.
+            let path: [(Double, Double)] = (args["by"] as? [[Double]] ?? []).compactMap { $0.count >= 2 ? (from.x + $0[0], from.y + $0[1]) : nil }
+            if !path.isEmpty {
+                try await devtools(view, "Input.dispatchMouseEvent", ["type": "mouseMoved", "x": from.x, "y": from.y])
+                try await devtools(view, "Input.dispatchMouseEvent", ["type": "mousePressed", "x": from.x, "y": from.y,
+                                                                      "button": "left", "buttons": 1, "clickCount": 1])
+                var last = from
+                for point in path {
+                    for i in 1...8 {
+                        let t = Double(i) / 8
+                        try await devtools(view, "Input.dispatchMouseEvent", ["type": "mouseMoved", "button": "left", "buttons": 1,
+                                                                              "x": last.x + (point.0 - last.x) * t, "y": last.y + (point.1 - last.y) * t])
+                        try await Task.sleep(nanoseconds: 8_000_000)
+                    }
+                    last = (point.0, point.1)
+                }
+                try await devtools(view, "Input.dispatchMouseEvent", ["type": "mouseReleased", "x": last.x, "y": last.y,
+                                                                      "button": "left", "buttons": 0, "clickCount": 1])
+                await settle(tab, view)
+                return ["dragged": ["from": [from.x, from.y], "points": path.count]]
+            }
+            let to = try await point(args, prefix: "to", in: view)
+            let steps = max(2, min(60, args["steps"] as? Int ?? 16))
+            // HTML drag and drop (draggable="true"): Chromium hands the drag
+            // over, and it's carried to the drop point as a drag, not a mouse move.
+            var html5 = false
+            if source.frame == nil, source.backend == nil, source.ref.hasPrefix("e") {
+                html5 = (try? await evaluate("return window.__sillAgent.draggable(ref)", in: view, world: Web.world,
+                                             arguments: ["ref": source.ref])) as? Bool == true
+            }
+            if html5 {
+                let page = AgentPage.of(view)
+                try await devtools(view, "Input.setInterceptDrags", ["enabled": true])
+                defer { Task { _ = try? await devtools(view, "Input.setInterceptDrags", ["enabled": false]) } }
+                try await devtools(view, "Input.dispatchMouseEvent", ["type": "mouseMoved", "x": from.x, "y": from.y])
+                try await devtools(view, "Input.dispatchMouseEvent", ["type": "mousePressed", "x": from.x, "y": from.y,
+                                                                      "button": "left", "buttons": 1, "clickCount": 1])
+                async let data = page.nextDrag(timeout: 2)
+                for i in 1...6 {
+                    try await devtools(view, "Input.dispatchMouseEvent", ["type": "mouseMoved", "button": "left", "buttons": 1,
+                                                                          "x": from.x + (to.x - from.x) * Double(i) / 30, "y": from.y + (to.y - from.y) * Double(i) / 30])
+                }
+                if let carried = await data {
+                    for kind in ["dragEnter", "dragOver", "drop"] {
+                        try await devtools(view, "Input.dispatchDragEvent", ["type": kind, "x": to.x, "y": to.y, "data": carried])
+                    }
+                    try await devtools(view, "Input.dispatchMouseEvent", ["type": "mouseReleased", "x": to.x, "y": to.y,
+                                                                          "button": "left", "buttons": 0, "clickCount": 1])
+                    await settle(tab, view)
+                    return ["dragged": ["from": [from.x, from.y], "to": [to.x, to.y]], "kind": "drag and drop"]
+                }
+                try await devtools(view, "Input.dispatchMouseEvent", ["type": "mouseReleased", "x": from.x, "y": from.y,
+                                                                      "button": "left", "buttons": 0, "clickCount": 1])
+            }
+            try await devtools(view, "Input.dispatchMouseEvent", ["type": "mouseMoved", "x": from.x, "y": from.y])
+            try await devtools(view, "Input.dispatchMouseEvent", ["type": "mousePressed", "x": from.x, "y": from.y,
+                                                                  "button": "left", "buttons": 1, "clickCount": 1])
+            for i in 1...steps {
+                let t = Double(i) / Double(steps), eased = t < 0.5 ? 2 * t * t : 1 - pow(-2 * t + 2, 2) / 2
+                try await devtools(view, "Input.dispatchMouseEvent", ["type": "mouseMoved", "button": "left", "buttons": 1,
+                                                                      "x": from.x + (to.x - from.x) * eased, "y": from.y + (to.y - from.y) * eased])
+                try await Task.sleep(nanoseconds: 12_000_000)
+            }
+            try await devtools(view, "Input.dispatchMouseEvent", ["type": "mouseReleased", "x": to.x, "y": to.y,
+                                                                  "button": "left", "buttons": 0, "clickCount": 1])
+            await settle(tab, view)
+            return ["dragged": ["from": [from.x, from.y], "to": [to.x, to.y]]]
+
+        case "page.touch":
+            // A finger: tap, long press, or swipe by dx/dy, as a phone-sized page expects.
+            let (view, tab, _) = try await webView(args)
+            let at = try await point(args, prefix: "", in: view)
+            let kind = (args["kind"] as? String ?? "tap").lowercased()
+            let dx = args["dx"] as? Double ?? 0, dy = args["dy"] as? Double ?? 0
+            let duration = args["duration"] as? Double ?? (kind == "longpress" ? 0.8 : kind == "swipe" ? 0.3 : 0.05)
+            try await devtools(view, "Input.dispatchTouchEvent", ["type": "touchStart", "touchPoints": [["x": at.x, "y": at.y]]])
+            if kind == "swipe" {
+                let steps = 12
+                for i in 1...steps {
+                    let t = Double(i) / Double(steps), eased = 1 - pow(1 - t, 3)
+                    try await devtools(view, "Input.dispatchTouchEvent", ["type": "touchMove",
+                                                                          "touchPoints": [["x": at.x + dx * eased, "y": at.y + dy * eased]]])
+                    try await Task.sleep(nanoseconds: UInt64(duration / Double(steps) * 1e9))
+                }
+            } else {
+                try await Task.sleep(nanoseconds: UInt64(duration * 1e9))
+            }
+            try await devtools(view, "Input.dispatchTouchEvent", ["type": "touchEnd", "touchPoints": [[String: Any]]()])
+            await settle(tab, view)
+            return ["touched": kind]
+
+        case "page.pinch":
+            let (view, _, _) = try await webView(args)
+            let at = try await point(args, prefix: "", in: view)
+            let scale = args["scale"] as? Double ?? 2
+            try await devtools(view, "Input.synthesizePinchGesture", ["x": at.x, "y": at.y, "scaleFactor": scale,
+                                                                      "gestureSourceType": "touch"], timeout: 15)
+            return ["pinched": scale]
+
+        case "page.zoom":
+            let (view, _, _) = try await webView(args)
+            if let level = args["level"] as? Double { view.pageZoom = max(0.25, min(5, level)) }
+            return ["zoom": view.pageZoom]
+
+        case "page.upload":
+            // Files from this Mac into a page: always asked first, naming them
+            // and the site. Otherwise a remote agent could send any file anywhere.
+            let (view, _, _) = try await webView(args)
+            let paths = (args["paths"] as? [String] ?? []).map { ($0 as NSString).expandingTildeInPath }
+            guard !paths.isEmpty else { throw AgentError("Give \"paths\": the files to upload.") }
+            for path in paths where !FileManager.default.isReadableFile(atPath: path) { throw AgentError("Can't read \(path).") }
+            let target = try await locate(args, in: view)
+            guard target.backend == nil else { throw AgentError("That field is inside a closed component; uploads can't reach it.") }
+            let site = target.frame.flatMap { URL(string: $0.url)?.host } ?? view.url?.host ?? "this page"
+            // Always asked, except in the agent test course's own copy of Sill set to never ask.
+            let courseCopy = Places.testProfile != nil && Preferences.shared.store.string(forKey: "agentAsk") == "never"
+            if !courseCopy, !(await ConnectorApproval.allowUpload(paths, to: site)) {
+                throw AgentError("The user didn't allow uploading those files. Ask them in chat.")
+            }
+            return try await upload(paths, into: target, in: view)
+
+
+        case "user.wait":
+            // A wall only a person should get past (a CAPTCHA, a code sent to
+            // their phone): Sill asks for them, and waits until it's gone.
+            let (view, tab, browser) = try await webView(args)
+            let message = (args["message"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "The agent needs you in “\(tab.displayTitle)”."
+            let timeout = min(600, args["timeout"] as? Double ?? 180)
+            NSApp.requestUserAttention(.criticalRequest)
+            browser.toast("Sill needs you: \(message)")
+            let start = Date()
+            while Date().timeIntervalSince(start) < timeout {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                AgentActivity.shared.touch(tab, view: view, in: browser)
+                let walls = (try? await evaluate("return window.__sillAgent.walls()", in: view, world: Web.world)) as? [String] ?? []
+                if walls.isEmpty, args["until"] == nil { break }
+                if let text = args["until"] as? String,
+                   (try? await evaluate("return window.__sillAgent.present(null, text)", in: view, world: Web.world,
+                                        arguments: ["text": text])) as? Bool == true { break }
+            }
+            let waited = Int(Date().timeIntervalSince(start))
+            let walls = (try? await evaluate("return window.__sillAgent.walls()", in: view, world: Web.world)) as? [String] ?? []
+            return ["cleared": walls.isEmpty, "waitedSeconds": waited, "url": view.url?.absoluteString ?? ""]
+
+        case "page.dialog":
+            // The page's alert, confirm or prompt, held while the agent works: answered here.
+            let (view, tab, _) = try await webView(args)
+            guard let dialog = view.openDialog else { return ["answered": false, "note": "No dialog is open."] }
+            let accept = args["accept"] as? Bool ?? true
+            _ = view.answerDialog(accept, text: args["text"] as? String)
+            await settle(tab, view)
+            return ["answered": true, "kind": dialog["kind"] ?? "", "message": dialog["message"] ?? "", "accepted": accept]
+
+        case "passwords.list":
+            // Names only: which accounts Sill could sign in with here.
+            let (view, _, _) = try await webView(args)
+            let host = (args["host"] as? String) ?? view.url?.host ?? ""
+            guard !host.isEmpty else { throw AgentError("No site to look up.") }
+            return ["host": host, "accounts": await SavedPasswords.logins(for: host).map { ["host": $0.host, "user": $0.user] }]
+
+        case "page.signin":
+            // Sill fills the saved password itself: the agent never sees it,
+            // and it's only ever filled on the site it was saved for.
+            let (view, tab, _) = try await webView(args)
+            guard let url = view.url, let host = url.host else { throw AgentError("The page has no address yet.") }
+            guard url.scheme == "https" || ["localhost", "127.0.0.1"].contains(host) else {
+                throw AgentError("Saved passwords are only filled on https pages.")
+            }
+            let logins = await SavedPasswords.logins(for: host)
+            let wanted = (args["user"] as? String)?.lowercased()
+            guard let login = wanted.map({ w in logins.first { $0.user.lowercased() == w } }) ?? logins.first else {
+                throw AgentError(logins.isEmpty
+                    ? "Sill has no saved password for \(host). Ask the user to sign in once (Sill offers to keep it), or create one with passwords_save on a sign-up form."
+                    : "No saved account \(wanted ?? "") for \(host). Saved: \(logins.map(\.user).joined(separator: ", ")).")
+            }
+            guard let password = await SavedPasswords.password(for: login) else {
+                throw AgentError("Sill couldn't read the saved password for \(login.user) from the Keychain.")
+            }
+            let filled = try await evaluate("return window.__sillFill ? window.__sillFill(user, password) : false", in: view,
+                                            world: Web.world, arguments: ["user": login.user, "password": password]) as? Bool ?? false
+            guard filled else { throw AgentError("No sign-in fields on this page. Open the sign-in form first.") }
+            var submitted = false
+            if args["submit"] as? Bool ?? true {
+                try await key("Enter", in: view)
+                submitted = true
+                await settle(tab, view)
+            }
+            return ["signedInAs": login.user, "site": login.host, "submitted": submitted, "url": view.url?.absoluteString ?? ""]
+
+        case "passwords.save":
+            // A password for this site: given, or made up here (generate) and
+            // filled into the page's new-password fields. Never sent back.
+            let (view, _, _) = try await webView(args)
+            let host = (args["host"] as? String) ?? view.url?.host ?? ""
+            guard !host.isEmpty, let user = args["user"] as? String, !user.isEmpty else {
+                throw AgentError("Give \"user\" (and the site's page open, or \"host\").")
+            }
+            let generate = args["generate"] as? Bool ?? (args["password"] == nil)
+            guard let password = generate ? Self.strongPassword() : args["password"] as? String, !password.isEmpty else {
+                throw AgentError("Give \"password\", or generate=true.")
+            }
+            let saved = await SavedPasswords.save(password, user: user, host: host)
+            guard saved != .failed else { throw AgentError("The Keychain wouldn't keep it.") }
+            var filledFields = 0
+            if generate || args["fill"] as? Bool == true {
+                filledFields = try await evaluate(Self.fillNewPassword, in: view, world: Web.world,
+                                                  arguments: ["user": user, "password": password]) as? Int ?? 0
+            }
+            return ["saved": true, "user": user, "site": host, "generated": generate, "filledFields": filledFields]
+
+        case "connector.approve":
+            // Asked by the relay bridge when an app signs in from the internet.
+            guard Preferences.shared.remoteConnector else { return ["approved": false] }
+            let host = (args["host"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "An app"
+            return ["approved": await ConnectorApproval.ask(host: host)]
+
         default:
-            throw AgentError("Unknown command \"\(command)\". Commands: status, tabs.list, tabs.open, tabs.select, tabs.close, page.navigate, page.back, page.forward, page.reload, page.stop, page.wait, page.text, page.snapshot, page.click, page.type, page.select, page.press, page.scroll, page.eval, page.screenshot, page.find, history.search.")
+            throw AgentError("Unknown command \"\(command)\". Commands: status, tabs.list, tabs.open, tabs.select, tabs.close, page.navigate, page.back, page.forward, page.reload, page.stop, page.wait, page.text, page.snapshot, page.click, page.hover, page.type, page.select, page.press, page.scroll, page.eval, page.screenshot, page.find, page.signin, page.dialog, page.drag, page.touch, page.pinch, page.zoom, page.upload, user.wait, passwords.list, passwords.save, history.search.")
+        }
+    }
+
+    /// A point in CSS pixels: "<prefix>X"/"<prefix>Y" (or x/y), else the element
+    /// named by "<prefix>Ref"/"<prefix>Selector"/"<prefix>Text" (or ref/selector/text).
+    private static func point(_ args: [String: Any], prefix: String, in view: SillWebView) async throws -> (x: Double, y: Double) {
+        let t = try await target(args, prefix: prefix, in: view)
+        return (t.x, t.y)
+    }
+
+    private static func target(_ args: [String: Any], prefix: String, in view: SillWebView) async throws -> Target {
+        func key(_ name: String) -> String { prefix.isEmpty ? name : prefix + name.prefix(1).uppercased() + name.dropFirst() }
+        if let x = args[key("x")] as? Double, let y = args[key("y")] as? Double {
+            return Target(ref: "\(Int(x)),\(Int(y))", x: x, y: y, name: "the point")
+        }
+        var picked: [String: Any] = [:]
+        for name in ["ref", "selector", "text"] { if let value = args[key(name)] { picked[name] = value } }
+        return try await locate(picked, in: view)
+    }
+
+    /// ["Meta", "Shift"] → DevTools' modifier bits (Alt 1, Ctrl 2, Meta 4, Shift 8).
+    private static func modifierMask(_ value: Any?) -> Int {
+        let names = (value as? [String]) ?? (value as? String).map { $0.split(separator: "+").map(String.init) } ?? []
+        return names.reduce(0) { mask, name in
+            switch name.lowercased() {
+            case "alt", "option": return mask | 1
+            case "ctrl", "control": return mask | 2
+            case "meta", "cmd", "command": return mask | 4
+            case "shift": return mask | 8
+            default: return mask
+            }
+        }
+    }
+
+    /// Gives the file field (in the page, or in a frame from another site) the files.
+    private static func upload(_ paths: [String], into target: Target, in view: SillWebView) async throws -> [String: Any] {
+        // Marked in Sill's world, found in the page's, given the files: in the
+        // page itself or inside its frame (a frame from another site has its own session).
+        let token = UUID().uuidString
+        let page = AgentPage.of(view)
+        let find = "document.querySelector('[data-sill-pick=\"\(token)\"]')"
+        let found: [String: Any]
+        if let frame = target.frame {
+            _ = try await page.evaluate("window.__sillAgent.mark(\(json(target.inner)), \(json(token)))", in: frame)
+            found = try await page.call("Runtime.evaluate", ["expression": find], session: frame.session)
+        } else {
+            _ = try await evaluate("return window.__sillAgent.mark(ref, token)", in: view, world: Web.world,
+                                   arguments: ["ref": target.ref, "token": token])
+            found = try await devtools(view, "Runtime.evaluate", ["expression": find])
+        }
+        guard let objectId = (found["result"] as? [String: Any])?["objectId"] as? String else {
+            throw AgentError("That isn't a file field.")
+        }
+        try await page.call("DOM.setFileInputFiles", ["files": paths, "objectId": objectId], session: target.frame?.session)
+        _ = try? await page.call("Runtime.evaluate", ["expression": find + "?.removeAttribute('data-sill-pick')"], session: target.frame?.session)
+        return ["uploaded": paths.map { ($0 as NSString).lastPathComponent }]
+    }
+
+    /// Enter in a form sends it: what it would send goes past the judge first.
+    private static func judgeSending(_ view: SillWebView) async throws {
+        let sending = (try? await evaluate("return window.__sillAgent.sending()", in: view, world: Web.world)) as? String ?? ""
+        if let refused = await AgentJudge.clear(.init(action: "submit", target: sending.isEmpty ? "the form" : sending,
+                                                      page: view.title ?? "", site: view.url?.host ?? "")) {
+            throw AgentError(refused)
+        }
+    }
+
+    private static let paymentField = try! NSRegularExpression(
+        pattern: #"(card ?number|card number|\bcvc\b|\bcvv\b|security code|expir|\biban\b|sort code|account number|routing)"#,
+        options: [.caseInsensitive])
+
+    // MARK: passwords
+
+    /// As Safari suggests them: three groups of six, letters and digits,
+    /// joined by hyphens (about 71 bits), from the system's secure source.
+    private static func strongPassword() -> String {
+        let letters = Array("abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        func pick() -> Character {
+            var byte: UInt8 = 0
+            repeat { _ = SecRandomCopyBytes(kSecRandomDefault, 1, &byte) } while Int(byte) >= 256 - 256 % letters.count
+            return letters[Int(byte) % letters.count]
+        }
+        var groups = (0..<3).map { _ in String((0..<6).map { _ in pick() }) }
+        // At least one digit and one capital, as sites ask.
+        groups[0] = String(groups[0].dropLast()) + "7"
+        groups[2] = "K" + String(groups[2].dropFirst())
+        return groups.joined(separator: "-")
+    }
+
+    /// Fills every visible new-password box (and a confirmation) and the
+    /// account name before them, if empty. Answers how many it filled.
+    private static let fillNewPassword = """
+    const shown = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const set = (input, value) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      input.focus(); setter.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    const boxes = [...document.querySelectorAll('input[type=password]')].filter(shown);
+    let n = 0;
+    for (const box of boxes) { if (box.autocomplete !== 'current-password' || boxes.length === 1) { set(box, password); n++; } }
+    if (boxes.length) {
+      const all = [...document.querySelectorAll('input')].filter(shown);
+      for (let j = all.indexOf(boxes[0]) - 1; j >= 0; j--) {
+        const i = all[j];
+        if (['text', 'email', ''].includes(i.type)) { if (!i.value) { set(i, user); n++; } break; }
+      }
+    }
+    return n;
+    """
+
+    // MARK: DevTools: input and pictures that need no focus and no front
+
+    @discardableResult
+    private static func devtools(_ view: SillWebView, _ method: String, _ params: [String: Any] = [:],
+                                 timeout: Double = 10) async throws -> [String: Any] {
+        try await withCheckedThrowingContinuation { continuation in
+            let once = Once()
+            view.devtools(method, params: params) { result, error in
+                guard once.claim() else { return }
+                if let result { continuation.resume(returning: result as? [String: Any] ?? [:]) }
+                else { continuation.resume(throwing: AgentError(error ?? "\(method) failed.")) }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+                guard once.claim() else { return }
+                continuation.resume(throwing: AgentError("\(method) took too long."))
+            }
+        }
+    }
+
+    private final class Once {
+        private var done = false
+        func claim() -> Bool { if done { return false }; done = true; return true }
+    }
+
+    /// A click as a mouse makes it (trusted events, hover first), sent into the page itself.
+    private static func click(at x: Double, _ y: Double, in view: SillWebView, count: Int,
+                              button: String = "left", hold: Double = 0, modifiers: Int = 0) async throws {
+        let mask = ["left": 1, "right": 2, "middle": 4][button] ?? 1
+        let name = mask == 1 ? "left" : mask == 2 ? "right" : "middle"
+        try await devtools(view, "Input.dispatchMouseEvent", ["type": "mouseMoved", "x": x, "y": y, "modifiers": modifiers])
+        for n in 1...count {
+            let base: [String: Any] = ["x": x, "y": y, "button": name, "clickCount": n, "pointerType": "mouse", "modifiers": modifiers]
+            try await devtools(view, "Input.dispatchMouseEvent", base.merging(["type": "mousePressed", "buttons": mask]) { $1 })
+            // A long press: held down this long before letting go.
+            if hold > 0 { try await Task.sleep(nanoseconds: UInt64(min(hold, 10) * 1e9)) }
+            // The release is answered only once the page's handler returns: if
+            // that opened a dialog, not until it's answered. Don't wait for it.
+            try await untilDialog(view) {
+                try await devtools(view, "Input.dispatchMouseEvent", base.merging(["type": "mouseReleased", "buttons": 0]) { $1 })
+            }
+            if view.openDialog != nil { return }
+        }
+    }
+
+    /// Runs `work`, but stops waiting for it the moment the page opens a
+    /// dialog (the work's answer only comes once the dialog is closed).
+    private static func untilDialog(_ view: SillWebView, _ work: @escaping @MainActor () async throws -> Void) async throws {
+        final class State { var finished = false; var failure: Error? }
+        let state = State()
+        Task { @MainActor in
+            do { try await work() } catch { state.failure = error }
+            state.finished = true
+        }
+        while !state.finished && view.openDialog == nil {
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        if let failure = state.failure, view.openDialog == nil { throw failure }
+    }
+
+    private static let namedKeys: [String: (key: String, code: String, keyCode: Int, text: String?)] = [
+        "enter": ("Enter", "Enter", 13, "\r"), "return": ("Enter", "Enter", 13, "\r"),
+        "tab": ("Tab", "Tab", 9, nil), "escape": ("Escape", "Escape", 27, nil), "esc": ("Escape", "Escape", 27, nil),
+        "backspace": ("Backspace", "Backspace", 8, nil), "delete": ("Delete", "Delete", 46, nil),
+        "space": (" ", "Space", 32, " "),
+        "arrowup": ("ArrowUp", "ArrowUp", 38, nil), "arrowdown": ("ArrowDown", "ArrowDown", 40, nil),
+        "arrowleft": ("ArrowLeft", "ArrowLeft", 37, nil), "arrowright": ("ArrowRight", "ArrowRight", 39, nil),
+        "pageup": ("PageUp", "PageUp", 33, nil), "pagedown": ("PageDown", "PageDown", 34, nil),
+        "home": ("Home", "Home", 36, nil), "end": ("End", "End", 35, nil),
+    ]
+
+    /// Types each character as its own key press.
+    private static func keystrokes(_ text: String, in view: SillWebView) async throws {
+        for character in text {
+            view.agentKeysUntil = Date.timeIntervalSinceReferenceDate + 2
+            if character == "\n" { try await key("Enter", in: view); continue }
+            let c = String(character)
+            let code = c.unicodeScalars.count == 1 && c.unicodeScalars.first!.isASCII
+                ? Int(c.uppercased().unicodeScalars.first!.value) : 0
+            let event: [String: Any] = ["key": c, "text": c, "unmodifiedText": c, "windowsVirtualKeyCode": code]
+            try await untilDialog(view) { try await devtools(view, "Input.dispatchKeyEvent", event.merging(["type": "keyDown"]) { $1 }) }
+            if view.openDialog != nil { return }
+            try await devtools(view, "Input.dispatchKeyEvent", ["type": "keyUp", "key": c, "windowsVirtualKeyCode": code])
+        }
+    }
+
+    /// Gives the element the keyboard: a click for what only takes focus that way, else focus().
+    private static func focus(_ target: Target, in view: SillWebView) async throws {
+        if target.backend != nil { try await click(at: target.x, target.y, in: view, count: 1); return }
+        if let frame = target.frame {
+            try await click(at: target.x, target.y, in: view, count: 1)
+            _ = try? await AgentPage.of(view).evaluate("window.__sillAgent.focus(\(json(target.inner)), false)", in: frame)
+            return
+        }
+        _ = try await evaluate("return window.__sillAgent.focus(ref, false)", in: view, world: Web.world, arguments: ["ref": target.ref])
+    }
+
+    /// "Enter", "ArrowDown", "a", or a chord: "Meta+A", "Shift+Tab", "Ctrl+Enter".
+    private static func key(_ name: String, in view: SillWebView) async throws {
+        var parts = name.split(separator: "+").map { String($0).trimmingCharacters(in: .whitespaces) }
+        if name.hasSuffix("++") { parts = parts.filter { !$0.isEmpty } + ["+"] }
+        guard let last = parts.last, !last.isEmpty else { throw AgentError("Missing \"key\".") }
+        var modifiers = 0
+        for modifier in parts.dropLast() {
+            switch modifier.lowercased() {
+            case "alt", "option", "opt": modifiers |= 1
+            case "ctrl", "control": modifiers |= 2
+            case "meta", "cmd", "command": modifiers |= 4
+            case "shift": modifiers |= 8
+            default: throw AgentError("Unknown modifier \(modifier). Use Shift, Ctrl, Alt or Meta.")
+            }
+        }
+        var event: [String: Any]
+        if let named = namedKeys[last.lowercased()] {
+            event = ["key": named.key, "code": named.code, "windowsVirtualKeyCode": named.keyCode]
+            if let text = named.text, modifiers & 6 == 0 { event["text"] = text; event["unmodifiedText"] = text }
+        } else if last.count == 1, let scalar = last.unicodeScalars.first {
+            let lower = last.lowercased(), upper = last.uppercased()
+            let character = modifiers & 8 != 0 ? upper : last
+            let code = scalar.properties.isAlphabetic ? "Key\(upper)" : (CharacterSet.decimalDigits.contains(scalar) ? "Digit\(last)" : "")
+            let keyCode = Int(upper.unicodeScalars.first!.value)
+            event = ["key": character, "code": code, "windowsVirtualKeyCode": keyCode]
+            if modifiers & 6 == 0 { event["text"] = character; event["unmodifiedText"] = lower }
+            // On a Mac, ⌘ chords are editing commands, not text.
+            if modifiers & 4 != 0, let command = ["a": "selectAll", "c": "copy", "v": "paste", "x": "cut", "z": "undo",
+                                                  "b": "bold", "i": "italic", "u": "underline"][lower] {
+                event["commands"] = [modifiers & 8 != 0 && lower == "z" ? "redo" : command]
+            }
+        } else {
+            throw AgentError("Unknown key \(last). Use Enter, Tab, Escape, Backspace, Delete, Space, ArrowUp/Down/Left/Right, PageUp, PageDown, Home, End, a single character, or a chord like Meta+A.")
+        }
+        event["modifiers"] = modifiers
+        view.agentKeysUntil = Date.timeIntervalSinceReferenceDate + 2
+        // ⌘C, ⌘X, ⌘V: the agent's own clipboard, never yours.
+        let clipboardCommand = (event["commands"] as? [String])?.first.flatMap { ["copy", "cut", "paste"].contains($0) ? $0 : nil }
+        let yours = clipboardCommand.map { _ in AgentClipboard.take() }
+        if clipboardCommand == "paste" { AgentClipboard.lend() }
+        let count = NSPasteboard.general.changeCount
+        defer {
+            if let yours, let clipboardCommand {
+                Task { @MainActor in
+                    if clipboardCommand == "paste" {
+                        // The page reads it as the paste runs: a moment, then yours is back.
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                    } else {
+                        // Chromium writes a copy a little later: wait for it to land (up to 1 s).
+                        for _ in 0..<100 where NSPasteboard.general.changeCount == count { try? await Task.sleep(nanoseconds: 10_000_000) }
+                        AgentClipboard.keepAgents()
+                    }
+                    AgentClipboard.restore(yours)
+                }
+            }
+        }
+        try await untilDialog(view) {
+            try await devtools(view, "Input.dispatchKeyEvent", event.merging(["type": event["text"] != nil ? "keyDown" : "rawKeyDown"]) { $1 })
+        }
+        if view.openDialog != nil { return }
+        try await devtools(view, "Input.dispatchKeyEvent", event.merging(["type": "keyUp"]) { $1 }.filter { $0.key != "text" && $0.key != "commands" })
+    }
+
+    /// The page as it's drawn, never brought to the front: JPEG, scaled to `maxWidth` pixels.
+    private static func screenshot(of view: SillWebView, maxWidth: Double, quality: Double,
+                                   marks: [[String: Any]] = [], cssWidth: Double = 0) async throws -> [String: Any] {
+        if view.pageHidden { view.insistShown() }
+        let shot = try await devtools(view, "Page.captureScreenshot", ["format": "jpeg", "quality": 85, "optimizeForSpeed": true], timeout: 8)
+        guard let base64 = shot["data"] as? String, let data = Data(base64Encoded: base64),
+              let source = CGImageSourceCreateWithData(data as CFData, nil) else { throw AgentError("The page couldn't be captured.") }
+        let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                        kCGImageSourceThumbnailMaxPixelSize: max(64, Int(maxWidth)),
+                                        kCGImageSourceCreateThumbnailWithTransform: true]
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let width = properties?[kCGImagePropertyPixelWidth] as? Int ?? 0
+        let image = width > Int(maxWidth) ? CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+                                          : CGImageSourceCreateImageAtIndex(source, 0, nil)
+        guard var image else { throw AgentError("The page couldn't be captured.") }
+        if !marks.isEmpty, cssWidth > 0, let marked = Self.mark(image, with: marks, scale: Double(image.width) / cssWidth) { image = marked }
+        let out = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(out, "public.jpeg" as CFString, 1, nil) else {
+            throw AgentError("The page couldn't be captured.")
+        }
+        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+        CGImageDestinationFinalize(destination)
+        let scale = Double(image.width) / max(1, Double(view.bounds.width))
+        return ["data": (out as Data).base64EncodedString(), "mimeType": "image/jpeg",
+                "width": image.width, "height": image.height,
+                "note": "Image pixels = CSS pixels × \(String(format: "%.2f", scale)); snapshot boxes are CSS pixels."]
+    }
+
+    /// Each element's box and ref drawn on the picture ("set of marks"): what
+    /// the model sees maps straight onto what it can click.
+    private static func mark(_ image: CGImage, with elements: [[String: Any]], scale: Double) -> CGImage? {
+        let w = image.width, h = image.height
+        guard let context = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let palette: [NSColor] = [.systemBlue, .systemPink, .systemOrange, .systemGreen, .systemPurple, .systemTeal, .systemRed]
+        let previous = NSGraphicsContext.current
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        defer { NSGraphicsContext.current = previous }
+        let font = NSFont.monospacedSystemFont(ofSize: max(9, 11 * min(scale, 1.4)), weight: .semibold)
+        for (i, element) in elements.enumerated() {
+            guard let ref = element["ref"] as? String, let box = element["box"] as? [String: Any] else { continue }
+            let x = (box["x"] as? Double ?? 0) * scale, y = (box["y"] as? Double ?? 0) * scale
+            let bw = (box["w"] as? Double ?? 0) * scale, bh = (box["h"] as? Double ?? 0) * scale
+            let rect = CGRect(x: x, y: Double(h) - y - bh, width: bw, height: bh)   // CG's origin is the bottom
+            guard rect.maxY > 0, rect.minY < Double(h), rect.width > 2, rect.height > 2 else { continue }
+            let color = palette[i % palette.count]
+            context.setStrokeColor(color.withAlphaComponent(0.9).cgColor)
+            context.setLineWidth(1.5)
+            context.stroke(rect)
+            let label = NSAttributedString(string: ref, attributes: [.font: font, .foregroundColor: NSColor.white])
+            let size = label.size()
+            let tag = CGRect(x: rect.minX, y: min(Double(h) - size.height - 2, rect.maxY), width: size.width + 6, height: size.height + 2)
+            context.setFillColor(color.cgColor)
+            context.fill(tag)
+            label.draw(at: CGPoint(x: tag.minX + 3, y: tag.minY + 1))
+        }
+        return context.makeImage()
+    }
+
+    /// After an action: a moment for the page to react, and the load it started, if any.
+    /// After an action: no fixed pause. Done as soon as the page is quiet (no
+    /// changes for 60 ms) and what the action asked the network for (fetch,
+    /// XHR: suggestions, results) has come back; a navigation it started is
+    /// waited for. At most 2.5 s beyond a load.
+    private static func settle(_ tab: Tab, _ view: SillWebView, since: Date = Date()) async {
+        let page = AgentPage.of(view)
+        let deadline = Date().addingTimeInterval(2.5)
+        try? await Task.sleep(nanoseconds: 16_000_000)   // a frame for the page's handlers to run
+        while Date() < deadline {
+            if view.openDialog != nil { return }
+            if view.isLoading {
+                try? await waitForLoad(tab, timeout: 10)
+                continue
+            }
+            let quiet = (try? await evaluate("return window.__sillAgent.quiet(60)", in: view, world: Web.world)) as? Bool ?? true
+            if quiet && !page.fetching(since: since) { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
         }
     }
 
@@ -413,7 +1267,9 @@ enum AgentCommands {
 
     private static func evaluate(_ body: String, in view: SillWebView, world: WKContentWorld,
                                  arguments: [String: Any] = [:]) async throws -> Any? {
-        try await withCheckedThrowingContinuation { continuation in
+        // A page waiting on its own dialog runs no script until it's answered.
+        if let dialog = view.openDialog { throw dialogError(dialog) }
+        return try await withCheckedThrowingContinuation { continuation in
             view.callAsyncJavaScript(body, arguments: arguments, in: nil, in: world) { result in
                 switch result {
                 case .success(let value): continuation.resume(returning: value)
@@ -452,60 +1308,211 @@ enum AgentCommands {
         throw AgentError("Timed out after \(Int(timeout)) s waiting for \(selector ?? text ?? "it").")
     }
 
-    /// The element named by ref, CSS selector or visible text, scrolled into
-    /// view, with its centre in the web view's coordinates.
-    private static func locate(_ args: [String: Any], in view: SillWebView) async throws -> (ref: String, point: NSPoint) {
-        let found = try await evaluate("return window.__sillAgent.locate(ref, selector, text)", in: view, world: Web.world, arguments: [
-            "ref": args["ref"] as? String ?? NSNull(), "selector": args["selector"] as? String ?? NSNull(),
-            "text": args["text"] as? String ?? NSNull(),
-        ]) as? [String: Any]
-        guard let found, let ref = found["ref"] as? String else {
-            throw AgentError("No element matched. Use page.snapshot for refs, or give a CSS selector or its visible text.")
-        }
-        let zoom = view.pageZoom * view.magnification
-        let x = CGFloat((found["x"] as? Double) ?? 0) * zoom
-        let y = CGFloat((found["y"] as? Double) ?? 0) * zoom
-        return (ref, NSPoint(x: x, y: view.isFlipped ? y : view.bounds.height - y))
-    }
+    /// What an action acts on: where on the page (CSS pixels of the
+    /// viewport, what DevTools input takes), and what it is.
+    struct Target {
+        var ref: String
+        var x: Double
+        var y: Double
+        var name: String
+        var frame: AgentPage.Frame? = nil   // in a frame in another process
+        var inner: String? = nil            // its ref inside that frame
+        var backend: Int? = nil             // an accessibility-tree node (closed shadow root)
+        var disabled = false
+        var visible = true
+        var coveredBy: [String: Any]? = nil
+        var partial = false
 
-    /// A real click, as a hand would make it: pages see trusted events.
-    private static func realClick(at point: NSPoint, in view: SillWebView, double: Bool) {
-        guard let window = view.window else { return }
-        let location = view.convert(point, to: nil)
-        for count in 1...(double ? 2 : 1) {
-            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                if let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
-                                                  timestamp: ProcessInfo.processInfo.systemUptime,
-                                                  windowNumber: window.windowNumber, context: nil,
-                                                  eventNumber: 0, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0) {
-                    if type == .leftMouseDown { view.mouseDown(with: event) } else { view.mouseUp(with: event) }
+        func mustBeClickable() throws {
+            if disabled { throw AgentError("“\(name)” (\(ref)) is disabled: something on the page has to be done first (a required field, a box to tick).") }
+            if let cover = coveredBy {
+                if let dialog = cover["dialog"] as? String {
+                    let exits = (cover["exits"] as? [[String: Any]] ?? []).map { "“\($0["name"] as? String ?? "")” (\($0["ref"] as? String ?? ""))" }
+                    throw AgentError("“\(name)” (\(ref)) is behind the open dialog “\(dialog)”. "
+                        + (exits.isEmpty ? "Close it first (page_press Escape often does)." : "Close it first: \(exits.joined(separator: " or ")), or page_press Escape."))
                 }
+                if cover["overlay"] as? Bool == true {
+                    throw AgentError("“\(name)” (\(ref)) is under a page-wide overlay (a menu, picker or banner left open). Close it first: page_press Escape often does.")
+                }
+                let what = (cover["name"] as? String).flatMap { $0.isEmpty ? nil : "“\(String($0.prefix(60)))”" } ?? "a \(cover["tag"] as? String ?? "layer")"
+                let coverRef = (cover["ref"] as? String).map { " (\($0))" } ?? ""
+                throw AgentError("“\(name)” (\(ref)) is covered by \(what)\(coverRef): a click there would land on that instead. Close or answer it first.")
             }
         }
     }
 
-    @discardableResult
-    private static func press(_ key: String, in view: SillWebView) -> Bool {
-        let keys: [String: (UInt16, String)] = [
-            "enter": (36, "\r"), "return": (36, "\r"), "tab": (48, "\t"), "escape": (53, "\u{1b}"), "esc": (53, "\u{1b}"),
-            "backspace": (51, "\u{7f}"), "delete": (117, String(UnicodeScalar(NSDeleteFunctionKey)!)), "space": (49, " "),
-            "arrowup": (126, String(UnicodeScalar(NSUpArrowFunctionKey)!)), "arrowdown": (125, String(UnicodeScalar(NSDownArrowFunctionKey)!)),
-            "arrowleft": (123, String(UnicodeScalar(NSLeftArrowFunctionKey)!)), "arrowright": (124, String(UnicodeScalar(NSRightArrowFunctionKey)!)),
-            "pageup": (116, String(UnicodeScalar(NSPageUpFunctionKey)!)), "pagedown": (121, String(UnicodeScalar(NSPageDownFunctionKey)!)),
-            "home": (115, String(UnicodeScalar(NSHomeFunctionKey)!)), "end": (119, String(UnicodeScalar(NSEndFunctionKey)!)),
-        ]
-        guard let (code, characters) = keys[key.lowercased()] else { return false }
-        let window = view.window
-        view.window?.makeFirstResponder(view)
-        for type in [NSEvent.EventType.keyDown, .keyUp] {
-            guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [],
-                                               timestamp: ProcessInfo.processInfo.systemUptime,
-                                               windowNumber: window?.windowNumber ?? 0, context: nil,
-                                               characters: characters, charactersIgnoringModifiers: characters,
-                                               isARepeat: false, keyCode: code) else { continue }
-            if type == .keyDown { view.keyDown(with: event) } else { view.keyUp(with: event) }
+    /// The element named by ref, CSS selector or visible text, scrolled into
+    /// view, checked for what a click there would reach. Refs never resolve to
+    /// a lookalike: a ref whose element is gone is an error, not a guess. A
+    /// selector or text is waited for (up to `wait` seconds, 3 by default) as
+    /// pages render late.
+    private static func locate(_ args: [String: Any], in view: SillWebView) async throws -> Target {
+        let ref = args["ref"] as? String
+        let page = AgentPage.of(view)
+        // In a frame in another process.
+        if let ref, ref.hasPrefix("f"), let colon = ref.firstIndex(of: ":"), let index = Int(ref.dropFirst().prefix(upTo: colon)) {
+            let inner = String(ref[ref.index(after: colon)...])
+            guard let frame = page.frame(index: index) else {
+                throw AgentError("\(ref) is no longer on the page: its frame went away. Use the refs from the latest element list.")
+            }
+            let at = try await page.offset(of: frame, reveal: true)
+            guard let found = try await page.evaluate("window.__sillAgent.locate(\(json(inner)), null, null)", in: frame) as? [String: Any] else {
+                throw AgentError("\(ref) isn't in its frame any more.")
+            }
+            if found["gone"] != nil { throw AgentError("\(ref) is no longer on the page: it changed after the last element list. Use the refs from the latest answer.") }
+            let at2 = try await page.offset(of: frame, reveal: false)   // the frame may have moved as it scrolled
+            var t = target(from: found, ref: ref)
+            t.x += at2.x; t.y += at2.y
+            _ = at
+            t.frame = frame
+            t.inner = inner
+            return t
         }
-        return true
+        // Inside a closed shadow root, by its accessibility node.
+        if let ref, ref.hasPrefix("a"), let backend = Int(ref.dropFirst()) {
+            guard let box = await page.box(of: backend, reveal: true) else {
+                throw AgentError("\(ref) is no longer on the page. Use the refs from the latest element list.")
+            }
+            return Target(ref: ref, x: box.midX, y: box.midY, name: ref, backend: backend)
+        }
+        let byName = ref == nil
+        let deadline = Date().addingTimeInterval(byName ? (args["wait"] as? Double ?? 3) : 0)
+        while true {
+            if let dialog = view.openDialog { throw dialogError(dialog) }
+            let found = try await evaluate("return window.__sillAgent.locate(ref, selector, text, editable)", in: view, world: Web.world, arguments: [
+                "ref": ref ?? NSNull(), "selector": args["selector"] as? String ?? NSNull(), "text": args["text"] as? String ?? NSNull(),
+                "editable": args["editable"] as? Bool ?? false,
+            ]) as? [String: Any]
+            if let found, let options = found["ambiguous"] as? [[String: Any]] {
+                let list = options.map { "\($0["name"] as? String ?? "") (\($0["ref"] as? String ?? ""))" }.joined(separator: ", ")
+                throw AgentError("“\(args["text"] as? String ?? "")” matches \(options.count) things: \(list). Use a ref, or the full name.")
+            }
+            if let found, found["gone"] != nil {
+                throw AgentError("\(ref ?? "That element") is no longer on the page: it changed after the last element list. Use the refs from the latest answer.")
+            }
+            if let found, found["ref"] != nil, found["visible"] as? Bool != false || Date() >= deadline {
+                return target(from: found, ref: nil)
+            }
+            if Date() >= deadline {
+                throw AgentError(byName ? "Nothing on the page matches \((args["selector"] ?? args["text"]).map { "“\($0)”" } ?? "that") (waited \(Int(args["wait"] as? Double ?? 3)) s). Use page_snapshot for refs."
+                                        : "No element matched. Use page_snapshot for refs.")
+            }
+            try await Task.sleep(nanoseconds: 150_000_000)
+        }
+    }
+
+    private static func target(from found: [String: Any], ref: String?) -> Target {
+        let label = [(found["role"] as? String) ?? "", (found["name"] as? String) ?? ""].filter { !$0.isEmpty }.joined(separator: " ")
+        var t = Target(ref: ref ?? (found["ref"] as? String ?? ""), x: found["x"] as? Double ?? 0, y: found["y"] as? Double ?? 0, name: label)
+        t.disabled = found["disabled"] as? Bool ?? false
+        t.visible = found["visible"] as? Bool ?? true
+        t.coveredBy = found["coveredBy"] as? [String: Any]
+        t.partial = found["partial"] as? Bool ?? false
+        return t
+    }
+
+    private static func json(_ value: Any?) -> String {
+        guard let value, let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]),
+              let text = String(data: data, encoding: .utf8) else { return "null" }
+        return text
+    }
+
+    private static func dialogError(_ dialog: [String: String]) -> AgentError {
+        AgentError("The page has a \(dialog["kind"] ?? "dialog") open: “\(dialog["message"] ?? "")”. Answer it with page_dialog (accept or dismiss) first.")
+    }
+
+    /// Types `text` into the target as a keyboard would, then reads it back.
+    private static func type(_ text: String, into target: Target, clear: Bool, in view: SillWebView) async throws -> (ok: Bool, value: String?) {
+        let page = AgentPage.of(view)
+        func run(_ call: String) async throws -> Any? {
+            if let frame = target.frame { return try await page.evaluate("window.__sillAgent.\(call)", in: frame) }
+            return try await evaluate("return window.__sillAgent.\(call)", in: view, world: Web.world)
+        }
+        let ref = target.inner ?? target.ref
+        if target.backend != nil {
+            // Inside a closed shadow root: click to focus, then type.
+            try await click(at: target.x, target.y, in: view, count: 1)
+            if clear { try? await key("Meta+A", in: view) }
+            try await devtools(view, "Input.insertText", ["text": text])
+            return (true, nil)
+        }
+        let kind = try await run("valueKind(\(json(ref)))") as? String ?? ""
+        if ["date", "time", "datetime-local", "month", "week", "color", "range"].contains(kind) {
+            let ok = try await run("setValue(\(json(ref)), \(json(text)))") as? Bool ?? false
+            if !ok { throw AgentError("“\(target.name)” didn't take “\(text)”. \(kind == "date" ? "Dates go as YYYY-MM-DD." : "")") }
+            return (true, text)
+        }
+        // A frame in another process gets the keyboard by being clicked first.
+        if target.frame != nil { try await click(at: target.x, target.y, in: view, count: 1) }
+        let focused = try await run("focus(\(json(ref)), \(clear))") as? Bool ?? false
+        if focused {
+            if text.isEmpty { if clear { try? await key("Backspace", in: view) } }
+            else if text.count <= 400 {
+                // Key by key, as fingers do: keydown, the character, keyup. Pages
+                // that listen for keys (suggestions, shortcuts, games) see them.
+                try await keystrokes(text, in: view)
+            } else {
+                _ = try? await devtools(view, "Input.insertText", ["text": text])
+            }
+        }
+        var value = try await run("typed(\(json(ref)))") as? String
+        let expected = clear ? text : nil
+        let took = { (v: String?) -> Bool in
+            guard let v else { return false }
+            if let expected { return v == expected || v.replacingOccurrences(of: " ", with: "") == expected.replacingOccurrences(of: " ", with: "") }
+            return v.hasSuffix(text)
+        }
+        if !took(value) {
+            // The page didn't take keystrokes there: set it as a script would.
+            let set = try await run("type(\(json(ref)), \(json(text)), \(clear))") as? Bool ?? false
+            if !set && !focused { throw AgentError("“\(target.name)” isn't something to type into. Click it first if it opens a field, then type into that.") }
+            value = try await run("typed(\(json(ref)))") as? String
+        }
+        let isPassword = kind == "password"
+        return (took(value), isPassword ? nil : value)
+    }
+
+    /// An action's answer, with what it set off: a dialog, a new tab.
+    private static func outcome(_ answer: [String: Any], _ view: SillWebView, since: Date) -> [String: Any] {
+        var answer = answer
+        answer["url"] = view.url?.absoluteString ?? ""
+        if let dialog = view.openDialog { answer["dialog"] = dialog }
+        if let adopted, adopted.at >= since, let browser = browser(of: adopted.tab) { answer["opened"] = describe(adopted.tab, in: browser) }
+        return answer
+    }
+}
+
+/// The agent's clipboard, kept apart from yours: copying in a page hands
+/// what was copied to the agent, and your clipboard is put straight back.
+@MainActor
+enum AgentClipboard {
+    typealias Contents = [[NSPasteboard.PasteboardType: Data]]
+    private static var agents: Contents = []
+
+    /// What's on the clipboard now, to give back later.
+    static func take() -> Contents {
+        (NSPasteboard.general.pasteboardItems ?? []).map { item in
+            Dictionary(uniqueKeysWithValues: item.types.compactMap { type in item.data(forType: type).map { (type, $0) } })
+        }
+    }
+
+    /// What the page just copied: the agent's now.
+    static func keepAgents() { agents = take() }
+
+    /// For a paste: the agent's clipboard, briefly.
+    static func lend() { put(agents) }
+
+    static func restore(_ contents: Contents) { put(contents) }
+
+    private static func put(_ contents: Contents) {
+        let board = NSPasteboard.general
+        board.clearContents()
+        let items = contents.map { entries -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            for (type, data) in entries { item.setData(data, forType: type) }
+            return item
+        }
+        if !items.isEmpty { board.writeObjects(items) }
     }
 }
 
@@ -516,7 +1523,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent) return;
+      if (window.__sillAgent && window.__sillAgent.v === 11) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -527,70 +1534,311 @@ enum AgentScript {
         return ref;
       };
       const find = (ref) => { const w = refs.get(ref); const el = w && w.deref(); return el && el.isConnected ? el : null; };
-      const visible = (el) => {
+      const known = (ref) => refs.has(ref);
+      const style = (el) => el.ownerDocument.defaultView.getComputedStyle(el);
+      const seen = (el) => {
         const r = el.getBoundingClientRect();
         if (r.width < 1 || r.height < 1) return false;
-        const s = getComputedStyle(el);
-        return s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0';
+        const s = style(el);
+        return s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.01;
       };
-      const interactive = 'a[href],button,input,select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[role=option],[role=switch],[role=combobox],[role=textbox],[contenteditable=""],[contenteditable=true],[onclick],[tabindex]:not([tabindex="-1"])';
+      const interactive = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=switch],[role=combobox],[role=textbox],[role=searchbox],[role=slider],[role=spinbutton],[role=treeitem],[contenteditable=""],[contenteditable=true],[onclick],[draggable=true],[tabindex]:not([tabindex="-1"])';
+      const clean = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+      const byIds = (el, attr) => clean((el.getAttribute(attr) || '').split(/\s+/).map((id) => {
+        const root = el.getRootNode(); const t = root.getElementById ? root.getElementById(id) : null; return t ? t.innerText || t.textContent : '';
+      }).join(' '));
       const name = (el) => {
-        const label = el.getAttribute('aria-label') || (el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute('alt')
-          || el.getAttribute('title') || el.getAttribute('placeholder') || (el.innerText || el.textContent || '');
-        return String(label).replace(/\s+/g, ' ').trim().slice(0, 120);
+        const label = el.getAttribute('aria-label') || byIds(el, 'aria-labelledby')
+          || (el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute('alt') || el.getAttribute('title')
+          || el.getAttribute('placeholder') || (el.tagName === 'INPUT' && ['submit', 'button', 'reset'].includes(el.type) ? el.value : '')
+          || (el.tagName === 'IFRAME' ? '' : (el.innerText || el.textContent || ''));
+        let named = clean(label).slice(0, 120);
+        // Named only by its placeholder ("Any date"): the labelled group around it says which.
+        if (named && named === clean(el.getAttribute('placeholder')) && !el.getAttribute('aria-label')) {
+          const group = el.closest('[role=group][aria-label], fieldset');
+          const said = group && (group.getAttribute('aria-label') || (group.querySelector('legend') || {}).innerText);
+          if (said && !clean(said).includes(named)) named = clean(said).slice(0, 80) + ' — ' + named;
+        }
+        return named;
       };
       const role = (el) => el.getAttribute('role') || ({ A: 'link', BUTTON: 'button', SELECT: 'combobox', TEXTAREA: 'textbox', SUMMARY: 'button' }[el.tagName])
-        || (el.tagName === 'INPUT' ? (['checkbox', 'radio', 'submit', 'button', 'range', 'file'].includes(el.type) ? el.type : 'textbox') : (el.isContentEditable ? 'textbox' : 'generic'));
-      const describe = (el) => {
-        const r = el.getBoundingClientRect();
+        || (el.tagName === 'INPUT' ? (['checkbox', 'radio', 'submit', 'button', 'range', 'file', 'reset'].includes(el.type) ? (['submit', 'reset'].includes(el.type) ? 'button' : el.type)
+            : ['date', 'time', 'datetime-local', 'month', 'week', 'color'].includes(el.type) ? el.type : 'textbox')
+            : (el.isContentEditable ? 'textbox' : 'generic'));
+      // What a person sees of it: itself, or for a visually hidden checkbox or radio, its label.
+      const face = (el) => {
+        if (seen(el)) return el;
+        if (el.labels && el.labels.length && seen(el.labels[0]) && ['checkbox', 'radio', 'file'].includes(el.type)) return el.labels[0];
+        return null;
+      };
+      // Every element, through open shadow roots and same-origin frames, with
+      // the offset that turns its frame's coordinates into the page's.
+      const walk = (root, dx, dy, visit) => {
+        const stack = [root];
+        while (stack.length) {
+          const node = stack.pop();
+          const kids = node.children || [];
+          for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+          if (node.shadowRoot) stack.push(node.shadowRoot);
+          if (node.nodeType !== 1) continue;
+          if (visit(node, dx, dy) === false) return;
+          if (node.tagName === 'IFRAME' || node.tagName === 'FRAME') {
+            let doc = null; try { doc = node.contentDocument; } catch (_) {}
+            if (doc && doc.documentElement) {
+              const r = node.getBoundingClientRect(), s = style(node);
+              walk(doc.documentElement, dx + r.left + node.clientLeft + parseFloat(s.paddingLeft), dy + r.top + node.clientTop + parseFloat(s.paddingTop), visit);
+            }
+          }
+        }
+      };
+      const offsets = new WeakMap();   // element → its frame's offset, from the last walk
+      const describe = (el, f, dx, dy) => {
+        const r = f.getBoundingClientRect();
         const item = { ref: refOf(el), role: role(el), name: name(el), tag: el.tagName.toLowerCase(),
-          box: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) } };
+          box: { x: Math.round(r.left + dx), y: Math.round(r.top + dy), w: Math.round(r.width), h: Math.round(r.height) } };
         if (el.href) item.href = el.href;
         if (el.type) item.type = el.type;
-        if ('value' in el && el.type !== 'password' && el.tagName !== 'BUTTON') item.value = String(el.value).slice(0, 200);
+        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) && el.type !== 'password' && !['checkbox', 'radio', 'submit', 'button', 'reset'].includes(el.type)) item.value = String(el.value).slice(0, 200);
         if (el.type === 'password') item.value = el.value ? '(hidden)' : '';
         if ('checked' in el && (el.type === 'checkbox' || el.type === 'radio')) item.checked = el.checked;
-        if (el.disabled) item.disabled = true;
-        if (document.activeElement === el) item.focused = true;
+        const ac = el.getAttribute('aria-checked'); if (ac === 'true' || ac === 'false') item.checked = ac === 'true';
+        const ae = el.getAttribute('aria-expanded'); if (ae) item.expanded = ae === 'true';
+        const as = el.getAttribute('aria-selected'); if (as === 'true') item.selected = true;
+        if (el.disabled || el.getAttribute('aria-disabled') === 'true') item.disabled = true;
+        // A field the page says is wrong, with what it says about it.
+        if (el.getAttribute('aria-invalid') === 'true' || (el.matches && el.matches(':user-invalid'))) {
+          item.invalid = true;
+          const why = byIds(el, 'aria-describedby') || byIds(el, 'aria-errormessage') || el.validationMessage || '';
+          if (why) item.error = why.slice(0, 160);
+        }
+        if (el.getRootNode().activeElement === el || document.activeElement === el) item.focused = true;
+        if (el.tagName === 'IFRAME') item.frame = true;
         return item;
       };
-      const locate = (ref, selector, text) => {
-        let el = ref ? find(ref) : null;
-        if (!el && selector) el = document.querySelector(selector);
-        if (!el && text) {
-          const want = String(text).toLowerCase();
-          el = [...document.querySelectorAll(interactive)].find((e) => visible(e) && name(e).toLowerCase() === want)
-            || [...document.querySelectorAll(interactive)].find((e) => visible(e) && name(e).toLowerCase().includes(want));
+      const all = (fn) => { const out = []; walk(document.documentElement, 0, 0, (el, dx, dy) => { offsets.set(el, [dx, dy]); return fn(el, dx, dy, out); }); return out; };
+      const matches = (el) => { try { return el.matches(interactive); } catch (_) { return false; } };
+      const deepQuery = (selector) => { let hit = null; walk(document.documentElement, 0, 0, (el, dx, dy) => { offsets.set(el, [dx, dy]); try { if (el.matches(selector)) { hit = el; return false; } } catch (_) { return false; } }); return hit; };
+      let lastAmbiguous = null, lastScore = 0;
+      const typable = (el) => (el.tagName === 'INPUT' && !['checkbox', 'radio', 'submit', 'button', 'reset', 'file', 'image', 'hidden'].includes(el.type))
+        || el.tagName === 'TEXTAREA' || el.isContentEditable;
+      // `editable`: only what can be typed into, the focused one first (a popup's search box shares its trigger's name).
+      // Best match by name: exact; then the words as whole words ("Depart" is in "Depart: Thu",
+      // not in "Departure"); then anywhere. Ties go to the first on the page.
+      const escape = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const byText = (text, editable) => {
+        const want = clean(text).toLowerCase();
+        const whole = new RegExp('(^|[^\\p{L}\\p{N}])' + escape(want) + '($|[^\\p{L}\\p{N}])', 'u');
+        let score = 0, focused = null, tied = [];
+        walk(document.documentElement, 0, 0, (el, dx, dy) => {
+          offsets.set(el, [dx, dy]);
+          if (!matches(el) || !face(el)) return;
+          if (editable && !typable(el)) return;
+          const n = name(el).toLowerCase();
+          const hit = n === want ? 3 : whole.test(n) ? 2 : n.includes(want) ? 1 : 0;
+          if (!hit) return;
+          if (editable && (el.getRootNode().activeElement === el || document.activeElement === el) && !focused) focused = el;
+          if (hit > score) { score = hit; tied = [el]; } else if (hit === score) tied.push(el);
+        });
+        if (focused) return focused;
+        // One thing, or nested parts of one thing (a group and its field): that. Otherwise it's a guess: say so.
+        const apart = tied.filter((el) => !tied.some((other) => other !== el && contains(other, el)));
+        if (apart.length > 1) {
+          lastAmbiguous = apart.slice(0, 6).map((el) => ({ ref: refOf(el), role: role(el), name: name(el).slice(0, 70) }));
+          return null;
         }
-        return el;
+        lastScore = score;
+        if (tied.length) return apart[0] || tied[0];
+        if (editable) return null;
+        // Not a control: the smallest visible element whose own text it is (a card, a label, a drop zone).
+        let plain = null;
+        walk(document.documentElement, 0, 0, (el, dx, dy) => {
+          offsets.set(el, [dx, dy]);
+          if (!seen(el) || ['HTML', 'BODY', 'SCRIPT', 'STYLE'].includes(el.tagName)) return;
+          const own = clean([...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join(' ')).toLowerCase();
+          if (own && (own === want || own.includes(want))) plain = el;
+        });
+        return plain;
       };
+      // The element a click at (x, y) in its frame would reach, through shadow roots.
+      const hitAt = (doc, x, y) => {
+        let hit = doc.elementFromPoint(x, y);
+        while (hit && hit.shadowRoot) { const inner = hit.shadowRoot.elementFromPoint(x, y); if (!inner || inner === hit) break; hit = inner; }
+        return hit;
+      };
+      const contains = (a, b) => { for (let n = b; n; n = n.parentNode || n.host) if (n === a) return true; return false; };
+      // Only the element itself, what's inside it, or its label: a hit on something
+      // holding it (a scroll box under its overlay scrollbar) is a miss.
+      const reaches = (el, f, hit) => hit && (contains(el, hit) || contains(f, hit) || (el.labels && [...el.labels].some((l) => contains(l, hit))));
       const set = (el, value) => {
-        const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : el.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
         Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      };
+      // What frames the controls: headings, and what the page says out loud (alerts, live regions).
+      const context = (el) => {
+        if (/^H[1-3]$/.test(el.tagName) || el.getAttribute('role') === 'heading') return 'heading';
+        // Announcements only: role=alert or an assertive region. Polite regions mostly hold
+        // a control's current value ("Round trip"), which isn't news.
+        const r = el.getAttribute('role');
+        if (r === 'alert' || r === 'alertdialog' || el.getAttribute('aria-live') === 'assertive') return 'alert';
+        return null;
       };
       window.__sillAgent = {
-        snapshot(all) {
+        v: 11,
+        snapshot(all_) {
+          const items = all((el, dx, dy, out) => {
+            if (out.length >= 500) return;
+            const said = context(el);
+            if (said) {
+              const text = clean(el.innerText || el.textContent).slice(0, 200);
+              const r = el.getBoundingClientRect();
+              if (text && seen(el) && (all_ || (r.top + dy > -200 && r.top + dy < innerHeight + 1200)))
+                out.push({ context: said, text, level: said === 'heading' ? Number((el.tagName.match(/\d/) || [el.getAttribute('aria-level') || 2])[0]) : 0,
+                           box: { x: Math.round(r.left + dx), y: Math.round(r.top + dy), w: Math.round(r.width), h: Math.round(r.height) } });
+              if (said === 'alert') return;
+            }
+            if (!matches(el)) return;
+            const f = face(el); if (!f) return;
+            if (!all_) { const r = f.getBoundingClientRect(); const t = r.top + dy; if (t + r.height < -200 || t > innerHeight + 1200) return; }
+            out.push(describe(el, f, dx, dy));
+          });
+          return items;
+        },
+        // Custom elements whose insides are hidden (closed shadow roots): Sill asks Chromium's accessibility tree.
+        opaque() {
           const out = [];
-          for (const el of document.querySelectorAll(interactive)) {
-            if (!visible(el)) continue;
-            if (!all) { const r = el.getBoundingClientRect(); if (r.bottom < -200 || r.top > innerHeight + 1200) continue; }
-            out.push(describe(el));
-            if (out.length >= 400) break;
+          walk(document.documentElement, 0, 0, (el) => {
+            if (el.tagName.includes('-') && !el.shadowRoot && !el.children.length && seen(el) && out.length < 30) {
+              const token = 'o' + (next++); el.setAttribute('data-sill-pick', token); out.push(token);
+            }
+          });
+          return out;
+        },
+        // Finds it, scrolls it into view, waits until it stops moving (a smooth
+        // scroll, an animation), and checks a click there would reach it.
+        async locate(ref, selector, text, editable) {
+          const first = this.place(ref, selector, text, false, editable);
+          if (!first || first.gone || first.ambiguous) return first;
+          const el = find(first.ref); if (!el) return first;
+          const f = face(el) || el;
+          let last = f.getBoundingClientRect(), still = 0;
+          for (let i = 0; i < 20 && still < 2; i++) {
+            await new Promise((r) => requestAnimationFrame(() => r()));
+            const now = f.getBoundingClientRect();
+            still = Math.abs(now.left - last.left) < 0.5 && Math.abs(now.top - last.top) < 0.5 ? still + 1 : 0;
+            last = now;
+          }
+          let placed = this.place(first.ref, null, null, true);
+          // Under something (a sticky header, a banner) at the edge: try it in the middle.
+          if (placed && placed.coveredBy && !placed.gone) {
+            f.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+            if (find(first.ref)) placed = this.place(first.ref, null, null, true);
+          }
+          // Still covered: often a menu mid-animation (it takes clicks only once open). Up to ~0.6 s.
+          for (let i = 0; i < 36 && placed && placed.coveredBy && find(first.ref); i++) {
+            await new Promise((r) => requestAnimationFrame(() => r()));
+            placed = this.place(first.ref, null, null, true);
+          }
+          return placed;
+        },
+        // Where a click on it lands, for checking afterwards that it did.
+        arm(ref, button) {
+          const el = find(ref); if (!el) return false;
+          const doc = el.ownerDocument, win = doc.defaultView;
+          window.__sillLanding = null;
+          // A right button makes contextmenu, a middle one auxclick: no click.
+          win.addEventListener(button === 'right' ? 'contextmenu' : button === 'middle' ? 'auxclick' : 'click', (e) => {
+            window.__sillLanding = { hit: e.composedPath().includes(el) || (el.labels && [...el.labels].some((l) => e.composedPath().includes(l))),
+                                     on: name(e.composedPath()[0] instanceof Element ? e.composedPath()[0] : el).slice(0, 60) };
+          }, { capture: true, once: true });
+          return true;
+        },
+        landed() { return window.__sillLanding; },
+        place(ref, selector, text, settled, editable) {
+          let el = ref ? find(ref) : null;
+          if (ref && !el) return { gone: known(ref) || /^e\d+$/.test(ref) };
+          if (!el && selector) el = deepQuery(selector);
+          lastAmbiguous = null; lastScore = 0;
+          const byName = !el && !!text && !(selector && deepQuery(selector));
+          if (!el && text) el = byText(text, editable);
+          if (!el && lastAmbiguous) return { ambiguous: lastAmbiguous };
+          if (!el) return null;
+          const f = face(el) || el;
+          // Scrolled only if it isn't wholly in view, and only as far as needed:
+          // a needless scroll makes some lists (virtual ones) re-render under the click.
+          if (!settled) {
+            const r0 = f.getBoundingClientRect(), win = f.ownerDocument.defaultView;
+            const inside = r0.top >= 0 && r0.left >= 0 && r0.bottom <= win.innerHeight && r0.right <= win.innerWidth;
+            let clipped = false;
+            for (let p = f.parentElement; p && !clipped; p = p.parentElement) {
+              const st = style(p);
+              if (/(auto|scroll|hidden)/.test(st.overflow + st.overflowX + st.overflowY)) {
+                const pr = p.getBoundingClientRect();
+                clipped = r0.top < pr.top || r0.bottom > pr.bottom || r0.left < pr.left || r0.right > pr.right;
+              }
+            }
+            if (!inside || clipped) f.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+          }
+          const off = offsets.get(el) || [0, 0];
+          const r = f.getBoundingClientRect();
+          const out = { ref: refOf(el), name: name(el), role: role(el), x: r.left + r.width / 2 + off[0], y: r.top + r.height / 2 + off[1],
+                        w: r.width, h: r.height, disabled: !!(el.disabled || el.getAttribute('aria-disabled') === 'true'), visible: !!face(el),
+                        partial: byName && lastScore < 3 && lastScore > 0 };
+          // Covered? Try the middle, then a few points inside, before saying so.
+          const doc = f.ownerDocument;
+          const points = [[0.5, 0.5], [0.25, 0.5], [0.75, 0.5], [0.5, 0.25], [0.5, 0.75]];
+          let ok = null, cover = null;
+          for (const [px, py] of points) {
+            const x = r.left + r.width * px, y = r.top + r.height * py;
+            const hit = hitAt(doc, x, y);
+            if (reaches(el, f, hit)) { ok = [x + off[0], y + off[1]]; break; }
+            if (!cover) cover = hit;
+          }
+          if (ok) { out.x = ok[0]; out.y = ok[1]; }
+          else if (cover) {
+            // What's on top, said usefully: an open dialog (with its way out), a page-wide
+            // overlay, or the control in the way.
+            const up = (n) => n && (n.parentElement || (n.getRootNode() && n.getRootNode().host));
+            let dialog = null;
+            for (let n = cover; n && !dialog; n = up(n)) if (n.matches && n.matches('[role=dialog],[role=alertdialog],[aria-modal=true],dialog[open]')) dialog = n;
+            if (dialog) {
+              const exits = [...dialog.querySelectorAll('button,[role=button]')].filter((b) => /^(done|close|ok|apply|cancel|×|✕|x|dismiss|got it|accept( all)?)$/i.test(name(b)) && seen(b)).slice(0, 3);
+              out.coveredBy = { dialog: name(dialog).slice(0, 50) || 'a dialog', ref: refOf(dialog), exits: exits.map((b) => ({ ref: refOf(b), name: name(b) })) };
+            } else {
+              const cr = cover.getBoundingClientRect();
+              if (cr.width * cr.height > innerWidth * innerHeight * 0.6) out.coveredBy = { overlay: true, tag: cover.tagName.toLowerCase() };
+              else { let c = cover; while (c && !matches(c) && c.parentElement) c = c.parentElement;
+                     out.coveredBy = { ref: c && matches(c) ? refOf(c) : null, name: name(c || cover).slice(0, 60), tag: (c || cover).tagName.toLowerCase() }; }
+            }
           }
           return out;
         },
-        locate(ref, selector, text) {
-          const el = locate(ref, selector, text);
-          if (!el) return null;
-          el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-          const r = el.getBoundingClientRect();
-          return { ref: refOf(el), x: r.left + r.width / 2, y: r.top + r.height / 2 };
-        },
         click(ref) { const el = find(ref); if (!el) return false; el.focus && el.focus(); el.click(); return true; },
-        type(ref, text, clear) {
+        focus(ref, clear) {
           const el = find(ref); if (!el) return false;
+          el.focus();
+          if (el.isContentEditable) {
+            const range = document.createRange(); range.selectNodeContents(el);
+            if (!clear) range.collapse(false);
+            const selection = el.ownerDocument.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+          } else if (clear && el.select) {
+            el.select();
+          } else if (!clear && typeof el.value === 'string') {
+            try { el.setSelectionRange(el.value.length, el.value.length); } catch (e) {}
+          }
+          const active = el.getRootNode().activeElement || el.ownerDocument.activeElement;
+          return active === el || el.contains(active);
+        },
+        // Inputs that take a value, not keystrokes: dates, times, colours, ranges.
+        setValue(ref, value) {
+          const el = find(ref); if (!el || !('value' in el)) return false;
+          set(el, value); return String(el.value) === String(value);
+        },
+        valueKind(ref) { const el = find(ref); return el && el.tagName === 'INPUT' ? el.type : (el && el.isContentEditable ? 'editable' : el ? el.tagName.toLowerCase() : null); },
+        type(ref, text, clear) {
+          const el = find(ref); if (!el || !typable(el)) return false;
           el.focus();
           if (el.isContentEditable) {
             if (clear) { document.execCommand('selectAll'); document.execCommand('delete'); }
@@ -600,18 +1848,51 @@ enum AgentScript {
           set(el, (clear ? '' : el.value) + text);
           return true;
         },
+        typed(ref) { const el = find(ref); return el ? (el.isContentEditable ? el.innerText : String(el.value)) : null; },
         choose(ref, value) {
           const el = find(ref); if (!el || el.tagName !== 'SELECT') return false;
-          const option = [...el.options].find((o) => o.value === value || o.text.trim() === value);
+          const want = String(value).toLowerCase();
+          const option = [...el.options].find((o) => o.value === value || o.text.trim() === value)
+            || [...el.options].find((o) => o.text.trim().toLowerCase() === want || o.value.toLowerCase() === want);
           if (!option) return false;
-          el.value = option.value;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
+          set(el, option.value);
           return true;
         },
+        options(ref) { const el = find(ref); return el && el.options ? [...el.options].map((o) => o.text.trim()) : []; },
+        draggable(ref) { const el = find(ref); return !!(el && el.closest && el.closest('[draggable=true]')); },
+        // Quiet: no change to the page for `ms`. The watcher starts on first use, only in pages an agent drives.
+        quiet(ms) {
+          if (!window.__sillWatch) {
+            window.__sillLastChange = performance.now();
+            window.__sillWatch = new MutationObserver(() => { window.__sillLastChange = performance.now(); });
+            window.__sillWatch.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+            return false;
+          }
+          return performance.now() - window.__sillLastChange >= ms;
+        },
+        sending() {
+          const el = document.activeElement;
+          if (!el || el === document.body) return '';
+          const form = el.form || el.closest('form');
+          const button = form && form.querySelector('button[type=submit], input[type=submit], button:not([type])');
+          return [name(el), button ? name(button) || button.value || '' : ''].filter(Boolean).join(' → ');
+        },
+        walls() {
+          const big = (f) => { const r = f.getBoundingClientRect(); return r.width > 100 && r.height > 60; };
+          const frames = [...document.querySelectorAll('iframe')].filter(big).map((f) => f.src || '');
+          const title = (document.title || '').toLowerCase();
+          const text = (document.body && document.body.innerText || '').slice(0, 4000).toLowerCase();
+          const found = [];
+          if (frames.some((s) => /recaptcha/.test(s))) found.push('reCAPTCHA');
+          if (frames.some((s) => /hcaptcha/.test(s))) found.push('hCaptcha');
+          if (frames.some((s) => /challenges\.cloudflare\.com|turnstile/.test(s)) || /just a moment|checking your browser|attention required/.test(title)) found.push('Cloudflare check');
+          if (/verify (that )?you('| a)re (a )?human|are you a robot|i'?m not a robot|unusual traffic from your computer|press (&|and) hold/.test(text)) found.push('human check');
+          return found;
+        },
+        mark(ref, token) { const el = find(ref); if (!el) return false; el.setAttribute('data-sill-pick', token); return true; },
         present(selector, text) {
-          if (selector) return !!document.querySelector(selector);
-          if (text) return (document.body && document.body.innerText || '').toLowerCase().includes(String(text).toLowerCase());
+          if (selector) return !!deepQuery(selector);
+          if (text) return (document.body && document.body.innerText || '').toLowerCase().includes(String(text).toLowerCase()) || !!byText(text);
           return document.readyState === 'complete';
         },
       };

@@ -1,0 +1,3 @@
+<!doctype html><meta charset=utf-8><title>Validation</title><script src=kit.js></script>
+<form novalidate onsubmit="event.preventDefault();const ok=/^\S+@\S+\.\S+$/.test(em.value);er.textContent=ok?'':'Enter a valid email address';em.setAttribute('aria-invalid',!ok);if(ok)done('joined',em.value)">
+<label>Email <input id=em aria-describedby=er></label> <button>Join</button><p id=er role=alert style="color:#c00"></p></form>

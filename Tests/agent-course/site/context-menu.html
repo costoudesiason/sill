@@ -1,0 +1,3 @@
+<!doctype html><meta charset=utf-8><title>Right-click menu</title><script src=kit.js></script>
+<div id=f style="width:220px;padding:20px;background:#eef" oncontextmenu="event.preventDefault();m.hidden=false;m.style.left=event.clientX+'px';m.style.top=event.clientY+'px'">report.pdf</div>
+<div id=m role=menu hidden style="position:fixed;background:#fff;border:1px solid #999"><div role=menuitem tabindex=0 onclick="done('menu','rename');m.hidden=true">Rename</div><div role=menuitem tabindex=0 onclick="done('menu','delete')">Delete</div></div>

@@ -1,0 +1,3 @@
+<!doctype html><meta charset=utf-8><title>Touch carousel</title><script src=kit.js></script>
+<div id=c aria-label="Photos" style="width:300px;height:120px;background:#eef;touch-action:pan-y">Slide <span id=s>1</span></div>
+<script>let x0=null;c.addEventListener('touchstart',e=>x0=e.touches[0].clientX);c.addEventListener('touchend',e=>{const dx=e.changedTouches[0].clientX-x0;if(dx<-40){s.textContent=+s.textContent+1;done('slide',+s.textContent)}});</script>

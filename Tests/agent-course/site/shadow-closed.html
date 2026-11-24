@@ -1,0 +1,4 @@
+<!doctype html><meta charset=utf-8><title>Closed shadow DOM</title><script src=kit.js></script>
+<x-locked></x-locked>
+<script>customElements.define('x-locked', class extends HTMLElement { constructor(){ super(); const r=this.attachShadow({mode:'closed'});
+ r.innerHTML='<button>Unlock</button>'; r.querySelector('button').onclick=()=>done('unlocked');}});</script>

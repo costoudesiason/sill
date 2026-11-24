@@ -1,0 +1,6 @@
+<!doctype html><meta charset=utf-8><title>Two-step sign in</title><script src=kit.js></script>
+<main id=m></main><script>
+function step1(){m.innerHTML='<h3>Sign in</h3><input autocomplete=username aria-label="Email or phone" id=u> <button id=nx>Next</button>';nx.onclick=()=>{const u=document.getElementById('u').value;history.pushState({},'', '#password');setTimeout(()=>step2(u),400)}}
+function step2(u){m.innerHTML=`<h3>Welcome ${u}</h3><input type=password autocomplete=current-password aria-label="Enter your password" id=p> <button id=go>Sign in</button>`;
+ const send=()=>done('signedIn',{user:u,ok:document.getElementById('p').value==='Course-Test-Pass-7'});go.onclick=send;p.onkeydown=e=>{if(e.key==='Enter')send()}}
+step1();</script>

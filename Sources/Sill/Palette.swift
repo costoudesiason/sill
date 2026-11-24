@@ -666,6 +666,12 @@ final class Palette: NSObject {
             entries = SearchEngine.allCases.map { engine in
                 .item(GlassMenu.Item(title: engine.name, isOn: prefs.engine == engine) { prefs.engine = engine })
             }
+        case .agentAsk:
+            entries = AgentJudge.Mode.allCases.map { mode in
+                .item(GlassMenu.Item(title: AgentJudge.label(mode.rawValue), isOn: prefs.agentAsk == mode.rawValue) {
+                    prefs.agentAsk = mode.rawValue
+                })
+            }
         }
         // The rect is in the settings' own (top-left) space: under its right end.
         let corner = host.convert(NSPoint(x: rect.maxX - 14, y: rect.maxY - 4), to: nil)

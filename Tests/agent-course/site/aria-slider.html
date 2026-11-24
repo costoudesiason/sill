@@ -1,0 +1,4 @@
+<!doctype html><meta charset=utf-8><title>Custom slider</title><script src=kit.js></script>
+<div style="position:relative;width:300px;height:6px;background:#ccc;margin:40px"><div id=h role=slider tabindex=0 aria-label="Volume" aria-valuemin=0 aria-valuemax=10 aria-valuenow=3
+ style="position:absolute;top:-7px;left:90px;width:20px;height:20px;border-radius:10px;background:#36f"></div></div>
+<script>let v=3;h.onkeydown=e=>{if(e.key==='ArrowRight')v=Math.min(10,v+1);if(e.key==='ArrowLeft')v=Math.max(0,v-1);h.setAttribute('aria-valuenow',v);h.style.left=v*30+'px';done('volume',v)};</script>

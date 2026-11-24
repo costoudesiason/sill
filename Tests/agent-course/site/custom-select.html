@@ -1,0 +1,6 @@
+<!doctype html><meta charset=utf-8><title>Custom dropdown</title><script src=kit.js></script>
+<div role=combobox aria-expanded=false aria-controls=lb aria-label="Country" tabindex=0 id=cb style="border:1px solid #999;padding:6px;width:200px">Choose…</div>
+<ul role=listbox id=lb hidden style="border:1px solid #999;width:200px;margin:0;padding:0;list-style:none">
+${''}</ul><script>lb.innerHTML=['France','Germany','Greece','Spain'].map(c=>`<li role=option tabindex=-1 style="padding:6px">${c}</li>`).join('');
+cb.onclick=()=>{lb.hidden=!lb.hidden;cb.setAttribute('aria-expanded',!lb.hidden)};
+for(const o of lb.children) o.onclick=()=>{cb.textContent=o.textContent;lb.hidden=true;done('country',o.textContent)};</script>

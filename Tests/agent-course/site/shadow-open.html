@@ -1,0 +1,7 @@
+<!doctype html><meta charset=utf-8><title>Open shadow DOM</title><script src=kit.js></script>
+<x-card></x-card>
+<script>
+customElements.define('x-card', class extends HTMLElement { constructor(){ super(); const r=this.attachShadow({mode:'open'});
+ r.innerHTML='<p>Card</p><x-inner></x-inner><button id=save>Save card</button>'; r.getElementById('save').onclick=()=>done('saved', r.querySelector('x-inner').shadowRoot.querySelector('input').value);}});
+customElements.define('x-inner', class extends HTMLElement { constructor(){ super(); this.attachShadow({mode:'open'}).innerHTML='<label>Nickname <input aria-label="Nickname"></label>'; }});
+</script>

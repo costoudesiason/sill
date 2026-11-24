@@ -1,0 +1,3 @@
+<!doctype html><meta charset=utf-8><title>Infinite list</title><script src=kit.js></script>
+<ul id=l></ul><script>window.__h0=[innerWidth,innerHeight];let n=0;function more(){for(let i=0;i<20;i++){n++;const li=document.createElement('li');li.innerHTML=`<button style="margin:8px" onclick="done('item',${n})">Item ${n}</button>`;l.append(li)}}
+while(document.body.scrollHeight<innerHeight*1.5&&n<100)more();addEventListener('scroll',()=>{if(innerHeight+scrollY>document.body.scrollHeight-200&&n<100)more()});</script>

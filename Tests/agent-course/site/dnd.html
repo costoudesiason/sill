@@ -1,0 +1,4 @@
+<!doctype html><meta charset=utf-8><title>Drag and drop</title><script src=kit.js></script>
+<div id=a draggable=true style="width:120px;padding:10px;background:#cdf">Task A</div>
+<div id=zone style="margin-top:80px;width:240px;height:100px;border:2px dashed #999">Done column</div>
+<script>a.ondragstart=e=>e.dataTransfer.setData('text','A');zone.ondragover=e=>e.preventDefault();zone.ondrop=e=>{e.preventDefault();done('dropped',e.dataTransfer.getData('text'))};</script>

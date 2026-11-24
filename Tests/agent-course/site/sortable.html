@@ -1,0 +1,8 @@
+<!doctype html><meta charset=utf-8><title>Sortable list</title><script src=kit.js></script>
+<ul id=l style="list-style:none;padding:0;width:200px"></ul>
+<script>// Mouse-driven sorting with a 6px threshold, like SortableJS without HTML5 drag.
+const items=['Milk','Eggs','Bread'];function draw(){l.innerHTML=items.map(i=>`<li style="padding:12px;margin:4px;background:#eef;cursor:grab">${i}</li>`).join('');done('order',items.join(','))}draw();
+let drag=null,start=0;l.onmousedown=e=>{const li=e.target.closest('li');if(li){drag=li.textContent;start=e.clientY}};
+addEventListener('mousemove',e=>{if(drag&&Math.abs(e.clientY-start)>6)document.body.style.cursor='grabbing'});
+addEventListener('mouseup',e=>{if(!drag)return;const lis=[...l.children];let to=lis.findIndex(li=>{const r=li.getBoundingClientRect();return e.clientY<r.bottom});if(to<0)to=lis.length-1;
+ if(Math.abs(e.clientY-start)>6){items.splice(items.indexOf(drag),1);items.splice(to,0,drag);draw()}drag=null});</script>

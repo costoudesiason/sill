@@ -1,0 +1,4 @@
+<!doctype html><meta charset=utf-8><title>Chat shortcuts</title><script src=kit.js></script>
+<textarea id=t aria-label="Message"></textarea><p id=o></p>
+<script>t.onkeydown=e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){e.preventDefault();done('sent',t.value);t.value=''}};</script>
+<button onclick="d.showModal()">Open settings</button><dialog id=d onclose="done('closedWith', d.returnValue||'escape')"><p>Settings</p><input aria-label="Display name"></dialog>

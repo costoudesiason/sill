@@ -1,0 +1,3 @@
+<!doctype html><meta charset=utf-8><title>SPA</title><script src=kit.js></script>
+<nav><a href="#/orders" id=o>Orders</a></nav><main id=m>Home</main>
+<script>o.onclick=e=>{e.preventDefault();history.pushState({},'', '/orders');m.textContent='Loading…';setTimeout(()=>{m.innerHTML='<button onclick="done(\'opened\')">Order #1042</button>'},900)}</script>

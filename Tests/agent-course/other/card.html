@@ -1,0 +1,3 @@
+<!doctype html><meta charset=utf-8><title>card</title>
+<input id=n aria-label="Card number" inputmode=numeric> <input id=x aria-label="Expiry MM / YY"> <input id=c aria-label="CVC">
+<script>for (const id of ['n','x','c']) document.getElementById(id).addEventListener('input',()=>parent.postMessage({sillCourse:{card:{n:n.value,x:x.value,c:c.value}}},'*'));</script>

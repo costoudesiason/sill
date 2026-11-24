@@ -1,0 +1,9 @@
+<!doctype html><meta charset=utf-8><title>Autocomplete</title><script src=kit.js></script>
+<input id=q role=combobox aria-label="City" aria-autocomplete=list autocomplete=off><ul id=sug role=listbox></ul>
+<script>// Suggestions come from keyup, as many sites do, and a choice needs the arrow keys or a click.
+const cities=['Paris','Parma','Porto','Prague'];let sel=-1;
+q.addEventListener('keyup',e=>{if(['ArrowDown','ArrowUp','Enter'].includes(e.key))return;const v=q.value.toLowerCase();
+ sug.innerHTML=v?cities.filter(c=>c.toLowerCase().startsWith(v)).map(c=>`<li role=option>${c}</li>`).join(''):'';sel=-1;
+ for(const li of sug.children)li.onclick=()=>{q.value=li.textContent;sug.innerHTML='';done('city',q.value)}});
+q.addEventListener('keydown',e=>{const o=[...sug.children];if(e.key==='ArrowDown'){sel=Math.min(sel+1,o.length-1);o.forEach((li,i)=>li.setAttribute('aria-selected',i===sel))}
+ if(e.key==='Enter'&&o[sel]){q.value=o[sel].textContent;sug.innerHTML='';done('city',q.value)}});</script>

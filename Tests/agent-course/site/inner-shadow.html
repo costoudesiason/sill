@@ -1,0 +1,3 @@
+<!doctype html><meta charset=utf-8><title>inner</title><x-pay></x-pay>
+<script>customElements.define('x-pay',class extends HTMLElement{constructor(){super();const r=this.attachShadow({mode:'open'});r.innerHTML='<button>Confirm identity</button>';
+r.querySelector('button').onclick=()=>top.postMessage({sillCourse:{identity:true}},'*')}});</script>

@@ -13,6 +13,7 @@
 #include "include/cef_component_updater.h"
 #include "include/cef_devtools_message_observer.h"
 #include "include/cef_parser.h"
+#include "include/cef_parser.h"
 #include "include/cef_request_context.h"
 #include "include/wrapper/cef_library_loader.h"
 
@@ -113,7 +114,7 @@ static CefRefPtr<CefDictionaryValue> PageScriptsInfo() {
 
 class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayHandler, public CefLoadHandler,
                  public CefKeyboardHandler, public CefContextMenuHandler, public CefRequestHandler,
-                 public CefDownloadHandler, public CefDevToolsMessageObserver {
+                 public CefDownloadHandler, public CefDevToolsMessageObserver, public CefJSDialogHandler {
  public:
   explicit SEClient(SEWebView* view) : view_(view) {}
 
@@ -124,6 +125,37 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
+  CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override { return this; }
+
+  // A page's alert, confirm or prompt. While an agent drives the page, it's
+  // held for the agent to answer (it never lands on the page in front);
+  // otherwise Chromium shows it as always.
+  bool OnJSDialog(CefRefPtr<CefBrowser>, const CefString&, JSDialogType type, const CefString& message,
+                  const CefString& defaultText, CefRefPtr<CefJSDialogCallback> callback, bool&) override {
+    if (!view_.holdsDialogs) return false;
+    dialog_ = callback;
+    NSString* kind = type == JSDIALOGTYPE_ALERT ? @"alert" : type == JSDIALOGTYPE_CONFIRM ? @"confirm" : @"prompt";
+    [view_ dialogOpened:kind message:S(message) text:S(defaultText)];
+    return true;
+  }
+  bool OnBeforeUnloadDialog(CefRefPtr<CefBrowser>, const CefString& message, bool, CefRefPtr<CefJSDialogCallback> callback) override {
+    if (!view_.holdsDialogs) return false;
+    dialog_ = callback;
+    [view_ dialogOpened:@"beforeunload" message:S(message) text:@""];
+    return true;
+  }
+  void OnResetDialogState(CefRefPtr<CefBrowser>) override {
+    dialog_ = nullptr;
+    [view_ dialogOpened:nil message:nil text:nil];
+  }
+  bool answerDialog(bool accept, NSString* text) {
+    if (!dialog_) return false;
+    CefRefPtr<CefJSDialogCallback> callback = dialog_;
+    dialog_ = nullptr;
+    callback->Continue(accept, (text ?: @"").UTF8String);
+    [view_ dialogOpened:nil message:nil text:nil];
+    return true;
+  }
 
   // Life span
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
@@ -264,6 +296,9 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   bool OnKeyEvent(CefRefPtr<CefBrowser>, const CefKeyEvent& event, CefEventHandle os_event) override {
     NSEvent* ns = (__bridge NSEvent*)os_event;
     if (!ns || event.type != KEYEVENT_RAWKEYDOWN) return false;
+    // Keys an agent sent the page are the page's alone: never Sill's menus
+    // (an agent's ⌘-chord must not close your window or quit Sill).
+    if (NSDate.timeIntervalSinceReferenceDate < view_.agentKeysUntil) return false;
     id<SEWebViewDelegate> d = view_.pageDelegate;
     if ([d respondsToSelector:@selector(webView:unhandledKey:)]) return [d webView:view_ unhandledKey:ns];
     return (ns.modifierFlags & NSEventModifierFlagCommand) && [[NSApp mainMenu] performKeyEquivalent:ns];
@@ -327,6 +362,54 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
     NSDictionary* json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
     done(success, [json isKindOfClass:NSDictionary.class] ? json : nil);
   }
+  // Every DevTools message as it comes, for its events: agents follow frames
+  // in other processes (each its own session) and drags. Results go on to
+  // OnDevToolsMethodResult as before (false: not consumed here).
+  bool OnDevToolsMessage(CefRefPtr<CefBrowser>, const void* message, size_t size) override {
+    if (size < 10) return false;
+    // A reply in a child session (a frame in another process): Chromium
+    // doesn't route those to OnDevToolsMethodResult, so it's answered here.
+    // Cheap test first: a session's id sits at the end of its messages.
+    const char* bytes = (const char*)message;
+    size_t tail = MIN(size, (size_t)160);
+    bool inSession = memmem(bytes + size - tail, tail, "\"sessionId\"", 11) != nullptr;
+    bool isEvent = memmem(message, MIN(size, (size_t)64), "\"method\"", 8) != nullptr;
+    if (inSession && !isEvent) {
+      NSData* data = [NSData dataWithBytes:message length:size];
+      NSDictionary* json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+      NSNumber* number = [json isKindOfClass:NSDictionary.class] ? json[@"id"] : nil;
+      auto found = number ? pending_.find(number.intValue) : pending_.end();
+      if (found == pending_.end()) return false;
+      void (^done)(BOOL, NSDictionary*) = found->second;
+      pending_.erase(found);
+      NSDictionary* result = [json[@"result"] isKindOfClass:NSDictionary.class] ? json[@"result"] : nil;
+      NSDictionary* error = [json[@"error"] isKindOfClass:NSDictionary.class] ? json[@"error"] : nil;
+      done(result != nil, result ?: error);
+      return true;
+    }
+    void (^listener)(NSString*, NSDictionary*, NSString*) = view_.devtoolsEvent;
+    if (!listener || !isEvent) return false;
+    NSData* data = [NSData dataWithBytes:message length:size];
+    NSDictionary* json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![json isKindOfClass:NSDictionary.class] || json[@"id"] || ![json[@"method"] isKindOfClass:NSString.class]) return false;
+    NSDictionary* params = [json[@"params"] isKindOfClass:NSDictionary.class] ? json[@"params"] : @{};
+    NSString* session = [json[@"sessionId"] isKindOfClass:NSString.class] ? json[@"sessionId"] : nil;
+    dispatch_async(dispatch_get_main_queue(), ^{ listener(json[@"method"], params, session); });
+    return false;
+  }
+  // A method in a child session (a frame in another process): sent raw, its
+  // result comes back through OnDevToolsMethodResult by id, as any other.
+  void devtoolsInSession(CefRefPtr<CefBrowser> browser, NSString* method, NSDictionary* params, NSString* session,
+                         void (^done)(BOOL, NSDictionary*)) {
+    int id_ = ++nextID_;
+    pending_[id_] = [done copy];
+    NSDictionary* message = @{@"id": @(id_), @"method": method, @"params": params ?: @{}, @"sessionId": session};
+    NSData* data = [NSJSONSerialization dataWithJSONObject:message options:0 error:nil];
+    if (!data || !browser->GetHost()->SendDevToolsMessage(data.bytes, data.length)) {
+      pending_.erase(id_);
+      done(NO, nil);
+    }
+  }
   int devtools(CefRefPtr<CefBrowser> browser, const char* method, CefRefPtr<CefDictionaryValue> params,
                void (^done)(BOOL, NSDictionary*)) {
     int id_ = ++nextID_;
@@ -348,6 +431,7 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   std::map<int, void (^)(BOOL, NSDictionary*)> pending_;
   std::map<uint32_t, NSURL*> downloads_;
   CefRefPtr<CefRegistration> devtools_;
+  CefRefPtr<CefJSDialogCallback> dialog_;
   IMPLEMENT_REFCOUNTING(SEClient);
 };
 
@@ -488,6 +572,42 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   });
 }
 
+- (void)dialogOpened:(NSString*)kind message:(NSString*)message text:(NSString*)text {
+  _openDialog = kind ? @{@"kind": kind, @"message": message ?: @"", @"text": text ?: @""} : nil;
+}
+
+- (BOOL)answerDialog:(BOOL)accept text:(NSString*)text {
+  return client_ ? client_->answerDialog(accept, text) : NO;
+}
+
+- (void)devtools:(NSString*)method params:(NSDictionary*)params session:(NSString*)session
+      completion:(void (^)(NSDictionary*, NSString*))completion {
+  if (!session) { [self devtools:method params:params completion:completion]; return; }
+  if (!browser_) { completion(nil, @"The page isn't running."); return; }
+  client_->devtoolsInSession(browser_, method, params, session, ^(BOOL ok, NSDictionary* json) {
+    if (ok) { completion(json ?: @{}, nil); return; }
+    completion(nil, [json[@"message"] description] ?: [NSString stringWithFormat:@"%@ failed.", method]);
+  });
+}
+
+- (void)devtools:(NSString*)method params:(NSDictionary*)params
+      completion:(void (^)(NSDictionary*, NSString*))completion {
+  if (!browser_) { completion(nil, @"The page isn't running."); return; }
+  CefRefPtr<CefDictionaryValue> dictionary;
+  if (params.count) {
+    NSData* data = [NSJSONSerialization dataWithJSONObject:params options:0 error:nil];
+    NSString* json = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+    CefRefPtr<CefValue> value = json ? CefParseJSON(json.UTF8String, JSON_PARSER_RFC) : nullptr;
+    if (!value || value->GetType() != VTYPE_DICTIONARY) { completion(nil, @"Bad DevTools parameters."); return; }
+    dictionary = value->GetDictionary();
+  }
+  client_->devtools(browser_, method.UTF8String, dictionary, ^(BOOL ok, NSDictionary* json) {
+    if (ok) { completion(json ?: @{}, nil); return; }
+    NSString* why = [json[@"message"] description] ?: [NSString stringWithFormat:@"%@ failed.", method];
+    completion(nil, why);
+  });
+}
+
 - (void)takeSnapshotWithWidth:(CGFloat)width completion:(void (^)(NSImage*))completion {
   if (!browser_ || hidden_ || self.bounds.size.width <= 0) { completion(nil); return; }
   // The page exactly as it's drawn, copied from its surface. No clip and no
@@ -597,6 +717,8 @@ class WidevineDone : public CefComponentUpdateCallback {
   IMPLEMENT_REFCOUNTING(WidevineDone);
 };
 
+static void (^gRelaunched)(void) = nil;
+
 class SEApp : public CefApp, public CefBrowserProcessHandler {
  public:
   static void FetchWidevine() {
@@ -626,6 +748,11 @@ class SEApp : public CefApp, public CefBrowserProcessHandler {
     // from their folders, as Chromium's own command line loads them.
     line->AppendSwitchWithValue("disable-features", off + "MacWebContentsOcclusion,DisableLoadExtensionCommandLineSwitch");
     if (!gExtensions.empty()) line->AppendSwitchWithValue("load-extension", gExtensions);
+  }
+  bool OnAlreadyRunningAppRelaunch(CefRefPtr<CefCommandLine>, const CefString&) override {
+    void (^handler)(void) = gRelaunched;
+    if (handler) dispatch_async(dispatch_get_main_queue(), handler);
+    return true;   // handled: never Chromium's own window
   }
   void OnContextInitialized() override {
     CefRequestContextSettings settings;  // no cache path: kept in memory, gone when Sill quits
@@ -721,6 +848,10 @@ static std::string InstallExtensions(NSString* profile) {
   settings.background_color = CefColorSetARGB(255, 255, 255, 255);
   gApp = new SEApp();
   return CefInitialize(args, settings, gApp.get(), nullptr);
+}
+
++ (void)whenRelaunched:(void (^)(void))block {
+  gRelaunched = [block copy];
 }
 
 + (void)whenReady:(void (^)(void))block {
