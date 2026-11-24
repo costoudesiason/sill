@@ -282,6 +282,7 @@ enum AgentCommands {
             "selected": tab === browser.selected,
             "asleep": tab.webView == nil,
             "openedByAgent": tab.openedByAgent,
+            "loadError": tab.displayTitle == "Can’t open this page" ? (tab.failedWith ?? "Sill couldn’t open it.") as Any : NSNull(),
             "agentCurrent": agentTabs.first { $0.tab.map { Self.browser(of: $0) != nil } ?? false }?.tab === tab,
         ]
     }

@@ -83,6 +83,8 @@ final class Tab: NSObject {
     var warmedUnseen = false
     /// Opened by an agent through Sill's agent socket.
     var openedByAgent = false
+    /// Why the page couldn't be opened, while Sill's error page stands in for it (agents read it).
+    var failedWith: String?
 
     private var pending: URL?
     /// The page's back/forward list and place in it, kept while the tab
@@ -649,6 +651,7 @@ extension Tab: SEWebViewDelegate {
         case -201 ... -200, -202 ... -150: "The site’s certificate isn’t valid, so Sill didn’t open it."
         default: text
         }
+        failedWith = "\(detail) (\(url.host() ?? url.absoluteString))"
         view.loadHTML(ErrorPage.html(title: "Can’t open this page", detail: detail, url: url), for: url)
     }
 
@@ -797,11 +800,11 @@ enum ErrorPage {
         h1{font-size:22px;font-weight:600;margin:0 0 8px;letter-spacing:-.01em}
         p{margin:0 0 6px;color:color-mix(in srgb,CanvasText 60%,transparent);line-height:1.45}
         code{font:12px ui-monospace,Menlo;word-break:break-all}
-        button{margin-top:18px;font:13px -apple-system;padding:6px 16px;border-radius:999px;border:0;
+        button{margin-top:18px;font:13px -apple-system,system-ui,sans-serif;padding:6px 16px;border-radius:999px;border:0;
                background:color-mix(in srgb,CanvasText 9%,transparent);color:CanvasText}
         button:active{transform:scale(.97)}
         </style></head><body><main>
-        <h1>\(escape(title))</h1><p>\(escape(detail))</p><p><code>\(escape(Address.display(url)))</code></p>
+        <h1>\(escape(title))</h1><p>\(escape(detail))</p><p><code>\(escape((url.host() ?? "") + url.path(percentEncoded: false)))</code></p>
         <button onclick="location.reload()">Try Again</button>
         </main></body></html>
         """

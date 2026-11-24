@@ -225,7 +225,10 @@ func describeTab(_ result: Any) -> String {
     if tab["loading"] as? Bool == true { flags.append("loading") }
     if tab["asleep"] as? Bool == true { flags.append("asleep") }
     let suffix = flags.isEmpty ? "" : " (\(flags.joined(separator: ", ")))"
-    return "\(tab["id"] as? String ?? "") \(clip(tab["title"] as? String ?? "", 80))\(suffix)\n   \(tab["url"] as? String ?? "")"
+    var out = "\(tab["id"] as? String ?? "") \(clip(tab["title"] as? String ?? "", 80))\(suffix)\n   \(tab["url"] as? String ?? "")"
+    // The page didn't open: said plainly, so a model tries another address instead of reading an error page.
+    if let error = tab["loadError"] as? String { out += "\n   ⚠ Sill couldn’t open it: \(error). Try another address for the site (without www., or its official one)." }
+    return out
 }
 
 // MARK: - Tools
