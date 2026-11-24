@@ -136,6 +136,8 @@ final class AgentConnection {
         self.source = nil
         source.cancel()
         Darwin.close(fd)
+        // The agent's gone: the tabs it held are yours again.
+        AgentActivity.shared.releaseAll(owner: ObjectIdentifier(self))
         onEnd?()
     }
 
@@ -150,8 +152,10 @@ final class AgentConnection {
                 continue
             }
             let id = request["id"]
+            let owner = ObjectIdentifier(self)
             Task { @MainActor in
-                var answer = await AgentCommands.run(request)
+                // Tabs this command touches are held by this connection until it's released or closed.
+                var answer = await AgentCommands.$owner.withValue(owner) { await AgentCommands.run(request) }
                 answer["id"] = id ?? NSNull()
                 self.send(answer)
             }
@@ -185,6 +189,9 @@ struct AgentError: Error {
 
 @MainActor
 enum AgentCommands {
+    /// The connection a command came on (set around each command), so the tabs it touches are tied to it.
+    @TaskLocal static var owner: ObjectIdentifier?
+
     static func run(_ request: [String: Any]) async -> [String: Any] {
         guard Preferences.shared.agentControl else { return ["ok": false, "error": "Agent control is off in Sill's settings."] }
         let command = request["cmd"] as? String ?? ""
@@ -282,6 +289,7 @@ enum AgentCommands {
             "selected": tab === browser.selected,
             "asleep": tab.webView == nil,
             "openedByAgent": tab.openedByAgent,
+            "held": AgentActivity.shared.held.contains { $0 === tab },
             "loadError": tab.displayTitle == "Can’t open this page" ? (tab.failedWith ?? "Sill couldn’t open it.") as Any : NSNull(),
             "agentCurrent": agentTabs.first { $0.tab.map { Self.browser(of: $0) != nil } ?? false }?.tab === tab,
         ]
@@ -403,6 +411,19 @@ enum AgentCommands {
                 await settle(tab, view)
             }
             return describe(tab, in: browser)
+
+        case "tabs.release":
+            // The agent is done with it: the tab is yours again (dots and glow go).
+            if args["all"] as? Bool == true {
+                let tabs = AgentActivity.shared.held
+                tabs.forEach { AgentActivity.shared.release($0) }
+                agentTabs.removeAll()
+                return ["released": tabs.count]
+            }
+            let (tab, _) = try tab(args)
+            AgentActivity.shared.release(tab)
+            agentTabs.removeAll { $0.tab == nil || $0.tab === tab }
+            return ["released": 1]
 
         case "tabs.select":
             let (tab, browser) = try tab(args)

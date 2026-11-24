@@ -20,6 +20,7 @@ final class AgentActivity {
         var dots: TwinkleDots?
         weak var tabView: TabItemView?
         var glow: AgentEdgeGlow?
+        var owner: ObjectIdentifier?   // the agent's connection, when it came over the socket
     }
 
     private var work: [ObjectIdentifier: Work] = [:]
@@ -27,11 +28,10 @@ final class AgentActivity {
     private var busy = 0
     private var timer: Timer?
 
-    /// Still "working" this long after the agent's last touch, so quick
-    /// steps read as one stretch of work rather than flicker.
-    private let linger: TimeInterval = 1.5
-    /// After this long untouched, the page is put aside again like any other.
-    private let release: TimeInterval = 45
+    /// A tab is the agent's from its first touch until it's released: closed,
+    /// handed back (tabs_release), the agent gone (its connection closed), or
+    /// left untouched this long. All that time, its dots and glow show.
+    private let release: TimeInterval = 300
 
     func began() { busy += 1; keepAwake() }
     func ended() { busy = max(0, busy - 1); keepAwake() }
@@ -67,6 +67,7 @@ final class AgentActivity {
         item.view = view
         item.browser = browser
         item.last = Date()
+        if let owner = AgentCommands.owner { item.owner = owner }
         work[key] = item
         latest = key
         show(key)
@@ -90,14 +91,27 @@ final class AgentActivity {
         work[key] = nil
     }
 
-    private func working(_ key: ObjectIdentifier, _ item: Work) -> Bool {
-        Date().timeIntervalSince(item.last) < linger || (busy > 0 && key == latest)
+    /// The agent has handed the tab back (or the tab's being closed): its dots and glow fade, and its page is put aside.
+    func release(_ tab: Tab) {
+        let key = ObjectIdentifier(tab)
+        guard let item = work[key] else { return }
+        if let view = item.view { AgentCommands.letGo(view, of: tab) }
+        hide(key)
+        work[key] = nil
     }
+
+    /// Everything one agent held, when it goes away (its connection closed).
+    func releaseAll(owner: ObjectIdentifier) {
+        for (_, item) in work where item.owner == owner { if let tab = item.tab { release(tab) } }
+    }
+
+    /// Tabs the agent holds now.
+    var held: [Tab] { work.values.compactMap(\.tab) }
 
     private func tick() {
         for (key, item) in work {
             guard let tab = item.tab else { hide(key, now: true); work[key] = nil; continue }
-            if working(key, item) { show(key) } else { hide(key) }
+            show(key)   // held: dots, and the glow when you look at it
             let current = busy > 0 && key == latest
             if Date().timeIntervalSince(item.last) > release && !current {
                 if let view = item.view { AgentCommands.letGo(view, of: tab) }

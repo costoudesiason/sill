@@ -161,3 +161,12 @@ test("Sign out claude.ai in Sill turns earlier sign-ins away", async () => {
   const fresh = await signInAndToken();
   assert.equal((await use(fresh.access_token)).status, 200, "a new sign-in works");
 });
+
+test("Sill's icon: as favicon, and in the MCP server info", async () => {
+  const icon = await fetch(`${BASE}/favicon.ico`);
+  assert.equal(icon.status, 200);
+  assert.equal(icon.headers.get("content-type"), "image/png");
+  assert.ok((await icon.arrayBuffer()).byteLength > 1000);
+  const meta = await (await fetch(`${BASE}/`)).text();
+  assert.match(meta, /rel="icon"/);
+});
