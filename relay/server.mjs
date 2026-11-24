@@ -20,6 +20,7 @@
 
 import http from "node:http";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import { WebSocketServer } from "ws";
 
 const SECRET = process.env.RELAY_SECRET ?? "";
@@ -37,6 +38,11 @@ const CODE_TTL = 5 * 60;
 const APPROVAL_TIMEOUT = 120_000;
 const CALL_TIMEOUT = 180_000;
 const SCOPE = "sill";
+
+// Sill's own icon: what claude.ai shows beside the connector (as favicon, and declared over MCP).
+const ICONS = Object.fromEntries(["icon.png", "favicon.png", "apple-touch-icon.png"].map((name) => {
+  try { return [name, fs.readFileSync(new URL(`./public/${name}`, import.meta.url))]; } catch { return [name, null]; }
+}));
 
 // MARK: - Signed values (no database)
 
@@ -202,6 +208,7 @@ const escapeHTML = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", 
 function page(title, body, script = "") {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHTML(title)}</title>
+<link rel="icon" type="image/png" href="/favicon.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
 :root{color-scheme:light dark}
 body{font:15px/1.45 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:Canvas;color:CanvasText}
@@ -386,14 +393,19 @@ function unauthorized(req, res, description) {
   });
 }
 
-const fallbackInitialize = (params) => ({
+function serverIdentity(base) {
+  return { name: "sill", title: "Sill", websiteUrl: base,
+           icons: [{ src: `${base}/icon.png`, mimeType: "image/png", sizes: ["512x512"] }] };
+}
+
+const fallbackInitialize = (params, base) => ({
   protocolVersion: params?.protocolVersion ?? "2025-06-18",
   capabilities: { tools: { listChanged: false } },
-  serverInfo: { name: "sill", version: "relay" },
+  serverInfo: { ...serverIdentity(base), version: "relay" },
   instructions: "Drives the Sill web browser on the user's Mac. Sill isn't connected right now: ask the user to open Sill.",
 });
 
-async function rpc(message) {
+async function rpc(message, base) {
   const { id, method } = message;
   const isRequest = id !== undefined && id !== null;
   if (!isRequest) return null; // notifications: nothing to forward or answer
@@ -402,11 +414,14 @@ async function rpc(message) {
     const answer = await toBridge({ t: "rpc", msg: message }, CALL_TIMEOUT);
     const response = answer.msg ?? { jsonrpc: "2.0", id, error: { code: -32603, message: "Sill gave no answer." } };
     if (method === "tools/list" && response.result) toolsCache = response.result;
+    if (method === "initialize" && response.result?.serverInfo) {
+      response.result.serverInfo = { ...response.result.serverInfo, ...serverIdentity(base) };
+    }
     if (method === "tools/call") console.log(`call: ${message.params?.name ?? "?"}${response.result?.isError ? " (error)" : ""}`);
     return { ...response, id };
   } catch (error) {
     const text = error.message;
-    if (method === "initialize") return { jsonrpc: "2.0", id, result: fallbackInitialize(message.params) };
+    if (method === "initialize") return { jsonrpc: "2.0", id, result: fallbackInitialize(message.params, base) };
     if (method === "ping") return { jsonrpc: "2.0", id, result: {} };
     if (method === "tools/list" && toolsCache) return { jsonrpc: "2.0", id, result: toolsCache };
     if (method === "tools/call") return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], isError: true } };
@@ -431,10 +446,11 @@ async function mcp(req, res) {
     return send(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
   }
   if (Array.isArray(payload)) {
-    const answers = (await Promise.all(payload.map(rpc))).filter(Boolean);
+    const base = baseURL(req);
+    const answers = (await Promise.all(payload.map((m) => rpc(m, base)))).filter(Boolean);
     return answers.length ? send(res, 200, answers) : (res.writeHead(202, CORS), res.end());
   }
-  const answer = await rpc(payload);
+  const answer = await rpc(payload, baseURL(req));
   if (!answer) { res.writeHead(202, CORS); return res.end(); }
   send(res, 200, answer);
 }
@@ -458,6 +474,12 @@ const server = http.createServer(async (req, res) => {
     if (path === "/token" && req.method === "POST") return await token(req, res);
     if (path === "/mcp") return await mcp(req, res);
     if (path === "/health") return send(res, 200, { ok: true, mac: Boolean(bridge) });
+    const icon = { "/favicon.ico": "favicon.png", "/favicon.png": "favicon.png", "/icon.png": "icon.png",
+                   "/apple-touch-icon.png": "apple-touch-icon.png" }[path];
+    if (icon && ICONS[icon]) {
+      res.writeHead(200, { ...CORS, "Content-Type": "image/png", "Cache-Control": "public, max-age=86400" });
+      return res.end(ICONS[icon]);
+    }
     if (path === "/") {
       const state = bridge ? `Your Mac is connected (since ${bridgeSince.toISOString().slice(11, 16)} UTC).` : "Your Mac isn't connected.";
       return send(res, 200, page("Sill relay", `<h1>Sill relay</h1><p>${state}</p><p>Add <span class="host">${escapeHTML(base)}/mcp</span> as a custom connector in claude.ai.</p>`));
