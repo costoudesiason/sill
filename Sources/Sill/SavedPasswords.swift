@@ -64,6 +64,16 @@ enum SavedPasswords {
 
     enum Saved { case added, updated, same, failed }
 
+    /// Sites you've said never to save passwords for (their registrable domain).
+    static func never(for host: String) -> Bool {
+        (UserDefaults.standard.stringArray(forKey: "neverSavePasswords") ?? []).contains(Domains.registrable(host))
+    }
+    static func setNever(for host: String) {
+        var sites = Set(UserDefaults.standard.stringArray(forKey: "neverSavePasswords") ?? [])
+        sites.insert(Domains.registrable(host))
+        UserDefaults.standard.set(sites.sorted(), forKey: "neverSavePasswords")
+    }
+
     /// Keeps `password` for `user` at `host`: a new item, or the existing one updated.
     @discardableResult
     static func save(_ password: String, user: String, host: String) async -> Saved {

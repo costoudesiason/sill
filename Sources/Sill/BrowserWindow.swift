@@ -411,6 +411,31 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         popover.show(relativeTo: bar.extensionsRect, of: bar, preferredEdge: .maxY)
     }
 
+    /// A sign-in in one of this window's tabs went through: Sill's glass
+    /// menu, from the profile button (where Passwords lives), while that tab
+    /// is in front. A click elsewhere is Not Now.
+    func offerToSavePassword(for tab: Tab, host: String, user: String, password: String, update: Bool) {
+        guard tab === selected, let window, window.isVisible else { return }
+        let site = Domains.bare(host)
+        var entries: [GlassMenu.Entry] = [
+            .item(.init(title: update ? "Update Password" : "Save Password", symbol: "key.fill", keys: ["↩"],
+                        subtitle: user.isEmpty ? nil : user) { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard await SavedPasswords.save(password, user: user, host: host) != .failed else { return }
+                    NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+                    self?.toast(update ? "Password updated" : "Password saved")
+                }
+            }),
+            .item(.init(title: "Not Now", symbol: "xmark") {}),
+        ]
+        if !update {
+            entries += [.separator, .item(.init(title: "Never for This Website", symbol: "nosign") { SavedPasswords.setNever(for: host) })]
+        }
+        let anchor = bar.convert(bar.profileRect, to: nil)
+        GlassMenu(title: update ? "Update your password for \(site)?" : "Save your password for \(site)?", entries: entries, searchable: false)
+            .show(in: window, at: NSPoint(x: anchor.maxX, y: anchor.minY - 6), alignRight: true, from: bar.profile)
+    }
+
     /// The profile button: who's browsing, and the browser's everyday places.
     @objc func showProfile(_ sender: Any?) {
         guard let window, GlassMenu.shouldOpen(from: bar.profile) else { return }
