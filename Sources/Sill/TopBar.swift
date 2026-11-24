@@ -1,7 +1,7 @@
 import AppKit
 
 /// The bar across the top of the window, in place of an NSToolbar so its
-/// margins are ours: back and forward in one glass capsule hard by the left
+/// margins are ours: back, forward and reload in one glass capsule hard by the left
 /// edge, the tabs filling the middle, and Downloads, New Tab and Show All Tabs
 /// in one glass capsule on the right. It sits on the window's glass, which
 /// shows the desktop behind the window; the page starts below it.
@@ -17,12 +17,14 @@ final class TopBar: NSView {
     private let actionsGlass = NSGlassEffectView()
     private let actionsContent = FlippedView()
     private let divider = NSView()
+    private let divider2 = NSView()
     /// Your profile: its own round glass at the right end of the bar.
     private let profileGlass = NSGlassEffectView()
     let profile = ProfileButton()
 
     let back = BarButton(symbol: "chevron.backward", label: "Back")
     let forward = BarButton(symbol: "chevron.forward", label: "Forward")
+    let reload = BarButton(symbol: "arrow.clockwise", label: "Reload Page")
     let extensions = BarButton(symbol: "puzzlepiece.extension", label: "Extensions")
     let downloads = BarButton(symbol: "arrow.down.circle", label: "Downloads")
     let add = BarButton(symbol: "plus", label: "New Tab")
@@ -30,6 +32,14 @@ final class TopBar: NSView {
 
     override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { true }
+
+    /// While the page loads the reload button stops it, as Safari's does.
+    var isLoading = false {
+        didSet {
+            guard isLoading != oldValue else { return }
+            reload.setSymbol(isLoading ? "xmark" : "arrow.clockwise", label: isLoading ? "Stop Loading" : "Reload Page")
+        }
+    }
 
     /// A popup's bar (a "Sign in with…" window): back, forward and its one
     /// page's title, none of the browser's own buttons or the profile.
@@ -60,7 +70,10 @@ final class TopBar: NSView {
         navContent.addSubview(back)
         navContent.addSubview(divider)
         navContent.addSubview(forward)
+        navContent.addSubview(divider2)
+        navContent.addSubview(reload)
         divider.wantsLayer = true
+        divider2.wantsLayer = true
         actionsContent.addSubview(extensions)
         actionsContent.addSubview(downloads)
         actionsContent.addSubview(add)
@@ -80,6 +93,7 @@ final class TopBar: NSView {
 
         back.toolTip = "Back"
         forward.toolTip = "Forward"
+        reload.toolTip = "Reload Page"
         extensions.toolTip = "Extensions"
         downloads.toolTip = "Downloads"
         add.toolTip = "New Tab"
@@ -100,13 +114,16 @@ final class TopBar: NSView {
         let y = (h - c) / 2
         let w = Self.buttonWidth
 
-        navGlass.frame = NSRect(x: Self.margin + leadingInset, y: y, width: w * 2, height: c)
+        navGlass.frame = NSRect(x: Self.margin + leadingInset, y: y, width: w * 3, height: c)
         navContent.frame = navGlass.bounds
         back.frame = NSRect(x: 0, y: 0, width: w, height: c)
         forward.frame = NSRect(x: w, y: 0, width: w, height: c)
+        reload.frame = NSRect(x: w * 2, y: 0, width: w, height: c)
         divider.frame = NSRect(x: w - 0.5, y: 9, width: 1, height: c - 18)
+        divider2.frame = NSRect(x: w * 2 - 0.5, y: 9, width: 1, height: c - 18)
         effectiveAppearance.performAsCurrentDrawingAppearance {
             divider.layer?.backgroundColor = NSColor.separatorColor.cgColor
+            divider2.layer?.backgroundColor = NSColor.separatorColor.cgColor
         }
 
         profileGlass.frame = NSRect(x: bounds.width - Self.margin - c, y: y, width: c, height: c)
@@ -153,8 +170,7 @@ final class BarButton: NSButton {
         super.init(frame: .zero)
         isBordered = false
         bezelStyle = .accessoryBarAction
-        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
-            .withSymbolConfiguration(.init(pointSize: 16, weight: .regular))
+        setSymbol(symbol, label: label)
         imagePosition = .imageOnly
         contentTintColor = .labelColor
         setAccessibilityLabel(label)
@@ -166,6 +182,13 @@ final class BarButton: NSButton {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    func setSymbol(_ symbol: String, label: String) {
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+            .withSymbolConfiguration(.init(pointSize: 16, weight: .regular))
+        toolTip = toolTip == nil ? nil : label
+        setAccessibilityLabel(label)
+    }
 
     /// Under the pointer: a soft pill, inset evenly from the capsule's edge
     /// so its ends follow the capsule's curve.

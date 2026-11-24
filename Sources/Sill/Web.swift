@@ -218,6 +218,12 @@ final class SillWebView: SEWebView {
         self.init(frame: frame, private: !configuration.websiteDataStore.isPersistent)
     }
 
+    /// Behind the page: its own background colour (white until it says),
+    /// seen only where a resized page hasn't yet drawn its new size.
+    var backdrop: CGColor = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1) {
+        didSet { if backdrop != oldValue { layer?.backgroundColor = backdrop } }
+    }
+
     // Chromium answers for its own processes.
     var processIsResponsive: Bool { true }
     func endProcess() { reload() }
@@ -447,6 +453,13 @@ final class MessageRouter: NSObject, WKScriptMessageHandler {
         Self.route(body, to: tab)
     }
 
+    /// "rgb(r, g, b)" or an opaque "rgba(r, g, b, a)", as getComputedStyle gives it.
+    static func color(css: String) -> CGColor? {
+        let parts = css.split { !"0123456789.".contains($0) }.compactMap { Double($0) }
+        guard parts.count >= 3, parts.count == 3 || parts[3] >= 0.99 else { return nil }
+        return CGColor(srgbRed: parts[0] / 255, green: parts[1] / 255, blue: parts[2] / 255, alpha: 1)
+    }
+
     static func route(_ body: [String: Any], to tab: Tab) {
         guard let type = body["t"] as? String else { return }
         switch type {
@@ -463,6 +476,8 @@ final class MessageRouter: NSObject, WKScriptMessageHandler {
             tab.mediaChanged((body["playing"] as? Bool) ?? false)
         case "audible":
             tab.audible = (body["on"] as? Bool) ?? false
+        case "backdrop":
+            if let text = body["c"] as? String, let color = Self.color(css: text) { tab.webView?.backdrop = color }
         case "pipReturn":
             // Back from the floating window: to its tab, its window, to the front.
             tab.host?.bringBack(tab)
@@ -565,6 +580,21 @@ enum PageScripts {
       let audible = false;
       ['playing', 'pause', 'ended', 'emptied', 'volumechange'].forEach(e => document.addEventListener(e, media, true));
       media();
+
+      // The page's own background colour, behind the page in Sill: where
+      // a page being resized hasn't drawn its new width yet, that colour
+      // shows rather than the window. Read once loaded, never per frame.
+      if (window.top === window) {
+        let backdrop = '';
+        const shade = () => {
+          const read = el => el ? getComputedStyle(el).backgroundColor : '';
+          const solid = c => c && !/^rgba\(.*,\s*0\)$/.test(c) && c !== 'transparent';
+          const c = [read(document.documentElement), read(document.body)].find(solid) || 'rgb(255, 255, 255)';
+          if (c !== backdrop) { backdrop = c; post({ t: 'backdrop', c }); }
+        };
+        if (document.readyState === 'complete') shade(); else addEventListener('load', shade, { once: true });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => setTimeout(shade, 100));
+      }
 
       // The float's return button: the video leaves picture in picture still
       // playing (its close button pauses it). Sill brings this tab back.

@@ -31,18 +31,112 @@ final class PageSplitView: NSSplitView, NSSplitViewDelegate {
     let leftPane = PaneView()
     let rightPane = PaneView()
     var onResize: ((CGFloat) -> Void)?
+    /// The divider let go: where it ended up is worth keeping.
+    var onSettle: (() -> Void)?
     private var applying = false
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         isVertical = true
-        dividerStyle = .thin
         delegate = self
         addArrangedSubview(leftPane)
         addArrangedSubview(rightPane)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// A gap between the two pages rather than a hairline: room to take
+    /// hold of, with the pages' own edges either side. Pages set their own
+    /// pointer as it moves over them, so the place to grab is the gap itself
+    /// (and a little either side), where only the split decides the pointer.
+    override var dividerThickness: CGFloat { 10 }
+    override func drawDivider(in rect: NSRect) {}
+
+    func splitView(_ splitView: NSSplitView, effectiveRect proposedEffectiveRect: NSRect, forDrawnRect drawnRect: NSRect,
+                   ofDividerAt dividerIndex: Int) -> NSRect {
+        drawnRect.insetBy(dx: -3, dy: 0)
+    }
+
+    /// A short pill in the middle of the gap: faint, clear once the pointer
+    /// is near, clearest while dragging.
+    private let handle = CALayer()
+    private var near = false { didSet { if near != oldValue { showHandle() } } }
+    private var dragging = false { didSet { if dragging != oldValue { showHandle() } } }
+    private var zone: NSTrackingArea?
+
+    private var dividerRect: NSRect {
+        guard subviews.count > 1 else { return .zero }
+        return NSRect(x: subviews[0].frame.maxX, y: 0, width: dividerThickness, height: bounds.height)
+    }
+
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        placeHandle()
+    }
+
+    private func placeHandle() {
+        let rect = dividerRect
+        let tall: CGFloat = near || dragging ? 56 : 36
+        let wide: CGFloat = near || dragging ? 5 : 4
+        Motion.still {
+            handle.bounds = CGRect(x: 0, y: 0, width: wide, height: tall)
+            handle.position = CGPoint(x: rect.midX, y: rect.midY)
+        }
+        handle.cornerRadius = wide / 2
+        updateTrackingAreas()
+    }
+
+    private func showHandle() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let alpha: CGFloat = dragging ? 0.5 : near ? 0.34 : 0.16
+            handle.backgroundColor = NSColor.labelColor.withAlphaComponent(alpha).cgColor
+        }
+        let tall: CGFloat = near || dragging ? 56 : 36
+        let wide: CGFloat = near || dragging ? 5 : 4
+        Motion.animate(Motion.quick) {
+            handle.bounds = CGRect(x: 0, y: 0, width: wide, height: tall)
+            handle.cornerRadius = wide / 2
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let zone { removeTrackingArea(zone) }
+        // The handle wakes a little before the pointer can grab: within 14
+        // points of the gap's middle either side.
+        let rect = dividerRect.insetBy(dx: -9, dy: 0)
+        let area = NSTrackingArea(rect: rect, options: [.mouseEnteredAndExited, .activeInKeyWindow], owner: self)
+        addTrackingArea(area)
+        zone = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { near = true }
+    override func mouseExited(with event: NSEvent) { near = false }
+
+    override func mouseDown(with event: NSEvent) {
+        dragging = true
+        super.mouseDown(with: event)   // tracks the drag until the button comes up
+        dragging = false
+        onSettle?()
+        near = dividerRect.insetBy(dx: -9, dy: 0).contains(convert(event.window?.mouseLocationOutsideOfEventStream ?? .zero, from: nil))
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        showHandle()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        if handle.superlayer == nil {
+            wantsLayer = true
+            handle.zPosition = 10
+            layer?.addSublayer(handle)
+        }
+        showHandle()
+        placeHandle()
+    }
 
     func apply(fraction: CGFloat) {
         applying = true
@@ -55,7 +149,7 @@ final class PageSplitView: NSSplitView, NSSplitViewDelegate {
     /// tick under the fingers, as the system's own snapping does.
     private var snapped = false
     func splitView(_ splitView: NSSplitView, constrainSplitPosition proposed: CGFloat, ofSubviewAt index: Int) -> CGFloat {
-        let middle = round(bounds.width / 2)
+        let middle = round((bounds.width - dividerThickness) / 2)
         let near = abs(proposed - middle) < 8
         if near != snapped {
             snapped = near
@@ -73,6 +167,7 @@ final class PageSplitView: NSSplitView, NSSplitViewDelegate {
     }
 
     func splitViewDidResizeSubviews(_ notification: Notification) {
+        placeHandle()
         guard !applying, bounds.width > 0 else { return }
         onResize?(leftPane.frame.width / bounds.width)
     }

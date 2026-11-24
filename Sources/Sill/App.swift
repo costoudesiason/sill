@@ -13,6 +13,14 @@ struct SessionWindow: Codable {
     var tabs: [SessionTab]
     var selected: Int
     var frame: String?
+    /// Two tabs side by side, by place in `tabs`, and the left one's share.
+    var split: SessionSplit?
+}
+
+struct SessionSplit: Codable {
+    var left: Int
+    var right: Int
+    var fraction: Double
 }
 
 @MainActor
@@ -86,7 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for state in windows where !state.tabs.isEmpty {
             let browser = makeBrowser(isPrivate: false)
             if let frame = state.frame { browser.window?.setFrame(from: frame) }
-            browser.restore(state.tabs, selectedIndex: state.selected)
+            browser.restore(state.tabs, selectedIndex: state.selected, split: state.split)
             browser.showWindow(nil)
         }
         return !browsers.isEmpty
@@ -201,12 +209,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func sessionState() -> [SessionWindow] {
         browsers.filter { !$0.isPrivate && !$0.isPopup }.map { browser in
+            var kept: [Tab] = []
             let tabs = browser.tabs.compactMap { tab -> SessionTab? in
                 guard let url = tab.webView?.url ?? tab.url, url.scheme?.hasPrefix("http") == true else { return nil }
+                kept.append(tab)
                 return SessionTab(url: url.absoluteString, title: tab.title, shown: tab.seenAt?.timeIntervalSince1970)
             }
             let selected = browser.tabs.firstIndex { $0 === browser.selected } ?? 0
-            return SessionWindow(tabs: tabs, selected: selected, frame: browser.window?.frameDescriptor)
+            var split: SessionSplit?
+            if let pair = browser.split, let left = pair.left, let right = pair.right,
+               let l = kept.firstIndex(where: { $0 === left }), let r = kept.firstIndex(where: { $0 === right }) {
+                split = SessionSplit(left: l, right: r, fraction: Double(pair.fraction))
+            }
+            return SessionWindow(tabs: tabs, selected: selected, frame: browser.window?.frameDescriptor, split: split)
         }
     }
 

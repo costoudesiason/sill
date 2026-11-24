@@ -373,6 +373,9 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   _isPrivate = isPrivate;
   zoom_ = 1;
   self.wantsLayer = YES;
+  // What a page being resized shows where it hasn't drawn yet: white, as
+  // Chromium's own background, until the page gives its colour.
+  self.layer.backgroundColor = CGColorGetConstantColor(kCGColorWhite);
   client_ = new SEClient(self);
   [gViews addObject:self];
   if (create) [self makeBrowser];
@@ -749,7 +752,11 @@ static std::string InstallExtensions(NSString* profile) {
     NSString* domain = c[@"domain"];
     CefString(&cookie.name) = [c[@"name"] UTF8String];
     CefString(&cookie.value) = [c[@"value"] UTF8String];
-    CefString(&cookie.domain) = domain.UTF8String;
+    // A host-only cookie ("accounts.google.com", no dot) has no domain:
+    // given one, Chromium makes it a domain cookie (".accounts.google.com"),
+    // and the site's own host-only copy then sits beside it. Two LSIDs and
+    // Google refuses to sign in ("a problem with your cookie settings").
+    if ([domain hasPrefix:@"."]) CefString(&cookie.domain) = domain.UTF8String;
     CefString(&cookie.path) = [c[@"path"] UTF8String];
     cookie.secure = [c[@"secure"] boolValue];
     cookie.httponly = [c[@"httponly"] boolValue];

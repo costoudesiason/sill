@@ -145,6 +145,7 @@ final class TabStripView: NSView {
     /// Selection is a state: it changes at once, as in any Mac list.
     func select(_ tab: Tab?) {
         for item in items { item.isFront = item.tab === tab }
+        if pair != nil { placeBackdrop(animated: false) }
     }
 
     /// Whether the tiles are the window's tabs, in order: then a new
@@ -176,15 +177,22 @@ final class TabStripView: NSView {
         }
         let frames = frames ?? targetFrames()
         guard let fa = frames[ObjectIdentifier(a)], let fb = frames[ObjectIdentifier(b)] else { return }
-        // Tucked inside the two tabs, so the glass of the one in front is
-        // the larger and covers its end; wider than them, it showed past it.
-        let target = fa.union(fb).insetBy(dx: 2, dy: 2)
-        let wasHidden = pairBackdrop.isHidden
-        pairBackdrop.isHidden = false
+        // The two tabs' span, with the one in front cut out of it: its glass
+        // is see-through, and the capsule's edge under it showed as an outline.
+        // A tad thinner than the tabs all round, so the front tab's glass
+        // stands a little proud of it, concentric.
+        let target = fa.union(fb).insetBy(dx: 3, dy: 3)
+        let front = a.isFront ? fa : b.isFront ? fb : nil
+        let hole = front.map { $0.offsetBy(dx: -target.minX, dy: -target.minY) }
+        let backdrop = pairBackdrop as! PairBackdrop
+        let wasHidden = backdrop.isHidden
+        backdrop.isHidden = false
         if animated && animates && !wasHidden {
-            Motion.animate(Self.reflow) { pairBackdrop.animator().frame = target }
+            Motion.animate(Self.reflow) { backdrop.animator().frame = target }
+            backdrop.shape(size: target.size, hole: hole, duration: Motion.reduced ? 0 : Self.reflow)
         } else {
-            Motion.still { pairBackdrop.frame = target }
+            Motion.still { backdrop.frame = target }
+            backdrop.shape(size: target.size, hole: hole, duration: 0)
         }
     }
 
@@ -364,9 +372,18 @@ final class TabItemView: NSView {
 
     /// Only for a tab that comes to the front: a glass view takes some
     /// 0.4 ms to make, and a restored window of tabs made one for each.
+    private static let frontTint = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(white: 1, alpha: 0.12) : NSColor(white: 1, alpha: 0.7)
+    }
+
     private func makeGlass() -> NSGlassEffectView {
         let made = NSGlassEffectView()
         made.effectIsInteractive = true
+        // Clear glass bends what's just outside it into its rim: in a split,
+        // the pair's capsule showed through as a ring. Tinted, the tab in
+        // front reads as one solid pill, as Safari's does.
+        made.tintColor = Self.frontTint
         addSubview(made, positioned: .below, relativeTo: nil)
         glass = made
         return made
@@ -538,7 +555,9 @@ final class TabItemView: NSView {
             if isFront {
                 color = .clear   // the glass is the selection
             } else if isPaired {
-                color = dark ? NSColor(white: 1, alpha: 0.09) : NSColor(white: 1, alpha: 0.6)
+                // The pair's capsule is its highlight: a fill of its own, the
+                // tab's full height, showed the thinner capsule's edge through it.
+                color = .clear
             } else if isHovered {
                 color = NSColor.labelColor.withAlphaComponent(0.06)
             } else {
@@ -753,28 +772,66 @@ final class TabCloseButton: NSButton {
     }
 }
 
-/// The capsule behind a split's two tabs.
+/// The capsule behind a split's two tabs, open where the tab in front is.
 private final class PairBackdrop: NSView {
-    override var wantsUpdateLayer: Bool { true }
+    private let fill = CAShapeLayer()
+    private var size: NSSize = .zero
+    private var hole: NSRect?
+
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         isHidden = true
-        layer?.cornerCurve = .continuous
+        fill.actions = ["path": NSNull(), "bounds": NSNull(), "position": NSNull()]
+        layer?.addSublayer(fill)
     }
     required init?(coder: NSCoder) { fatalError() }
-    override func updateLayer() {
-        guard let layer else { return }
-        layer.cornerRadius = bounds.height / 2
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer.backgroundColor = NSColor.labelColor.withAlphaComponent(0.07).cgColor
-            layer.borderColor = NSColor.labelColor.withAlphaComponent(0.1).cgColor
+
+    /// The tab in front's place, in the backdrop's own coordinates; nil when neither is.
+    func shape(size: NSSize, hole: NSRect?, duration: TimeInterval) {
+        let old = fill.path
+        // Only a change of size travels, with the tabs; the cut moving to
+        // the other tab is a change of selection, and that's instant.
+        let resized = size != self.size
+        self.size = size
+        self.hole = hole
+        let path = Self.path(size: size, hole: hole)
+        fill.frame = NSRect(origin: .zero, size: size)
+        fill.path = path
+        if duration > 0, resized, let old {
+            let move = CABasicAnimation(keyPath: "path")
+            move.fromValue = fill.presentation()?.path ?? old
+            move.toValue = path
+            move.duration = duration
+            move.timingFunction = Motion.curve
+            fill.add(move, forKey: "path")
+        } else {
+            fill.removeAnimation(forKey: "path")
         }
-        layer.borderWidth = 1
     }
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        needsDisplay = true
+
+    private static func path(size: NSSize, hole: NSRect?) -> CGPath {
+        let r = size.height / 2
+        let outer = CGPath(roundedRect: CGRect(origin: .zero, size: size), cornerWidth: min(r, size.width / 2), cornerHeight: r, transform: nil)
+        guard let hole, hole.width > 0 else { return outer }
+        let hr = hole.height / 2
+        let cut = CGPath(roundedRect: hole, cornerWidth: min(hr, hole.width / 2), cornerHeight: hr, transform: nil)
+        // The tab is taller than the capsule: only what's inside it comes out.
+        return outer.subtracting(cut)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        recolor()
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        recolor()
+    }
+    private func recolor() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            fill.fillColor = NSColor.labelColor.withAlphaComponent(0.07).cgColor
+        }
     }
 }

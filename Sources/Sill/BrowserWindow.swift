@@ -55,6 +55,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             self?.split?.fraction = fraction
             self?.placePrompts()
         }
+        view.onSettle = { [weak self] in self?.changed() }
         return view
     }()
     private lazy var chooser: SplitChooser = {
@@ -210,6 +211,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         bar.back.action = #selector(goBack(_:))
         bar.forward.target = self
         bar.forward.action = #selector(goForward(_:))
+        bar.reload.target = self
+        bar.reload.action = #selector(reloadOrStop(_:))
         bar.isPopup = isPopup
         bar.extensions.target = self
         bar.extensions.action = #selector(showExtensions(_:))
@@ -486,6 +489,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private func updateNavigation() {
         bar.back.isEnabled = selected?.canGoBack ?? false
         bar.forward.isEnabled = selected?.canGoForward ?? false
+        bar.isLoading = selected?.isLoading ?? false
     }
 
     // MARK: - Layout
@@ -572,7 +576,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     // MARK: - Tabs
 
-    func restore(_ states: [SessionTab], selectedIndex: Int) {
+    func restore(_ states: [SessionTab], selectedIndex: Int, split saved: SessionSplit? = nil) {
         // The icons on disk, if they are nearly read: the row comes up with them.
         Favicons.shared.settle(within: 0.03)
         tabs = states.compactMap { state in
@@ -584,6 +588,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
         warmAfterRestore = tabs.filter { $0.seenAt != nil }.sorted { $0.seenAt! > $1.seenAt! }
         strip.sync(animated: false)
+        // The split you left, as you left it: in place before the tab in front
+        // is chosen, so that tab comes up already beside its partner.
+        if let saved, saved.left != saved.right, tabs.count == states.count,
+           tabs.indices.contains(saved.left), tabs.indices.contains(saved.right) {
+            let pair = SplitPair(left: tabs[saved.left], right: tabs[saved.right])
+            pair.fraction = CGFloat(min(max(saved.fraction, 0.15), 0.85))
+            split = pair
+            strip.showPair(pair.left, pair.right)
+        }
         if tabs.indices.contains(selectedIndex) { select(tabs[selectedIndex]) } else if let first = tabs.first { select(first) }
     }
 
@@ -1099,6 +1112,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     @objc func reloadPage(_ sender: Any?) { selected?.reload() }
     @objc func reloadFromOrigin(_ sender: Any?) { selected?.reload(fromOrigin: true) }
     @objc func stopLoading(_ sender: Any?) { selected?.stop() }
+    /// The bar's button: stops a page that's loading, reloads one that isn't.
+    @objc func reloadOrStop(_ sender: Any?) {
+        guard let tab = selected else { return }
+        if tab.isLoading { tab.stop() } else { tab.reload() }
+    }
 
     @objc func nextTab(_ sender: Any?) { step(1) }
     @objc func previousTab(_ sender: Any?) { step(-1) }
@@ -1170,7 +1188,10 @@ extension BrowserWindowController: TabHost {
         switch what {
         case .icon, .loading:
             strip.refresh(tab)
-            if what == .loading, tab === selected { loadingLine.show(progress: tab.progress, loading: tab.isLoading) }
+            if what == .loading, tab === selected {
+                loadingLine.show(progress: tab.progress, loading: tab.isLoading)
+                bar.isLoading = tab.isLoading
+            }
         case .progress:
             if tab === selected { loadingLine.show(progress: tab.progress, loading: tab.isLoading) }
         case .title:
@@ -1580,9 +1601,15 @@ extension BrowserWindowController {
         }
     }
 
-    /// Split Left / Split Right: the tab goes to that side, and the other side
-    /// asks which open tab to show there.
+    /// Split Left / Split Right on a tab: it goes to that side. Another tab
+    /// than the one you're on pairs with yours at once, yours on the other
+    /// side; the tab you're on itself waits there while you pick its partner.
     func split(_ tab: Tab, onLeft: Bool) {
+        if let current = selected, current !== tab, tabs.contains(where: { $0 === current }) {
+            split = onLeft ? SplitPair(left: nil, right: current) : SplitPair(left: current, right: nil)
+            fillSplit(with: tab)
+            return
+        }
         split = onLeft ? SplitPair(left: tab, right: nil) : SplitPair(left: nil, right: tab)
         if selected === tab {
             placePages(keep: nil)
@@ -1596,22 +1623,29 @@ extension BrowserWindowController {
         guard let split else { return }
         if split.left == nil { split.left = tab } else { split.right = tab }
         // The pair sits together in the row, left then right, in one capsule.
+        // The tab just picked moves beside the one already there, which stays put.
         if let left = split.left, let right = split.right,
            let l = tabs.firstIndex(where: { $0 === left }), let r = tabs.firstIndex(where: { $0 === right }), r != l + 1 {
-            tabs.remove(at: r)
-            let at = (tabs.firstIndex(where: { $0 === left }) ?? l) + 1
-            tabs.insert(right, at: at)
+            if tab === left {
+                tabs.remove(at: l)
+                tabs.insert(left, at: tabs.firstIndex(where: { $0 === right }) ?? r)
+            } else {
+                tabs.remove(at: r)
+                tabs.insert(right, at: (tabs.firstIndex(where: { $0 === left }) ?? l) + 1)
+            }
             strip.sync(animated: true)
             changed()
         }
         select(tab)
         placePages(keep: nil)
         strip.showPair(split.left, split.right)
+        changed()
     }
 
     @objc func unsplit() {
         guard split != nil else { return }
         split = nil
+        changed()
         strip.showPair(nil, nil)
         placePages(keep: nil)
         if let webView = selected?.webView { window?.makeFirstResponder(webView) }
