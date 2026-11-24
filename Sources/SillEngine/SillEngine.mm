@@ -10,6 +10,7 @@
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
 #include "include/cef_cookie.h"
+#include "include/cef_component_updater.h"
 #include "include/cef_devtools_message_observer.h"
 #include "include/cef_parser.h"
 #include "include/cef_request_context.h"
@@ -586,8 +587,22 @@ bool SEClient::OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int, co
 
 // MARK: - The engine
 
+class WidevineDone : public CefComponentUpdateCallback {
+ public:
+  void OnComplete(const CefString& id, cef_component_update_error_t error) override {
+    NSString* line = [NSString stringWithFormat:@"widevine update: error=%d\n", (int)error];
+    [line writeToFile:[NSTemporaryDirectory() stringByAppendingPathComponent:@"sill-widevine.txt"] atomically:YES
+             encoding:NSUTF8StringEncoding error:nil];
+  }
+  IMPLEMENT_REFCOUNTING(WidevineDone);
+};
+
 class SEApp : public CefApp, public CefBrowserProcessHandler {
  public:
+  static void FetchWidevine() {
+    CefRefPtr<CefComponentUpdater> updater = CefComponentUpdater::GetComponentUpdater();
+    if (updater) updater->Update("oimompecagnajdejgnnjijobebaeigek", CEF_COMPONENT_UPDATE_PRIORITY_FOREGROUND, new WidevineDone());
+  }
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
   void OnBeforeCommandLineProcessing(const CefString& type, CefRefPtr<CefCommandLine> line) override {
     if (!type.empty()) return;
@@ -629,6 +644,9 @@ class SEApp : public CefApp, public CefBrowserProcessHandler {
     }
     ready_ = true;
     for (void (^b)(void) in waiting_) b();
+    // Google's Widevine module (DRM), asked for by name a moment after the
+    // start: background traffic stays off, and this is the one thing fetched.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ SEApp::FetchWidevine(); });
     [waiting_ removeAllObjects];
   }
   bool ready_ = false;

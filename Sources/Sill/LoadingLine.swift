@@ -122,6 +122,13 @@ final class LoadingLine: NSView {
     func show(progress: Double, loading: Bool, jump: Bool = false) {
         let fraction = CGFloat(max(0.06, min(progress, 1)))
         if loading {
+            // Loading again within a moment of finishing (a redirect, the
+            // blank page before the real one, a site navigating on load):
+            // the same line carries on, rather than ending and starting over.
+            if let ending, !jump {
+                ending.cancel()
+                self.ending = nil
+            }
             if !shown || jump {
                 // A new load (or another tab's): from its start, or where that tab is.
                 shown = true
@@ -149,39 +156,56 @@ final class LoadingLine: NSView {
                 if !isHidden || alphaValue > 0 { putAway() }
                 return
             }
-            shown = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                guard let self, !self.shown, !self.isHidden || self.alphaValue > 0 else { return }
-                self.putAway()
+            ending?.cancel()
+            ending = nil
+            if jump || Motion.reduced { return finish(jump: true) }
+            // A quarter of a second's grace before it ends, for a load that follows at once.
+            let work = DispatchWorkItem { [weak self] in
+                self?.ending = nil
+                self?.finish(jump: false)
             }
-            reached = 0
-            if jump || Motion.reduced {
-                bar.removeAllAnimations()
-                isHidden = true
-                alphaValue = 0
-                setWidth(0)
-                return
-            }
-            // To the end, and fading as it gets there.
-            let from = drawnWidth
-            stopGrowing()
-            setWidth(bounds.width)
-            let sweep = CABasicAnimation(keyPath: "bounds.size.width")
-            sweep.fromValue = from
-            sweep.toValue = bounds.width
-            sweep.duration = 0.3
-            sweep.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.25, 1)
-            bar.add(sweep, forKey: "grow")
-            NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.35
-                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0, 0.6, 1)
-                // Fades a little longer than it sweeps, so the end is seen.
-                self.animator().alphaValue = 0
-            }, completionHandler: { [weak self] in
-                guard let self, !self.shown else { return }
-                self.isHidden = true
-                self.setWidth(0)
-            })
+            ending = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
+    }
+
+    /// The load is over: to the end and away.
+    private var ending: DispatchWorkItem?
+
+    private func finish(jump: Bool) {
+        guard shown else { return }
+        shown = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self, !self.shown, !self.isHidden || self.alphaValue > 0 else { return }
+            self.putAway()
+        }
+        reached = 0
+        if jump || Motion.reduced {
+            bar.removeAllAnimations()
+            isHidden = true
+            alphaValue = 0
+            setWidth(0)
+            return
+        }
+        // To the end, and fading as it gets there.
+        let from = drawnWidth
+        stopGrowing()
+        setWidth(bounds.width)
+        let sweep = CABasicAnimation(keyPath: "bounds.size.width")
+        sweep.fromValue = from
+        sweep.toValue = bounds.width
+        sweep.duration = 0.3
+        sweep.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.25, 1)
+        bar.add(sweep, forKey: "grow")
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.35
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0, 0.6, 1)
+            // Fades a little longer than it sweeps, so the end is seen.
+            self.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self, !self.shown else { return }
+            self.isHidden = true
+            self.setWidth(0)
+        })
     }
 }
