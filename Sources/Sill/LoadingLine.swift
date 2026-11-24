@@ -104,6 +104,14 @@ final class LoadingLine: NSView {
         bar.add(tiring, forKey: "creep")
     }
 
+    private func putAway() {
+        bar.removeAllAnimations()
+        layer?.removeAllAnimations()
+        alphaValue = 0
+        isHidden = true
+        setWidth(0)
+    }
+
     private func stopGrowing() {
         bar.removeAnimation(forKey: "grow")
         bar.removeAnimation(forKey: "creep")
@@ -130,8 +138,18 @@ final class LoadingLine: NSView {
             reached = max(reached, fraction)
             glide(to: reached)
         } else {
-            guard shown else { return }
+            // Nothing loading: whatever the line thinks, it ends hidden. (It
+            // was once left across the window, at full width, after a page
+            // had long finished: a fade some later change cut off.)
+            guard shown else {
+                if !isHidden || alphaValue > 0 { putAway() }
+                return
+            }
             shown = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                guard let self, !self.shown, !self.isHidden || self.alphaValue > 0 else { return }
+                self.putAway()
+            }
             reached = 0
             if jump || Motion.reduced {
                 bar.removeAllAnimations()

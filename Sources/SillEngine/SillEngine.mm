@@ -385,7 +385,7 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   info.SetAsChild((__bridge void*)self, CefRect(0, 0, (int)self.bounds.size.width, (int)self.bounds.size.height));
   info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
   CefBrowserSettings settings;
-  settings.background_color = CefColorSetARGB(255, 30, 30, 30);
+  settings.background_color = CefColorSetARGB(255, 255, 255, 255);
   CefRefPtr<CefRequestContext> context = _isPrivate ? gPrivateContext : nullptr;
   CefBrowserHost::CreateBrowser(info, client_, "", settings, PageScriptsInfo(), context);
 }
@@ -669,7 +669,7 @@ static std::string InstallExtensions(NSString* profile) {
   CefString(&settings.cache_path) = [profile stringByAppendingPathComponent:@"Default"].UTF8String;
   settings.persist_session_cookies = true;
   CefString(&settings.locale) = "en-GB";
-  settings.background_color = CefColorSetARGB(255, 30, 30, 30);
+  settings.background_color = CefColorSetARGB(255, 255, 255, 255);
   gApp = new SEApp();
   return CefInitialize(args, settings, gApp.get(), nullptr);
 }
