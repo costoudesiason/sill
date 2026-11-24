@@ -18,6 +18,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)startWithProfile:(NSString *)profile;
 /// Runs `block` once Chromium is ready for pages (at once if it is).
 + (void)whenReady:(void (^)(void))block;
+/// Sill was launched again while running (or a launch overlapped one quitting):
+/// Sill opens its own window. Left to Chromium, it opened a stock Chromium one.
++ (void)whenRelaunched:(void (^)(void))block;
 /// AppKit's run loop, with Chromium's work in it, until `quit`.
 + (void)run;
 /// Closes every page, then ends the run loop.
@@ -114,6 +117,27 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)evaluateJavaScript:(NSString *)script completion:(void (^_Nullable)(id _Nullable result, NSError *_Nullable error))completion;
 /// A picture of what the page shows, `width` points wide.
 - (void)takeSnapshotWithWidth:(CGFloat)width completion:(void (^)(NSImage *_Nullable image))completion;
+/// Any Chrome DevTools Protocol method on this page (Input.dispatchMouseEvent,
+/// Page.captureScreenshot…): what agents drive pages with, in the background.
+/// `result` is the method's answer; `error` says why there's none.
+- (void)devtools:(NSString *)method params:(nullable NSDictionary *)params
+      completion:(void (^)(NSDictionary *_Nullable result, NSString *_Nullable error))completion;
+/// The same, in a child session: a frame in another process, attached with
+/// Target.setAutoAttach (flatten). Nil session: the page itself.
+- (void)devtools:(NSString *)method params:(nullable NSDictionary *)params session:(nullable NSString *)session
+      completion:(void (^)(NSDictionary *_Nullable result, NSString *_Nullable error))completion;
+/// Until this moment (reference-date seconds), unhandled keys are an agent's:
+/// they stay in the page and never reach Sill's menus.
+@property(nonatomic) NSTimeInterval agentKeysUntil;
+/// Hold the page's alert/confirm/prompt dialogs for an agent to answer
+/// instead of showing them (set while an agent drives the page).
+@property(nonatomic) BOOL holdsDialogs;
+/// The dialog waiting for an answer, if any: kind (alert, confirm, prompt, beforeunload), message, text.
+@property(nonatomic, readonly, nullable) NSDictionary<NSString *, NSString *> *openDialog;
+- (BOOL)answerDialog:(BOOL)accept text:(nullable NSString *)text;
+- (void)dialogOpened:(nullable NSString *)kind message:(nullable NSString *)message text:(nullable NSString *)text;
+/// DevTools events (method, params, the session they came from, nil for the page), on the main thread.
+@property(nonatomic, copy, nullable) void (^devtoolsEvent)(NSString *method, NSDictionary *params, NSString *_Nullable session);
 - (void)find:(NSString *)text forward:(BOOL)forward again:(BOOL)again;
 - (void)stopFinding;
 - (void)focusPage;

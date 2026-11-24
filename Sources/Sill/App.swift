@@ -58,6 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = ApplePasswords.shared
         NSApp.appearance = Preferences.shared.theme.appearance
         AgentServer.shared.follow(Preferences.shared)
+        ConnectorBridge.shared.follow(Preferences.shared)
         themeWatch = Preferences.shared.$theme.sink { NSApp.appearance = $0.appearance }
         pressure.setEventHandler { [weak self] in
             MainActor.assumeIsolated {
@@ -74,6 +75,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         WarmSite.shared.warm(after: 4)
         // Only if some site was allowed to notify before: else nothing is set up.
         if SitePermissions.shared.keepsNotifications { PageNotifications.shared.install() }
+        // Opened again while running: a window of Sill's, if none is showing.
+        SEEngine.whenRelaunched { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if !self.browsers.contains(where: { $0.window?.isVisible == true }) { self.newWindow(nil) }
+            }
+        }
         // Pages only once Chromium is ready for them.
         SEEngine.whenReady { [self] in
             if Preferences.shared.restoresTabs, restoreSession() { return }

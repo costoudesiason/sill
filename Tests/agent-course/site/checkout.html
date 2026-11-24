@@ -1,0 +1,8 @@
+<!doctype html><meta charset=utf-8><title>Shop checkout</title><script src=kit.js></script>
+<main id=m></main><script>
+const s1=()=>{m.innerHTML='<h3>Cart</h3><p>Desk lamp £34.00</p><label>Qty <input type=number id=q value=1 min=1></label> <button id=c>Checkout</button>';c.onclick=()=>{done('qty',q.value);s2()}};
+const s2=()=>{m.innerHTML='<h3>Shipping</h3><label>Full name <input id=fn autocomplete=name></label><br><label>Postcode <input id=pc autocomplete=postal-code></label><br><label>Delivery <select id=dl><option>Standard<option>Express</select></label><br><button id=n>Continue to payment</button>';
+ n.onclick=()=>{done('ship',{name:fn.value,pc:pc.value,dl:dl.value});s3()}};
+const s3=()=>{m.innerHTML='<h3>Payment</h3><iframe title="Card details" src="http://localhost:8802/card.html" style="width:440px;height:80px;border:1px solid #ccc"></iframe><br><button id=r>Review order</button>';r.onclick=()=>{done('review');s4()}};
+const s4=()=>{m.innerHTML='<h3>Review</h3><p>Total £'+(34*Number(window.__result.qty)+(window.__result.ship.dl==='Express'?6:0)).toFixed(2)+'</p><button>Place order</button>'};
+s1();</script>

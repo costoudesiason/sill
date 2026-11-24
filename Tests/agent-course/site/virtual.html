@@ -1,0 +1,8 @@
+<!doctype html><meta charset=utf-8><title>Virtual list</title><script src=kit.js></script>
+<div id=v aria-label="Contacts" style="height:300px;overflow:auto;border:1px solid #999;position:relative"><div id=sp style="height:40000px"></div></div>
+<script>// Only the rows in view exist, as in react-window: rows still in view are kept, others made or dropped.
+const rows=new Map();
+function draw(){const first=Math.floor(v.scrollTop/40),want=new Set();for(let i=first;i<first+9;i++)want.add(i);
+ for(const [i,b] of rows) if(!want.has(i)){b.remove();rows.delete(i)}
+ for(const i of want) if(!rows.has(i)){const b=document.createElement('button');b.textContent='Contact '+i;b.style.cssText=`position:absolute;top:${i*40}px;left:0;height:36px`;b.onclick=()=>done('contact',i);v.append(b);rows.set(i,b)}}
+v.onscroll=draw;draw();</script>

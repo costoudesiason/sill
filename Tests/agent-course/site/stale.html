@@ -1,0 +1,3 @@
+<!doctype html><meta charset=utf-8><title>Re-rendering list</title><script src=kit.js></script>
+<ul id=l></ul><script>let n=0;function render(){l.innerHTML=['Apples','Bananas','Cherries'].map(f=>`<li><button>${f} ${n}</button></li>`).join('');
+for(const b of l.querySelectorAll('button')) b.onclick=()=>{done('clicked',b.textContent);n++;setTimeout(render,50);};}render();</script>

@@ -1,0 +1,5 @@
+<!doctype html><meta charset=utf-8><title>Controlled input</title><script src=kit.js></script>
+<input id=q aria-label="Search products"><p id=o></p>
+<script>// Like React: the value only sticks if a real input event (with data) arrived.
+let model='';q.addEventListener('beforeinput',e=>{model=null});q.addEventListener('input',e=>{model=q.value;o.textContent=model;done('model',model)});
+setInterval(()=>{ if(model!==null && q.value!==model) q.value=model; },30);</script>

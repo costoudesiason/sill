@@ -653,11 +653,16 @@ extension Tab: SEWebViewDelegate {
     }
 
     func webView(_ view: SEWebView, open url: URL, inBackground background: Bool) {
-        _ = host?.open(from: self, url: url, configuration: nil, background: background)
+        // A link the agent's click opened is the agent's too, and stays behind yours.
+        let byAgent = AgentActivity.shared.isWorking(on: self)
+        let opened = host?.open(from: self, url: url, configuration: nil, background: background || byAgent)
+        if byAgent, let opened { AgentCommands.adopt(opened) }
     }
 
     func webView(_ view: SEWebView, popupWith size: NSSize) -> SEWebView? {
-        host?.openPopup(from: self, size: size)
+        let popup = host?.openPopup(from: self, size: size)
+        if AgentActivity.shared.isWorking(on: self), let tab = popup?.tab { AgentCommands.adopt(tab) }
+        return popup
     }
 
     /// The page closed itself (window.close()).
@@ -683,6 +688,8 @@ extension Tab: SEWebViewDelegate {
     /// Chromium's right-click menu, drawn as Sill's glass one; Chromium runs
     /// what's picked.
     func webView(_ view: SEWebView, menu items: [SEMenuItem], at point: NSPoint, choose: @escaping (Int) -> Void) {
+        // An agent's right-click: the page's own menu, never Sill's over your screen.
+        if AgentActivity.shared.isWorking(on: self) { return choose(-1) }
         guard let window = host?.window else { return choose(-1) }
         var chosen = false
         var entries: [GlassMenu.Entry] = []

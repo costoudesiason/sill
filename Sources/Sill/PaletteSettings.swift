@@ -13,13 +13,16 @@ struct PaletteSettingsView: View {
     @ObservedObject private var prefs = Preferences.shared
     @ObservedObject private var passwords = ApplePasswords.shared
     @ObservedObject private var importer = SafariImport.shared
+    @ObservedObject private var connector = ConnectorBridge.shared
     var onChoose: (Choice, CGRect) -> Void
     @State private var code = ""
     @State private var isDefault = SettingsSupport.isDefaultBrowser
     @State private var cleared = false
     @State private var copied = false
+    @State private var copiedConnector = false
+    @State private var signedOut = false
 
-    enum Choice { case engine }
+    enum Choice { case engine, agentAsk }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -102,6 +105,41 @@ struct PaletteSettingsView: View {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString("claude mcp add sill -- \(SettingsSupport.mcpHelper)", forType: .string)
                                 copied = true
+                            }
+                            Hairline()
+                            SwitchRow(icon: .claude, tint: .orange, title: "Let claude.ai control Sill",
+                                      detail: prefs.remoteConnector ? connector.summary : "A custom connector, through your own relay",
+                                      isOn: $prefs.remoteConnector)
+                            Hairline()
+                            ChoiceRow(icon: .shield, tint: .green, title: "Ask before", value: AgentJudge.label(prefs.agentAsk)) {
+                                onChoose(.agentAsk, $0)
+                            }
+                            Hairline()
+                            ActionRow(icon: .history, tint: .gray, title: "Agent activity", value: "Show") { AgentLog.show() }
+                            if prefs.remoteConnector {
+                                Hairline()
+                                SwitchRow(icon: .code, tint: .gray, title: "Let claude.ai run scripts in pages",
+                                          detail: "Off: it uses Sill’s tools, which Sill can check", isOn: $prefs.remoteScripts)
+                                Hairline()
+                                ActionRow(icon: .key, tint: .red, title: "Sign out claude.ai",
+                                          value: signedOut ? "Signed out" : nil) {
+                                    ConnectorBridge.shared.signEveryoneOut()
+                                    signedOut = true
+                                }
+                                Hairline()
+                                ActionRow(icon: .link, tint: .gray, title: "Relay",
+                                          value: ConnectorBridge.relayOrigin.flatMap { URL(string: $0)?.host } ?? "Set Up…") {
+                                    ConnectorSetup.run()
+                                }
+                                if let address = ConnectorBridge.connectorAddress {
+                                    Hairline()
+                                    ActionRow(icon: .copy, tint: .gray, title: "Copy the connector address",
+                                              value: copiedConnector ? "Copied" : nil) {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(address, forType: .string)
+                                        copiedConnector = true
+                                    }
+                                }
                             }
                         }
                         Hairline()

@@ -334,6 +334,15 @@ final class TabItemView: NSView {
     var layoutWidth: CGFloat? { didSet { if layoutWidth != oldValue { Motion.still { layoutContents() } } } }
     var isPaired = false { didSet { if isPaired != oldValue { needsDisplay = true } } }
     var isFront = false { didSet { if isFront != oldValue { wearGlass(isFront); clips(); restyle() } } }
+    /// Six dots after the icon while an agent works in the tab (AgentActivity).
+    var agentDots: NSView? {
+        didSet {
+            guard agentDots !== oldValue else { return }
+            oldValue?.removeFromSuperview()
+            if let agentDots { content.addSubview(agentDots) }
+            needsLayout = true
+        }
+    }
 
     /// Rounded and clipped only while wearing glass. A rounded clip renders
     /// the tab offscreen each time the row is drawn, and a row of them made
@@ -621,6 +630,7 @@ final class TabItemView: NSView {
             spinner.frame = icon.frame
             closeButton.frame = NSRect(x: (w - 18) / 2, y: (h - 18) / 2, width: 18, height: 18)
             label.isHidden = true
+            agentDots?.isHidden = true
             return
         }
         icon.isHidden = tab.isLoading && tab.favicon == nil
@@ -632,13 +642,18 @@ final class TabItemView: NSView {
         let margin: CGFloat = 34, gap: CGFloat = 8
         // A few points to spare: measured to the exact width, the title sat
         // a fraction over its field and the fade took its last letter.
-        let group = min(w - margin * 2, iconSize + gap + ceil(titleSize.width) + 6)
+        let dots: CGFloat = agentDots == nil ? 0 : 13   // the dots, and a gap before the title
+        let group = min(w - margin * 2, iconSize + gap + dots + ceil(titleSize.width) + 6)
         let start = max(14, floor((w - group) / 2))
         icon.frame = NSRect(x: start, y: (h - iconSize) / 2, width: iconSize, height: iconSize)
         spinner.frame = icon.frame
         // Its centre as far from the right edge as the icon's is from the left.
         closeButton.frame = NSRect(x: w - 32, y: (h - 20) / 2, width: 20, height: 20)
-        let labelX = start + iconSize + gap
+        if let agentDots {
+            agentDots.isHidden = false
+            agentDots.frame = NSRect(x: start + iconSize + 6, y: (h - 12) / 2, width: 8, height: 12)
+        }
+        let labelX = start + iconSize + gap + dots
         let labelRight = min(showsClose ? w - margin : w - 14, max(labelX, start + group))
         let labelHeight = ceil(titleSize.height)
         let labelFrame = NSRect(x: labelX, y: (h - labelHeight) / 2, width: max(0, labelRight - labelX), height: labelHeight)

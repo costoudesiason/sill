@@ -148,7 +148,8 @@ enum CloseButtons: String, CaseIterable, Identifiable {
 
 final class Preferences: ObservableObject {
     static let shared = Preferences()
-    private let store = UserDefaults.standard
+    /// A test copy (SILL_PROFILE) keeps settings of its own: it never touches yours.
+    let store: UserDefaults = Places.testProfile.flatMap { UserDefaults(suiteName: "com.iasoncostoudes.sill.chromium.\($0)") } ?? .standard
 
     // Looks
     @Published var theme: Theme { didSet { store.set(theme.rawValue, forKey: "theme") } }
@@ -178,6 +179,16 @@ final class Preferences: ObservableObject {
     }
     /// Agents on this Mac may drive Sill over its local socket (sill-mcp).
     @Published var agentControl: Bool { didSet { store.set(agentControl, forKey: "agentControl") } }
+    /// claude.ai (or another app on the internet) may drive Sill through your relay (Connector.swift).
+    @Published var remoteConnector: Bool { didSet { store.set(remoteConnector, forKey: "remoteConnector") } }
+    /// The relay's address, e.g. https://sill-relay.up.railway.app.
+    @Published var connectorRelay: String { didSet { store.set(connectorRelay, forKey: "connectorRelay") } }
+    /// When agents ask first: "auto" (risky steps, judged on device), "always", "never" (AgentJudge).
+    @Published var agentAsk: String { didSet { store.set(agentAsk, forKey: "agentAsk") } }
+    /// claude.ai may run scripts in pages (page_eval): off unless you turn it on.
+    @Published var remoteScripts: Bool { didSet { store.set(remoteScripts, forKey: "remoteScripts") } }
+    /// claude.ai sign-ins made before this moment no longer work (Sign out claude.ai).
+    @Published var connectorNotBefore: Double { didSet { store.set(connectorNotBefore, forKey: "connectorNotBefore") } }
     @Published var sleepAfterMinutes: Int { didSet { store.set(sleepAfterMinutes, forKey: "sleepAfterMinutes") } }
     /// Ads and trackers from third parties are blocked (Shield.swift).
     @Published var blocksAds: Bool {
@@ -212,6 +223,11 @@ final class Preferences: ObservableObject {
         keepsClaudeReady = store.bool(forKey: "warmClaude")
         sleepAfterMinutes = store.integer(forKey: "sleepAfterMinutes")
         agentControl = store.bool(forKey: "agentControl")
+        remoteConnector = store.bool(forKey: "remoteConnector")
+        connectorRelay = store.string(forKey: "connectorRelay") ?? ""
+        agentAsk = store.string(forKey: "agentAsk") ?? "auto"
+        remoteScripts = store.bool(forKey: "remoteScripts")
+        connectorNotBefore = store.double(forKey: "connectorNotBefore")
         blocksAds = store.bool(forKey: "blocksAds")
         engine = SearchEngine(rawValue: store.string(forKey: "engine") ?? "") ?? .google
         suggestions = store.bool(forKey: "suggestions")
@@ -231,7 +247,12 @@ enum Places {
     }()
 
     /// Sill on Chromium keeps its own: both can run side by side.
-    static let folder = "Sill Chromium"
+    static let folder = testProfile.map { "Sill Chromium (\($0))" } ?? "Sill Chromium"
+
+    /// SILL_PROFILE=name runs a separate Sill: its own profile, settings,
+    /// session and agent socket, side by side with yours (the agent test course uses it).
+    static let testProfile: String? = ProcessInfo.processInfo.environment["SILL_PROFILE"]
+        .flatMap { $0.range(of: #"^[A-Za-z0-9-]{1,32}$"#, options: .regularExpression) != nil ? $0 : nil }
 
     static let caches: URL = {
         let url = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]

@@ -1,0 +1,2 @@
+<!doctype html><meta charset=utf-8><title>Hold to confirm</title><script src=kit.js></script>
+<button id=b>Hold to confirm</button><script>let t;b.onpointerdown=()=>{t=setTimeout(()=>done('held'),700)};b.onpointerup=b.onpointerleave=()=>clearTimeout(t);</script>

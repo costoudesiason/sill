@@ -1,0 +1,3 @@
+<!doctype html><meta charset=utf-8><title>Signature pad</title><script src=kit.js></script>
+<canvas id=c width=400 height=150 aria-label="Signature pad" style="border:1px solid #999;touch-action:none"></canvas>
+<script>let down=false,n=0;c.onpointerdown=()=>{down=true};c.onpointermove=e=>{if(down){n++}};c.onpointerup=()=>{down=false;done('strokePoints',n)};</script>

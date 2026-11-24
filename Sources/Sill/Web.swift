@@ -231,17 +231,18 @@ final class SillWebView: SEWebView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        pageHidden = !isShown && !floating
-        if isShown { tab?.pageShown() }
+        pageHidden = !isShown && !keepsDrawing
+        if isShown && !agentAtWork { tab?.pageShown() }
     }
     override func viewDidUnhide() {
         super.viewDidUnhide()
         pageHidden = !isShown
-        if isShown { tab?.pageShown() }
+        // An agent's page under the one in front isn't seen: its dialogs wait.
+        if isShown && !agentAtWork { tab?.pageShown() }
     }
     override func viewDidHide() {
         super.viewDidHide()
-        pageHidden = !floating
+        pageHidden = !keepsDrawing
     }
 
     /// The page being left stays over the one coming in until that has drawn;
@@ -260,13 +261,27 @@ final class SillWebView: SEWebView {
     var floating = false {
         didSet {
             if floating { isHidden = false; autoresizingMask = [.width, .height] }
-            pageHidden = !floating && !isShown
+            pageHidden = !keepsDrawing && !isShown
         }
     }
 
+    /// An agent is working in it out of sight (AgentControl): like a floating
+    /// video, it stays in the window, drawn, under the page in front, so its
+    /// screenshots, animations and timers run as if it were in front.
+    var agentAtWork = false {
+        didSet {
+            guard agentAtWork != oldValue else { return }
+            if agentAtWork { isHidden = false; autoresizingMask = [.width, .height] }
+            pageHidden = !keepsDrawing && !isShown
+        }
+    }
+
+    /// Drawn though out of sight: a floating video, or an agent's page.
+    var keepsDrawing: Bool { floating || agentAtWork }
+
     /// Put aside where it is, hidden: Chromium stops drawing it.
     func park() {
-        if floating {
+        if keepsDrawing {
             superview?.addSubview(self, positioned: .below, relativeTo: nil)
             return
         }
