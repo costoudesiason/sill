@@ -186,6 +186,9 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
 
   // Load
   void OnLoadingStateChange(CefRefPtr<CefBrowser>, bool loading, bool back, bool forward) override {
+    // A new load starts from nothing: a figure left from the last one sent
+    // the loading line straight to the end.
+    if (loading && !view_.isLoading) view_.estimatedProgress = 0;
     if (view_.isLoading != loading) view_.isLoading = loading;
     if (view_.canGoBack != back) view_.canGoBack = back;
     if (view_.canGoForward != forward) view_.canGoForward = forward;
@@ -437,7 +440,9 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
 - (void)reloadFromOrigin { if (browser_) browser_->ReloadIgnoreCache(); }
 - (void)stopLoading { if (browser_) browser_->StopLoad(); }
 
-- (double)pageZoom { return zoom_; }
+// Chromium keeps zoom per site: the figure is read from it, not a copy kept
+// here that a zoom in another tab of the site, or a new site, left stale.
+- (double)pageZoom { return browser_ ? pow(1.2, browser_->GetHost()->GetZoomLevel()) : zoom_; }
 - (void)setPageZoom:(double)zoom {
   zoom_ = zoom;
   if (browser_) browser_->GetHost()->SetZoomLevel(log(zoom) / log(1.2));
@@ -518,6 +523,16 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   if (browser_) browser_->GetHost()->Find(text.UTF8String, forward, false, again);
 }
 - (void)stopFinding { if (browser_) browser_->GetHost()->StopFinding(true); }
+
+// Made first responder (a tab coming to the front, the palette or Find
+// closing): the keys go to the page, through Chromium's own view in this one.
+- (BOOL)acceptsFirstResponder { return browser_ != nullptr; }
+- (BOOL)becomeFirstResponder {
+  dispatch_async(dispatch_get_main_queue(), ^{ if (self.window.firstResponder == self) [self focusPage]; });
+  return YES;
+}
+
+- (void)exitFullScreen { if (browser_) browser_->GetHost()->ExitFullscreen(true); }
 
 - (void)focusPage {
   if (!browser_) return;

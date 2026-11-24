@@ -595,7 +595,9 @@ final class TabItemView: NSView {
         // The same margin both sides, so the close button coming and going
         // on hover doesn't move them.
         let margin: CGFloat = 34, gap: CGFloat = 8
-        let group = min(w - margin * 2, iconSize + gap + ceil(titleSize.width))
+        // A few points to spare: measured to the exact width, the title sat
+        // a fraction over its field and the fade took its last letter.
+        let group = min(w - margin * 2, iconSize + gap + ceil(titleSize.width) + 6)
         let start = max(14, floor((w - group) / 2))
         icon.frame = NSRect(x: start, y: (h - iconSize) / 2, width: iconSize, height: iconSize)
         spinner.frame = icon.frame
@@ -607,7 +609,7 @@ final class TabItemView: NSView {
         label.frame = NSRect(x: labelX, y: (h - labelHeight) / 2, width: max(0, labelRight - labelX), height: labelHeight)
 
         // Long titles fade out rather than end in an ellipsis.
-        if titleSize.width > label.frame.width, label.frame.width > 20 {
+        if titleSize.width > label.frame.width + 1, label.frame.width > 20 {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             fade.frame = label.bounds

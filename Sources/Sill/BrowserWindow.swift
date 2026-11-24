@@ -80,6 +80,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         return made
     }
     private var paletteOpen: Bool { madePalette?.isOpen ?? false }
+    private(set) var fullScreenPage: Tab?
+    private var enteredForPage = false
     private let status = StatusPill()
     private lazy var peek: Peek = { let peek = Peek(); stage.addSubview(peek); return peek }()
     /// The card over a tab the pointer rests on (TabPreview.swift).
@@ -458,7 +460,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     // MARK: - Layout
 
-    var topInset: CGFloat { TopBar.height }
+    /// The page's own full screen (a video) hides the bar: the page has the window.
+    var topInset: CGFloat { fullScreenPage == nil ? TopBar.height : 0 }
 
     private func stageLaidOut() {
         if loadingLine.superview !== stage { stage.addSubview(loadingLine) }
@@ -470,6 +473,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         } else {
             bar.leadingInset = 0
         }
+        top.isHidden = fullScreenPage != nil
+        if fullScreenPage != nil { loadingLine.isHidden = true }
         top.frame = NSRect(x: 0, y: 0, width: stage.bounds.width, height: TopBar.height)
         bar.frame = top.bounds
         // The page starts below the bar: nothing goes behind the glass.
@@ -509,6 +514,30 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     }
     func windowWillExitFullScreen(_ notification: Notification) {
         if Preferences.shared.roundCorners { _ = setCornerRadius(Preferences.shared.cornerRadius) }
+        // Out of full screen another way (⌃⌘F, the green button): the page
+        // leaves its own full screen too.
+        if let page = fullScreenPage {
+            fullScreenPage = nil
+            enteredForPage = false
+            page.webView?.exitFullScreen()
+            stage.needsLayout = true
+        }
+    }
+
+    /// A page in its own full screen (a video), and whether the window went
+    /// full screen for it (and so leaves it with it).
+    func pageFullScreen(_ tab: Tab, _ on: Bool) {
+        guard let window else { return }
+        if on {
+            guard tab === selected else { tab.webView?.exitFullScreen(); return }
+            fullScreenPage = tab
+            if !window.styleMask.contains(.fullScreen) { enteredForPage = true; window.toggleFullScreen(nil) }
+        } else {
+            guard fullScreenPage === tab else { return }
+            fullScreenPage = nil
+            if enteredForPage, window.styleMask.contains(.fullScreen) { enteredForPage = false; window.toggleFullScreen(nil) }
+        }
+        stage.needsLayout = true
     }
 
     // MARK: - Tabs
@@ -592,6 +621,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
                 if floated, old.superview === self.pageHost {
                     self.pageHost.addSubview(old, positioned: .below, relativeTo: nil)
                 } else if old.superview === self.pageHost { old.park() } else { old.removeFromSuperview() }
+            }
+        }
+        // A page in its own full screen leaves it when another tab comes in.
+        if let page = fullScreenPage, page !== tab { page.webView?.exitFullScreen() }
+        // Pictured as it's left, while still on screen: Chromium can't picture
+        // a page it has hidden, and its hover card would be blank. Kept small.
+        if let previous, previous !== tab, previous.webView?.isShown == true {
+            previous.capturePicture { [weak previous] image in
+                if let image { previous?.keepWhileAsleep(image) }
             }
         }
         selected = tab
@@ -870,7 +908,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     private static func isPlayingAudio(_ webView: SillWebView) -> Bool {
         let key = "_isPlayingAudio"
-        guard webView.responds(to: NSSelectorFromString(key)) else { return true }
+        // Chromium: what the page script says. (Answering "yes" here, as
+        // this once did, kept every page from napping and every tab switch
+        // from holding the page being left until the new one had drawn.)
+        guard webView.responds(to: NSSelectorFromString(key)) else { return webView.tab?.audible ?? false }
         return (webView.value(forKey: key) as? Bool) ?? true
     }
 
@@ -1429,8 +1470,10 @@ extension BrowserWindowController {
             if webView.superview !== pageHost {
                 webView.frame = pageHost.bounds
                 pageHost.addSubview(webView, positioned: under ? .below : .above, relativeTo: nil)
-            } else if !placed {
-                // Only hidden since it was last in front (see SillWebView.park).
+            } else if !placed || keep != nil {
+                // Only hidden since it was last in front (see SillWebView.park),
+                // or already here under a page kept for its video to float:
+                // to the front either way.
                 webView.frame = pageHost.bounds
                 order(webView, below: under)
                 webView.isHidden = false
@@ -1455,6 +1498,7 @@ extension BrowserWindowController {
     private static func covers(_ view: NSView) -> Bool {
         // A page (a WKWebView on WebKit; on Chromium every page is a SillWebView).
         (view is SillWebView || view is WKWebView) && !view.isHidden && (view as? SillWebView)?.drawingAhead != true
+            && (view as? SillWebView)?.floating != true
     }
 
     /// A page loaded out of sight (a tab next door, one opened behind, the

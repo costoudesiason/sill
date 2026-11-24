@@ -80,12 +80,13 @@ final class Peek: NSView, WKNavigationDelegate, WKUIDelegate {
 
     private func open(_ url: URL, by point: NSPoint, in stage: NSView, below top: CGFloat, private isPrivate: Bool) {
         self.isPrivate = isPrivate
-        let configuration = Web.configuration(private: isPrivate)
-        configuration.websiteDataStore = .nonPersistent()
-        // A look makes no sound.
-        configuration.mediaTypesRequiringUserActionForPlayback = .all
         let pageFrame = NSRect(x: 0, y: 0, width: Self.size.width, height: Self.size.height - Self.foot)
-        let view = SillWebView(frame: pageFrame, configuration: configuration)
+        // A look keeps nothing: in memory only, like a private window. (Made
+        // straight, not by changing the shared configuration: that once made
+        // every tab opened after a look private, and signed out.)
+        let view = SillWebView(frame: pageFrame, private: true)
+        // A look makes no sound.
+        view.audioMuted = true
         // Half size: a desktop-width page in a card.
         view.pageZoom = 0.5
         view.holdForFirstFrame()
@@ -124,8 +125,9 @@ final class Peek: NSView, WKNavigationDelegate, WKUIDelegate {
         guard let page else { return }
         self.page = nil
         page.stopLoading()
-        page.closePage()
+        // Closed once faded: closed first, its card went blank as it faded.
         Motion.animate(0.1, { animator().alphaValue = 0 }, completion: { [weak self] in
+            page.closePage()
             page.removeFromSuperview()
             if self?.link == nil { self?.isHidden = true }
         })

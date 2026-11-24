@@ -185,8 +185,9 @@ enum Web {
 
     /// What a page view is made with: on Chromium only whether it's private
     /// counts. Two kept, made once, so no WebKit machinery starts for them.
+    /// A copy each time: what one caller changes is never seen by the next.
     static func configuration(private isPrivate: Bool) -> WKWebViewConfiguration {
-        isPrivate ? privateMarker : normalMarker
+        (isPrivate ? privateMarker : normalMarker).copy() as! WKWebViewConfiguration
     }
     private static let normalMarker = WKWebViewConfiguration()
     private static let privateMarker: WKWebViewConfiguration = {
@@ -263,6 +264,7 @@ final class SillWebView: SEWebView {
             superview?.addSubview(self, positioned: .below, relativeTo: nil)
             return
         }
+        drawingAhead = false
         guard !isHidden else { return }
         isHidden = true
         outgoing = false
@@ -272,8 +274,12 @@ final class SillWebView: SEWebView {
     var shownBefore = false
     var laidOutUnseen = false
     private(set) var drawingAhead = false
-    func startDrawingAhead() {}
-    func cameIntoView() { if isShown { tab?.pageShown() } }
+    /// Under the page in front, drawing, until it's put aside (park) or comes in.
+    func startDrawingAhead() { drawingAhead = true }
+    func cameIntoView() {
+        drawingAhead = false
+        if isShown { tab?.pageShown() }
+    }
     /// Once the page has drawn a frame since now (two animation frames
     /// in the page, then one for the window to show it), or after `limit`,
     /// whichever comes first: a page coming in stays under the one being
@@ -285,15 +291,36 @@ final class SillWebView: SEWebView {
             done = true
             run()
         }
-        evaluateJavaScript("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))", completion: { _, _ in
+        evaluateJavaScript("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))", completion: { _, error in
+            // No page to ask yet: the limit decides, not the failure.
+            guard error == nil else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.017) { MainActor.assumeIsolated { finish() } }
         })
         DispatchQueue.main.asyncAfter(deadline: .now() + limit) { MainActor.assumeIsolated { finish() } }
     }
     var isFullyIn: Bool { true }
     static let firstFrame: UInt = 1 << 1
-    func holdForFirstFrame() {}
-    func showFirstFrame(laidOut: Bool = true) {}
+    /// Unseen until it has drawn its first frame (white, otherwise, for a
+    /// moment: bright in dark mode). Still in the window and drawing, only
+    /// transparent: Chromium draws a page it thinks is shown. It shows once
+    /// the page is under way and has drawn, or after a second and a half.
+    func holdForFirstFrame() {
+        guard heldWatch == nil else { return }
+        alphaValue = 0
+        heldWatch = observe(\.estimatedProgress, options: [.new]) { [weak self] view, _ in
+            MainActor.assumeIsolated {
+                guard let self, view.estimatedProgress >= 0.3 || !view.isLoading else { return }
+                self.afterNextFrame(within: 0.5) { [weak self] in self?.showFirstFrame() }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.showFirstFrame() }
+    }
+    func showFirstFrame(laidOut: Bool = true) {
+        guard heldWatch != nil else { return }
+        heldWatch = nil
+        alphaValue = 1
+    }
+    private var heldWatch: NSKeyValueObservation?
 
     // MARK: WebKit's names, on Chromium
 
@@ -434,6 +461,8 @@ final class MessageRouter: NSObject, WKScriptMessageHandler {
             tab.scrolled((body["v"] as? Bool) ?? false)
         case "media":
             tab.mediaChanged((body["playing"] as? Bool) ?? false)
+        case "audible":
+            tab.audible = (body["on"] as? Bool) ?? false
         case "pipReturn":
             // Back from the floating window: to its tab, its window, to the front.
             tab.host?.bringBack(tab)
@@ -514,7 +543,11 @@ enum PageScripts {
           return box.width >= 200 && box.height >= 112;
         });
         if (now !== playing) { playing = now; post({ t: 'media', playing: now }); }
+        // Anything making sound (Chromium doesn't tell Sill; WebKit did).
+        const loud = [...document.querySelectorAll('video, audio')].some(m => !m.paused && !m.ended && !m.muted && m.volume > 0);
+        if (loud !== audible) { audible = loud; post({ t: 'audible', on: loud }); }
       };
+      let audible = false;
       ['playing', 'pause', 'ended', 'emptied', 'volumechange'].forEach(e => document.addEventListener(e, media, true));
       media();
 

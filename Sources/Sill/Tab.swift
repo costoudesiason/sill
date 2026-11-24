@@ -25,6 +25,8 @@ protocol TabHost: AnyObject {
     func isInFront(_ tab: Tab) -> Bool
     /// Its page finished loading out of sight, never yet in a window.
     func loadedUnseen(_ tab: Tab)
+    /// Its page went full screen (a video), or came back.
+    func pageFullScreen(_ tab: Tab, _ on: Bool)
 }
 
 /// One page and its history. Its web view is made the first time it is
@@ -62,6 +64,10 @@ final class Tab: NSObject {
     private(set) var isScrolled = false
     /// Whether a video is playing in the page, as its script last said.
     private(set) var playingVideo = false
+    /// A video or sound playing out loud, as the page script last said (Chromium).
+    var audible = false
+    /// How far down the page was when it went to sleep.
+    var wakeScroll: CGFloat?
     /// A sign-in sent and not yet known to have gone through.
     var pendingSignIn: (host: String, user: String, password: String, at: Date)?
     var lastShown = Date() { didSet { warmedUnseen = false; seenAt = lastShown } }
@@ -288,12 +294,17 @@ final class Tab: NSObject {
         let typing = """
         (function () {
           var e = document.activeElement;
-          return !!(e && (e.isContentEditable || ((e.tagName === 'INPUT' || e.tagName === 'TEXTAREA') && e.value)));
+          return !!(e && (e.isContentEditable || ((e.tagName === 'INPUT' || e.tagName === 'TEXTAREA') && e.value)))
+            ? -1 : Math.round(window.scrollY);
         })();
         """
         webView.evaluateJavaScript(typing, in: nil, in: Web.world) { [weak self, weak webView] result in
             // A page that can't be asked (a PDF, say) has nothing typed in it.
-            guard let self, let webView, self.webView === webView, (try? result.get()) as? Bool != true else { return }
+            let answer = (try? result.get()) as? NSNumber
+            guard let self, let webView, self.webView === webView, answer?.intValue != -1 else { return }
+            // Where it was scrolled to: it wakes there (Chromium keeps no
+            // page state to hand back, as WebKit did).
+            self.wakeScroll = answer.map { CGFloat($0.doubleValue) }.flatMap { $0 > 0 ? $0 : nil }
             // Its preview keeps the page as it was, kept small while it sleeps.
             guard Preferences.shared.showsTabPreviews else { return self.sleep() }
             self.capturePicture { [weak self, weak webView] image in
@@ -600,6 +611,7 @@ extension Tab: SEWebViewDelegate {
 
     func webViewDidCommit(_ view: SEWebView) {
         signInWentThrough()
+        audible = false
         scrolled(false)
         playingVideo = false
         asked = nil
@@ -616,6 +628,11 @@ extension Tab: SEWebViewDelegate {
     }
 
     func webViewDidFinish(_ view: SEWebView) {
+        // Woken from sleep: back where it was.
+        if view === webView, let y = wakeScroll {
+            wakeScroll = nil
+            view.evaluateJavaScript("window.scrollTo(0, \(Int(y)))", completion: nil)
+        }
         // Loaded out of sight (next door, or opened behind).
         if view === self.webView, view.window == nil, host?.isInFront(self) == false { host?.loadedUnseen(self) }
     }
@@ -659,8 +676,7 @@ extension Tab: SEWebViewDelegate {
     }
 
     func webView(_ view: SEWebView, fullscreen on: Bool) {
-        guard let window = host?.window, window.styleMask.contains(.fullScreen) != on else { return }
-        window.toggleFullScreen(nil)
+        host?.pageFullScreen(self, on)
     }
 
     /// Chromium's right-click menu, drawn as Sill's glass one; Chromium runs

@@ -15,7 +15,11 @@ strip -rSTx "$APP/Contents/MacOS/Sill"
 cp "$(dirname "$BIN")/sill-mcp" "$APP/Contents/Helpers/"
 # The icon and Info.plist as the WebKit build makes them, then made its own.
 [ -d build/Sill.app ] || ./build.sh >/dev/null
-cp build/Sill.app/Contents/Resources/AppIcon.icns build/Sill.app/Contents/Resources/Assets.car "$APP/Contents/Resources/"
+# The icon, from its Icon Composer file: macOS renders its glass layers
+# (Assets.car), with a flat fallback (AppIcon.icns). An absolute path, as
+# build.sh explains.
+xcrun actool --compile "$PWD/$APP/Contents/Resources" --app-icon AppIcon --platform macosx \
+  --minimum-deployment-target 26.0 --output-partial-info-plist "$(mktemp)" "$PWD/Resources/AppIcon.icon" >/dev/null
 cp build/Sill.app/Contents/Info.plist "$APP/Contents/Info.plist"
 P=/usr/libexec/PlistBuddy
 $P -c "Set :CFBundleIdentifier com.iasoncostoudes.sill.chromium" "$APP/Contents/Info.plist"

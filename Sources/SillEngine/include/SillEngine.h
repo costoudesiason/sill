@@ -117,6 +117,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)find:(NSString *)text forward:(BOOL)forward again:(BOOL)again;
 - (void)stopFinding;
 - (void)focusPage;
+/// Out of the page's own full screen (a video's).
+- (void)exitFullScreen;
 - (void)showDevTools;
 /// Ends the page: Chromium closes it and its process lets go.
 - (void)closePage;
