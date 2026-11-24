@@ -34,7 +34,9 @@ final class Palette: NSObject {
     let field = PaletteField()
     private let scroll = NSScrollView()
     private let table = PaletteTable()
-    private let footer = FlippedView()
+    /// Over the end of the list: only its controls take clicks; between
+    /// them, clicks go through to the rows underneath.
+    private let footer = PassThroughView()
     /// The footer's controls are Liquid Glass of their own, as in Raycast and
     /// Spotlight: a round button on the left, and on the right a capsule that
     /// does what Return does or opens the chosen row's other actions. One
@@ -140,6 +142,7 @@ final class Palette: NSObject {
         footerGlass.contentView = footerContent
         footerGlass.spacing = 8
         footer.addSubview(footerGlass)
+        footer.passes = [footerGlass, footerContent]
         content.addSubview(footer)
 
         backButton.target = self
@@ -295,7 +298,26 @@ final class Palette: NSObject {
         searchIcon.frame = NSRect(x: 22, y: (Self.fieldHeight - 22) / 2, width: 22, height: 22)
         let fieldHeight = ceil(field.intrinsicContentSize.height)
         field.frame = NSRect(x: 54, y: (Self.fieldHeight - fieldHeight) / 2 + 1, width: w - 54 - 22, height: fieldHeight)
-        scroll.frame = NSRect(x: 0, y: Self.fieldHeight, width: w, height: height - Self.fieldHeight - Self.footerHeight)
+        // The list runs to the bottom of the card, under the footer's two
+        // floating controls; its end is kept clear of them, so the last row
+        // still scrolls into sight. (It stopped above the footer, which
+        // showed as a slab of glass with the list cut off along its top.)
+        scroll.frame = NSRect(x: 0, y: Self.fieldHeight, width: w, height: height - Self.fieldHeight)
+        scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: Self.footerHeight + 6, right: 0)
+        scroll.scrollerInsets = NSEdgeInsets(top: 0, left: 0, bottom: Self.footerHeight, right: 0)
+        // Rows fade out under the controls, as a scroll edge does.
+        scroll.wantsLayer = true
+        let fade = (scroll.layer?.mask as? CAGradientLayer) ?? CAGradientLayer()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        fade.frame = scroll.bounds
+        fade.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.black.withAlphaComponent(0.15).cgColor]
+        let h = max(1, scroll.bounds.height)
+        fade.locations = [0, NSNumber(value: Double(max(0, (h - Self.footerHeight - 8) / h))), 1]
+        // A layer's y grows up here: the clear end is at the bottom, start 1 → 0.
+        fade.startPoint = CGPoint(x: 0.5, y: scroll.isFlipped ? 0 : 1)
+        fade.endPoint = CGPoint(x: 0.5, y: scroll.isFlipped ? 1 : 0)
+        scroll.layer?.mask = fade
+        CATransaction.commit()
         footer.frame = NSRect(x: 0, y: height - Self.footerHeight, width: w, height: Self.footerHeight)
         layoutFooter()
         if showingSettings { settingsHost?.frame = content.bounds; layoutBackButton() }
@@ -1246,5 +1268,16 @@ final class PillSegment: NSView {
             cap.frame = NSRect(x: x, y: (h - 20) / 2, width: 22, height: 20)
             x += 25
         }
+    }
+}
+
+/// A view that takes no clicks itself: they go to its controls, or through
+/// to whatever is under it.
+final class PassThroughView: NSView {
+    override var isFlipped: Bool { true }
+    var passes: [NSView] = []
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit === self || passes.contains(where: { $0 === hit }) ? nil : hit
     }
 }
