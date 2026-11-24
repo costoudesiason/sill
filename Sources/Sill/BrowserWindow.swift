@@ -1453,7 +1453,8 @@ extension BrowserWindowController {
     /// A page in the page area that is in sight: not put aside, and not one
     /// only drawing ahead under the others.
     private static func covers(_ view: NSView) -> Bool {
-        view is WKWebView && !view.isHidden && (view as? SillWebView)?.drawingAhead != true
+        // A page (a WKWebView on WebKit; on Chromium every page is a SillWebView).
+        (view is SillWebView || view is WKWebView) && !view.isHidden && (view as? SillWebView)?.drawingAhead != true
     }
 
     /// A page loaded out of sight (a tab next door, one opened behind, the
