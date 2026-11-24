@@ -226,7 +226,9 @@ final class ProfileButton: NSButton {
         isBordered = false
         bezelStyle = .accessoryBarAction
         imagePosition = .imageOnly
-        imageScaling = .scaleProportionallyUpOrDown
+        // Smaller than its glass, centred, so the glass shows around it as
+        // it does around the bar's other buttons.
+        imageScaling = .scaleNone
         toolTip = Profile.name
         setAccessibilityLabel("Profile, \(Profile.name)")
         image = Profile.picture(size: 26)
