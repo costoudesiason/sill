@@ -29,8 +29,9 @@ if (SECRET.length < 32) {
   process.exit(1);
 }
 const PORT = Number(process.env.PORT ?? 8787);
-const FIXED_BASE = process.env.PUBLIC_URL?.replace(/\/+$/, "")
-  ?? (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null);
+// The relay's own address: PUBLIC_URL if set, else the address each request came to,
+// so it answers correctly under every address it has (its Railway one, a custom domain).
+const FIXED_BASE = process.env.PUBLIC_URL?.replace(/\/+$/, "") || null;
 
 const ACCESS_TTL = 60 * 60;              // 1 hour
 const REFRESH_TTL = 60 * 60 * 24 * 60;   // 60 days
@@ -163,7 +164,10 @@ setInterval(() => {
 function baseURL(req) {
   if (FIXED_BASE) return FIXED_BASE;
   const proto = (req.headers["x-forwarded-proto"] ?? "http").split(",")[0].trim();
-  return `${proto}://${req.headers["x-forwarded-host"] ?? req.headers.host}`;
+  const host = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "").split(",")[0].trim();
+  // Only well-formed host names: the address ends up in OAuth metadata and redirects.
+  if (!/^[a-z0-9.-]+(:\d+)?$/i.test(host)) return "https://sill-relay-production.up.railway.app";
+  return `${proto === "https" || !/^(localhost|127\.0\.0\.1)/.test(host) ? "https" : "http"}://${host}`;
 }
 
 const CORS = {
