@@ -55,7 +55,8 @@ final class TabStripView: NSView {
             if action == "Minimize" { window?.performMiniaturize(nil) } else if action != "None" { window?.performZoom(nil) }
             return
         }
-        super.mouseDown(with: event)
+        // Bare bar: the window moves with the pointer, as a title bar's does.
+        window?.performDrag(with: event)
     }
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
@@ -259,6 +260,10 @@ final class TabStripView: NSView {
         let start = convert(event.locationInWindow, from: nil)
         let grab = start.x - item.frame.minX
         var moved = false
+        // Where it was in the row when grabbed: its place follows from how far
+        // it has been dragged since, and nothing else.
+        let firstIndex = items.firstIndex(of: item) ?? 0
+        let firstSlot = targetFrames()[ObjectIdentifier(item)]?.minX ?? item.frame.minX
 
         while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
             if next.type == .leftMouseUp { break }
@@ -274,20 +279,23 @@ final class TabStripView: NSView {
             // The tab stays under the pointer, along the row, no further than its ends.
             let x = max(0, min(bounds.width - item.frame.width, point.x - grab))
             Motion.still { item.setFrameOrigin(NSPoint(x: x, y: 0)) }
-            // It trades places with a neighbour once its middle passes the
-            // neighbour's middle, not at a slot's edge, so it never flickers
-            // back and forth there.
-            let center = x + item.frame.width / 2
-            guard var index = items.firstIndex(of: item) else { continue }
-            let start = index
-            let frames = targetFrames()
-            while index + 1 < items.count, let next = frames[ObjectIdentifier(items[index + 1])], center > next.midX {
-                items.swapAt(index, index + 1); index += 1
-            }
-            while index > 0, let previous = frames[ObjectIdentifier(items[index - 1])], center < previous.midX {
-                items.swapAt(index, index - 1); index -= 1
-            }
-            if index != start {
+            // It takes a neighbour's place once it's halfway into that
+            // neighbour's slot, and never needs more than 110 points of drag
+            // for it: full-bar tabs are hundreds of points wide, and waiting
+            // for its middle to pass the neighbour's (as it once did) meant
+            // dragging a whole tab's width. Worked out from the distance
+            // dragged since the tab was grabbed, so it never flickers back
+            // and forth at the point it changes.
+            guard let index = items.firstIndex(of: item) else { continue }
+            let step = item.frame.width + spacing
+            let threshold = min(step / 2, 110)
+            let distance = x - firstSlot
+            var places = 0
+            if abs(distance) >= threshold { places = (Int(((abs(distance) - threshold) / step).rounded(.down)) + 1) * (distance < 0 ? -1 : 1) }
+            let target = max(0, min(items.count - 1, firstIndex + places))
+            if target != index {
+                items.remove(at: index)
+                items.insert(item, at: target)
                 NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
                 layoutItems(animated: true)
             }
@@ -565,16 +573,22 @@ final class TabItemView: NSView {
         } else {
             content.frame = bounds
         }
-        // The icon, title and close button go straight to where they'll
-        // end up, as the row's header says. Sent along with the frame, the
-        // title still took its new width at once (a text field's frame
-        // doesn't travel) and the close button, travelling, crossed its
-        // letters on the way (captured, a tab growing in Fill).
+        // In a resize of the row (a tab closing, the row reflowing) the icon,
+        // title and close button travel with the tab, as its glass does: with
+        // the title centred, put straight where they'd end up they lurched
+        // sideways while the tab was still growing. The title's width alone
+        // changes at once (a text field's frame doesn't travel). Otherwise,
+        // straight there.
         let w = layoutWidth ?? bounds.width
-        Motion.still { placeContents(width: w, narrow: w < 64) }
+        let context = NSAnimationContext.current
+        if context.allowsImplicitAnimation, context.duration > 0, layoutWidth == nil {
+            placeContents(width: w, narrow: w < 64, travelling: true)
+        } else {
+            Motion.still { placeContents(width: w, narrow: w < 64) }
+        }
     }
 
-    private func placeContents(width w: CGFloat, narrow: Bool) {
+    private func placeContents(width w: CGFloat, narrow: Bool, travelling: Bool = false) {
         let h = bounds.height
         let showsClose = isFront ? w >= 44 : ((isHovered || Preferences.shared.closeButtons == .always) && !narrow)
         closeButton.isHidden = !showsClose
@@ -608,7 +622,13 @@ final class TabItemView: NSView {
         let labelX = start + iconSize + gap
         let labelRight = min(showsClose ? w - margin : w - 14, max(labelX, start + group))
         let labelHeight = ceil(titleSize.height)
-        label.frame = NSRect(x: labelX, y: (h - labelHeight) / 2, width: max(0, labelRight - labelX), height: labelHeight)
+        let labelFrame = NSRect(x: labelX, y: (h - labelHeight) / 2, width: max(0, labelRight - labelX), height: labelHeight)
+        if travelling {
+            Motion.still { label.setFrameSize(labelFrame.size) }
+            label.setFrameOrigin(labelFrame.origin)
+        } else {
+            label.frame = labelFrame
+        }
 
         // Long titles fade out rather than end in an ellipsis.
         if titleSize.width > label.frame.width + 1, label.frame.width > 20 {

@@ -173,6 +173,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
         window.toolbarStyle = .unified
+        // The toolbar makes the whole bar a place macOS drags the window
+        // from by itself, before Sill sees the mouse: dragging a tab to
+        // reorder it dragged the window. Sill moves the window itself, from
+        // the bar's bare glass only (TopBar, TabStripView).
+        window.isMovable = false
         super.init(window: window)
         window.delegate = self
 

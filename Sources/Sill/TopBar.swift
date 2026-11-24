@@ -142,7 +142,8 @@ final class TopBar: NSView {
             if action == "Minimize" { window?.performMiniaturize(nil) } else if action != "None" { window?.performZoom(nil) }
             return
         }
-        super.mouseDown(with: event)
+        // Bare bar: the window moves with the pointer, as a title bar's does.
+        window?.performDrag(with: event)
     }
 }
 
