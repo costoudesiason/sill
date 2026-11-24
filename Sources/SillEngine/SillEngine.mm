@@ -1,6 +1,7 @@
 // Sill's Chromium engine (SillEngine.h). CEF's C++ lives here and nowhere else.
 
 #import "SillEngine.h"
+#import <ImageIO/ImageIO.h>
 #include <crt_externs.h>
 #include <map>
 #include <set>
@@ -483,21 +484,33 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
 
 - (void)takeSnapshotWithWidth:(CGFloat)width completion:(void (^)(NSImage*))completion {
   if (!browser_ || hidden_ || self.bounds.size.width <= 0) { completion(nil); return; }
-  double cssWidth = self.bounds.size.width / zoom_, cssHeight = self.bounds.size.height / zoom_;
-  CefRefPtr<CefDictionaryValue> clip = CefDictionaryValue::Create();
-  clip->SetDouble("x", 0);
-  clip->SetDouble("y", 0);
-  clip->SetDouble("width", cssWidth);
-  clip->SetDouble("height", cssHeight);
-  clip->SetDouble("scale", MIN(1.0, width * 2 / cssWidth));
+  // The page exactly as it's drawn, copied from its surface. No clip and no
+  // scale: with either, Chromium re-renders the live page at that size to
+  // take the picture, and the page in front visibly flashed (every tab hover).
   CefRefPtr<CefDictionaryValue> params = CefDictionaryValue::Create();
   params->SetString("format", "jpeg");
-  params->SetInt("quality", 80);
-  params->SetDictionary("clip", clip);
+  params->SetInt("quality", 70);
+  params->SetBool("optimizeForSpeed", true);
+  CGFloat pixels = MAX(64, width * 2);
   client_->devtools(browser_, "Page.captureScreenshot", params, ^(BOOL ok, NSDictionary* json) {
     NSString* base64 = ok ? json[@"data"] : nil;
-    NSData* data = base64 ? [[NSData alloc] initWithBase64EncodedString:base64 options:0] : nil;
-    completion(data ? [[NSImage alloc] initWithData:data] : nil);
+    if (!base64) { completion(nil); return; }
+    // Shrunk while it's decoded, off the main thread.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      NSData* data = [[NSData alloc] initWithBase64EncodedString:base64 options:0];
+      CGImageSourceRef source = data ? CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL) : NULL;
+      CGImageRef image = NULL;
+      if (source) {
+        NSDictionary* options = @{(id)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+                                  (id)kCGImageSourceThumbnailMaxPixelSize: @(pixels),
+                                  (id)kCGImageSourceCreateThumbnailWithTransform: @YES};
+        image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+        CFRelease(source);
+      }
+      NSImage* result = image ? [[NSImage alloc] initWithCGImage:image size:NSZeroSize] : nil;
+      if (image) CGImageRelease(image);
+      dispatch_async(dispatch_get_main_queue(), ^{ completion(result); });
+    });
   });
 }
 

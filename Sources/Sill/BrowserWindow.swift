@@ -203,6 +203,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         bar.back.action = #selector(goBack(_:))
         bar.forward.target = self
         bar.forward.action = #selector(goForward(_:))
+        bar.isPopup = isPopup
         bar.extensions.target = self
         bar.extensions.action = #selector(showExtensions(_:))
         bar.profile.target = self

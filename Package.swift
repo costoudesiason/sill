@@ -23,7 +23,7 @@ let package = Package(
             path: "Sources/SillEngine",
             cxxSettings: [.unsafeFlags(["-I\(cef)", "-std=c++20", "-fobjc-arc", "-fno-rtti", "-fno-exceptions",
                                         "-Wno-deprecated-declarations", "-D__STDC_CONSTANT_MACROS", "-D__STDC_FORMAT_MACROS"])],
-            linkerSettings: [.unsafeFlags(["\(cefRoot)/libcef_dll_wrapper.a"]), .linkedFramework("Cocoa")]
+            linkerSettings: [.unsafeFlags(["\(cefRoot)/libcef_dll_wrapper.a"]), .linkedFramework("Cocoa"), .linkedFramework("ImageIO")]
         ),
         .executableTarget(
             name: "Sill",

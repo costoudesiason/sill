@@ -31,6 +31,16 @@ final class TopBar: NSView {
     override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { true }
 
+    /// A popup's bar (a "Sign in with…" window): back, forward and its one
+    /// page's title, none of the browser's own buttons or the profile.
+    var isPopup = false {
+        didSet {
+            actionsGlass.isHidden = isPopup
+            profileGlass.isHidden = isPopup
+            needsLayout = true
+        }
+    }
+
     /// Room kept on the left for the window's traffic lights.
     var leadingInset: CGFloat = 0 { didSet { if leadingInset != oldValue { needsLayout = true } } }
 
@@ -110,7 +120,8 @@ final class TopBar: NSView {
         allTabs.frame = NSRect(x: w * 3, y: 0, width: w, height: c)
 
         let stripX = navGlass.frame.maxX + 8
-        strip.frame = NSRect(x: stripX, y: y, width: max(0, actionsGlass.frame.minX - 8 - stripX), height: c)
+        let stripEnd = isPopup ? bounds.width - Self.margin : actionsGlass.frame.minX - 8
+        strip.frame = NSRect(x: stripX, y: y, width: max(0, stripEnd - stripX), height: c)
     }
 
     /// Where the Downloads button is, in the bar's own coordinates: what a
