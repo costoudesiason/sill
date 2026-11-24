@@ -136,6 +136,7 @@ final class TabStripView: NSView {
             leaving.forEach { $0.removeFromSuperview() }
             fresh.forEach { $0.layoutWidth = nil }
         })
+        placeBackdrop(animated: true, frames: frames)
     }
 
     func refresh(_ tab: Tab) {
@@ -169,31 +170,86 @@ final class TabStripView: NSView {
     }
 
     private func placeBackdrop(animated: Bool, frames: [ObjectIdentifier: NSRect]? = nil) {
-        guard let pair,
-              let a = items.first(where: { $0.tab === pair.0 }), let b = items.first(where: { $0.tab === pair.1 }),
-              let ia = items.firstIndex(of: a), let ib = items.firstIndex(of: b), abs(ia - ib) == 1 else {
+        let paired = pairedItems()
+        // The pair's capsule is the highlight of both its tabs: neither draws
+        // a fill of its own, hovered or not, which at the tab's full height
+        // showed the thinner capsule's edge through it.
+        for item in items { item.isPaired = paired.map { item === $0.0 || item === $0.1 } ?? false }
+        guard let (a, b) = paired else {
+            stopFollowing()
             if !pairBackdrop.isHidden { pairBackdrop.isHidden = true }
             return
         }
+        let wasHidden = pairBackdrop.isHidden
+        // While either tab is moving (a tab opened or closed beside them, a
+        // reorder, a resize of the row) the capsule follows where they are
+        // on screen, frame by frame, until they stop: its shape, cut where the
+        // front tab is, can't be animated between two cuts that differ.
+        if animated, animates, !wasHidden {
+            followFrom = CACurrentMediaTime()
+            followUntil = followFrom + Self.reflow + 0.05
+            if backdropLink == nil {
+                let link = displayLink(target: self, selector: #selector(followBackdrop))
+                link.add(to: .main, forMode: .common)
+                backdropLink = link
+            }
+            followBackdrop()
+            return
+        }
+        guard backdropLink == nil else { return }   // already following; it reads the latest state
         let frames = frames ?? targetFrames()
         guard let fa = frames[ObjectIdentifier(a)], let fb = frames[ObjectIdentifier(b)] else { return }
-        // The two tabs' span, with the one in front cut out of it: its glass
-        // is see-through, and the capsule's edge under it showed as an outline.
-        // A tad thinner than the tabs all round, so the front tab's glass
-        // stands a little proud of it, concentric.
+        shapeBackdrop(a: a, fa: fa, b: b, fb: fb)
+    }
+
+    /// The pair's two tiles, if they sit side by side.
+    private func pairedItems() -> (TabItemView, TabItemView)? {
+        guard let pair,
+              let a = items.first(where: { $0.tab === pair.0 }), let b = items.first(where: { $0.tab === pair.1 }),
+              let ia = items.firstIndex(of: a), let ib = items.firstIndex(of: b), abs(ia - ib) == 1 else { return nil }
+        return (a, b)
+    }
+
+    private func isMoving(_ item: TabItemView) -> Bool {
+        !(item.layer?.animationKeys() ?? []).isEmpty
+    }
+
+    private var backdropLink: CADisplayLink?
+    private var followFrom: CFTimeInterval = 0
+    private var followUntil: CFTimeInterval = 0
+
+    @objc private func followBackdrop() {
+        guard let (a, b) = pairedItems(), dragged == nil else { return stopFollowing() }
+        let fa = a.layer?.presentation()?.frame ?? a.frame
+        let fb = b.layer?.presentation()?.frame ?? b.frame
+        shapeBackdrop(a: a, fa: NSRect(x: fa.minX, y: a.frame.minY, width: fa.width, height: a.frame.height),
+                      b: b, fb: NSRect(x: fb.minX, y: b.frame.minY, width: fb.width, height: b.frame.height))
+        // Done once they've stopped (given a frame or two for a move just
+        // begun to show), and in any case after the row's animation.
+        let now = CACurrentMediaTime()
+        let still = !isMoving(a) && !isMoving(b)
+        if now > followUntil || (still && now > followFrom + 0.04) {
+            stopFollowing()
+            placeBackdrop(animated: false)   // exactly where they settled
+        }
+    }
+
+    private func stopFollowing() {
+        backdropLink?.invalidate()
+        backdropLink = nil
+    }
+
+    /// The two tabs' span, a tad thinner than them all round, so the front
+    /// tab's glass stands a little proud of it, concentric; and cut where
+    /// that tab is, since its glass is see-through.
+    private func shapeBackdrop(a: TabItemView, fa: NSRect, b: TabItemView, fb: NSRect) {
         let target = fa.union(fb).insetBy(dx: 3, dy: 3)
         let front = a.isFront ? fa : b.isFront ? fb : nil
         let hole = front.map { $0.offsetBy(dx: -target.minX, dy: -target.minY) }
         let backdrop = pairBackdrop as! PairBackdrop
-        let wasHidden = backdrop.isHidden
         backdrop.isHidden = false
-        if animated && animates && !wasHidden {
-            Motion.animate(Self.reflow) { backdrop.animator().frame = target }
-            backdrop.shape(size: target.size, hole: hole, duration: Motion.reduced ? 0 : Self.reflow)
-        } else {
-            Motion.still { backdrop.frame = target }
-            backdrop.shape(size: target.size, hole: hole, duration: 0)
-        }
+        Motion.still { backdrop.frame = target }
+        backdrop.shape(size: target.size, hole: hole)
     }
 
     func prefsChanged() {
@@ -381,18 +437,9 @@ final class TabItemView: NSView {
 
     /// Only for a tab that comes to the front: a glass view takes some
     /// 0.4 ms to make, and a restored window of tabs made one for each.
-    private static let frontTint = NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            ? NSColor(white: 1, alpha: 0.12) : NSColor(white: 1, alpha: 0.7)
-    }
-
     private func makeGlass() -> NSGlassEffectView {
         let made = NSGlassEffectView()
         made.effectIsInteractive = true
-        // Clear glass bends what's just outside it into its rim: in a split,
-        // the pair's capsule showed through as a ring. Tinted, the tab in
-        // front reads as one solid pill, as Safari's does.
-        made.tintColor = Self.frontTint
         addSubview(made, positioned: .below, relativeTo: nil)
         glass = made
         return made
@@ -559,7 +606,6 @@ final class TabItemView: NSView {
         guard let layer else { return }
         layer.cornerRadius = bounds.height / 2
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             let color: NSColor
             if isFront {
                 color = .clear   // the glass is the selection
@@ -804,26 +850,12 @@ private final class PairBackdrop: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     /// The tab in front's place, in the backdrop's own coordinates; nil when neither is.
-    func shape(size: NSSize, hole: NSRect?, duration: TimeInterval) {
-        let old = fill.path
-        // Only a change of size travels, with the tabs; the cut moving to
-        // the other tab is a change of selection, and that's instant.
-        let resized = size != self.size
+    func shape(size: NSSize, hole: NSRect?) {
+        guard size != self.size || hole != self.hole else { return }
         self.size = size
         self.hole = hole
-        let path = Self.path(size: size, hole: hole)
         fill.frame = NSRect(origin: .zero, size: size)
-        fill.path = path
-        if duration > 0, resized, let old {
-            let move = CABasicAnimation(keyPath: "path")
-            move.fromValue = fill.presentation()?.path ?? old
-            move.toValue = path
-            move.duration = duration
-            move.timingFunction = Motion.curve
-            fill.add(move, forKey: "path")
-        } else {
-            fill.removeAnimation(forKey: "path")
-        }
+        fill.path = Self.path(size: size, hole: hole)
     }
 
     private static func path(size: NSSize, hole: NSRect?) -> CGPath {

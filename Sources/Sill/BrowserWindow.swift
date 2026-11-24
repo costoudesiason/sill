@@ -606,7 +606,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         let tab = Tab(url: nil, isPrivate: isPrivate)
         tab.host = self
         tab.opener = opener
-        tabs.insert(tab, at: min(index ?? tabs.count, tabs.count))
+        var index = min(index ?? tabs.count, tabs.count)
+        // Never between the two halves of a split: a link from the left one
+        // opens after the pair, which stays together.
+        if let split, let left = split.left, let right = split.right,
+           let l = tabs.firstIndex(where: { $0 === left }), let r = tabs.firstIndex(where: { $0 === right }),
+           r == l + 1, index == r {
+            index = r + 1
+        }
+        tabs.insert(tab, at: index)
         if let popupView {
             tab.adopt(popupView, popup: true)
         } else if let configuration {
@@ -781,7 +789,26 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         guard let from = tabs.firstIndex(where: { $0 === tab }) else { return }
         tabs.remove(at: from)
         tabs.insert(tab, at: min(index, tabs.count))
+        if keepPairTogether(moved: tab) { strip.sync(animated: true) }
         changed()
+    }
+
+    /// The two halves of a split sit side by side in the row, left then
+    /// right. One dragged away brings the other along; a tab dropped between
+    /// them ends up after the pair. Whether anything had to move.
+    @discardableResult
+    private func keepPairTogether(moved: Tab?) -> Bool {
+        guard let split, let left = split.left, let right = split.right,
+              let l = tabs.firstIndex(where: { $0 === left }), let r = tabs.firstIndex(where: { $0 === right }),
+              r != l + 1 else { return false }
+        if moved === right {
+            tabs.remove(at: l)
+            tabs.insert(left, at: tabs.firstIndex(where: { $0 === right }) ?? r)
+        } else {
+            tabs.remove(at: r)
+            tabs.insert(right, at: (tabs.firstIndex(where: { $0 === left }) ?? l) + 1)
+        }
+        return true
     }
 
     func navigate(to url: URL, newTab: Bool, typed: Bool) {
