@@ -511,6 +511,21 @@ enum PageScripts {
       const send = window.__sillPost;
       const post = (m) => { try { if (send) send(JSON.stringify(m)); else webkit.messageHandlers.sill.postMessage(m); } catch (_) {} };
 
+      // On Chromium: no background ("conditional") passkey prompt. Chromium
+      // answers it with a bubble of its own over sign-in boxes ("Use Passkey
+      // from another device") that covers Sill's Passwords menu and can't
+      // finish in Sill. Sites asking for it are told it isn't there.
+      if (send && window.PublicKeyCredential) {
+        try {
+          Object.defineProperty(PublicKeyCredential, 'isConditionalMediationAvailable', { value: async () => false, configurable: true });
+          const get = navigator.credentials.get.bind(navigator.credentials);
+          navigator.credentials.get = function (options) {
+            if (options && options.mediation === 'conditional') return Promise.reject(new DOMException('Not supported', 'NotSupportedError'));
+            return get(options);
+          };
+        } catch (_) {}
+      }
+
       // Links under the pointer.
       let hovered = null;
       // While the page scrolls, links pass under a still pointer many times
@@ -660,24 +675,27 @@ enum PageScripts {
       };
       // A sign-in being sent: the name and password typed, for Sill to offer
       // to keep (it asks only once the sign-in has gone through). Only what
-      // the person did (trusted events); once a page. A name asked for on a
-      // step before the password's is remembered for the step after.
-      let sent = false;
+      // the person did (trusted events). Sent again only with a different
+      // password (a second try after a wrong one). A name typed on a step
+      // before the password's (email, then password) is remembered as soon
+      // as it's left, for the step after.
+      let sentPassword = null;
+      const rememberUser = (u) => { try { if (u && u.value) sessionStorage.setItem('__sillUser', u.value); } catch (_) {} };
+      document.addEventListener('change', (e) => { if (e.isTrusted && isUser(e.target)) rememberUser(e.target); }, true);
       const signingIn = (root) => {
-        if (sent) return;
         const area = root && root.querySelectorAll ? root : document;
         const pw = [...area.querySelectorAll('input[type=password]')].find((i) => i.value && shown(i) && i.autocomplete !== 'one-time-code');
         if (!pw) {
-          const u = [...area.querySelectorAll('input')].find((i) => isUser(i) && i.value && shown(i));
-          if (u) try { sessionStorage.setItem('__sillUser', u.value); } catch (_) {}
+          rememberUser([...area.querySelectorAll('input')].find((i) => isUser(i) && i.value && shown(i)));
           return;
         }
+        if (pw.value === sentPassword) return;
         const inputs = [...scope(pw).querySelectorAll('input')].filter(shown);
         let user = '';
         for (let j = inputs.indexOf(pw) - 1; j >= 0; j--) if (textual(inputs[j]) && inputs[j].value) { user = inputs[j].value; break; }
         if (!user) { const u = inputs.find((i) => isUser(i) && i.value); if (u) user = u.value; }
         if (!user) try { user = sessionStorage.getItem('__sillUser') || ''; } catch (_) {}
-        sent = true;
+        sentPassword = pw.value;
         post({ t: 'credentials', user, password: pw.value });
       };
       document.addEventListener('submit', (e) => { if (e.isTrusted) signingIn(e.target); }, true);

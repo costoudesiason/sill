@@ -20,7 +20,13 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
         var keys: [String] = []
         var isOn = false
         var isEnabled = true
+        /// A second, quieter line under the title (an account's site).
+        var subtitle: String? = nil
+        /// A picture in place of the symbol (a site's icon).
+        var image: NSImage? = nil
         var run: () -> Void
+
+        var height: CGFloat { subtitle == nil ? 34 : 46 }
     }
 
     enum Entry {
@@ -201,7 +207,7 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
     private var height: CGFloat {
         var h = Self.inset
         if title != nil, search.stringValue.isEmpty { h += Self.titleHeight }
-        h += CGFloat(rows.count) * Self.rowHeight + CGFloat(rules.count) * Self.ruleHeight
+        h += rows.reduce(0) { $0 + $1.item.height } + CGFloat(rules.count) * Self.ruleHeight
         return h + Self.inset + (searchable ? Self.searchHeight : 0)
     }
 
@@ -261,9 +267,9 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
                 y += Self.ruleHeight
             case .item(let item):
                 guard rowIndex < rows.count, rows[rowIndex].item.title == item.title else { continue }
-                rows[rowIndex].frame = NSRect(x: Self.inset, y: y, width: w - Self.inset * 2, height: Self.rowHeight)
+                rows[rowIndex].frame = NSRect(x: Self.inset, y: y, width: w - Self.inset * 2, height: item.height)
                 rowIndex += 1
-                y += Self.rowHeight
+                y += item.height
             }
         }
         y += Self.inset
@@ -370,6 +376,7 @@ final class GlassMenuRow: NSView {
 
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
+    private let detail = NSTextField(labelWithString: "")
     private var caps: [Keycap] = []
     private let check = NSImageView()
 
@@ -382,11 +389,22 @@ final class GlassMenuRow: NSView {
         wantsLayer = true
         layer?.cornerRadius = 13
         layer?.cornerCurve = .continuous
-        if let symbol = item.symbol {
+        if let image = item.image {
+            icon.image = image
+            icon.imageScaling = .scaleProportionallyUpOrDown
+            addSubview(icon)
+        } else if let symbol = item.symbol {
             icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
             icon.contentTintColor = Ink.current.primary
             addSubview(icon)
+        }
+        if let subtitle = item.subtitle {
+            detail.stringValue = subtitle
+            detail.font = .systemFont(ofSize: 12)
+            detail.textColor = Ink.current.secondary
+            detail.lineBreakMode = .byTruncatingTail
+            addSubview(detail)
         }
         label.stringValue = item.title
         label.font = .systemFont(ofSize: 14)
@@ -429,7 +447,10 @@ final class GlassMenuRow: NSView {
         super.layout()
         let h = bounds.height
         var x: CGFloat = 10
-        if item.symbol != nil {
+        if item.image != nil {
+            icon.frame = NSRect(x: x, y: (h - 20) / 2, width: 20, height: 20)
+            x += 30
+        } else if item.symbol != nil {
             icon.frame = NSRect(x: x, y: (h - 18) / 2, width: 18, height: 18)
             x += 30
         }
@@ -443,6 +464,13 @@ final class GlassMenuRow: NSView {
             right -= 22
         }
         let labelHeight = ceil(label.intrinsicContentSize.height)
-        label.frame = NSRect(x: x, y: (h - labelHeight) / 2, width: max(0, right - 8 - x), height: labelHeight)
+        if item.subtitle != nil {
+            let detailHeight = ceil(detail.intrinsicContentSize.height)
+            let top = (h - labelHeight - detailHeight - 1) / 2
+            label.frame = NSRect(x: x, y: top, width: max(0, right - 8 - x), height: labelHeight)
+            detail.frame = NSRect(x: x, y: top + labelHeight + 1, width: max(0, right - 8 - x), height: detailHeight)
+        } else {
+            label.frame = NSRect(x: x, y: (h - labelHeight) / 2, width: max(0, right - 8 - x), height: labelHeight)
+        }
     }
 }

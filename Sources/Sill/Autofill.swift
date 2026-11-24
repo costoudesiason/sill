@@ -18,19 +18,23 @@ enum Autofill {
         Task {
             let saved = await SavedPasswords.logins(for: host)
             guard !saved.isEmpty else { return offerApple(for: field, in: tab, webView: webView, top: top) }
-            let menu = NSMenu()
-            menu.autoenablesItems = false
-            menu.addItem(header("Passwords"))
-            for login in saved.prefix(8) {
-                menu.addItem(item(login.user.isEmpty ? "(no name)" : login.user, subtitle: Domains.bare(login.host), symbol: "key.fill") {
+            guard tab.webView === webView, let window = webView.window, window.isKeyWindow else { return }
+            // Sill's glass menu, under the box: each account, its site below it.
+            let icon = tab.favicon
+            let entries: [GlassMenu.Entry] = saved.prefix(8).map { login in
+                .item(.init(title: login.user.isEmpty ? "(no name)" : login.user, symbol: "key.fill",
+                            subtitle: Domains.bare(login.host), image: icon) {
                     Task {
                         guard let password = await SavedPasswords.password(for: login) else { return }
                         fill(user: login.user, password: password, in: webView)
                     }
                 })
             }
-            guard tab.webView === webView, webView.window?.isKeyWindow == true else { return }
-            show(menu, under: field, in: webView, top: top)
+            let zoom = webView.pageZoom * webView.magnification
+            var point = NSPoint(x: field.rect.minX * zoom, y: top + field.rect.maxY * zoom + 6)
+            if !webView.isFlipped { point.y = webView.bounds.height - point.y }
+            GlassMenu(title: "Passwords", entries: entries, searchable: false)
+                .show(in: window, at: webView.convert(point, to: nil), from: webView)
         }
     }
 

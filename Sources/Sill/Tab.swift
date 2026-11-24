@@ -27,6 +27,8 @@ protocol TabHost: AnyObject {
     func loadedUnseen(_ tab: Tab)
     /// Its page went full screen (a video), or came back.
     func pageFullScreen(_ tab: Tab, _ on: Bool)
+    /// A sign-in went through: offer to keep its password (or update it).
+    func offerToSavePassword(for tab: Tab, host: String, user: String, password: String, update: Bool)
 }
 
 /// One page and its history. Its web view is made the first time it is
@@ -517,17 +519,21 @@ extension Tab {
     /// it went through: the page moved on, or the password box went away.
     func signedIn(user: String, password: String) {
         guard !isPrivate, let url = webView?.url, let host = url.host(), url.scheme == "https" || Self.isLocal(host) else { return }
+        guard !SavedPasswords.never(for: host) else { return }
         pendingSignIn = (host, user, password, Date())
-        // A sign-in that doesn't load a new page: is the password box still there?
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-            guard let self, let pending = self.pendingSignIn, pending.host == host else { return }
-            self.webView?.evaluateJavaScript(
-                "[...document.querySelectorAll('input[type=password]')].some(i => i.value && i.getBoundingClientRect().width > 0)",
-                completion: { [weak self] value, _ in
-                    MainActor.assumeIsolated {
-                        if (value as? Bool) == false { self?.offerToKeepSignIn() }
-                    }
-                })
+        // A sign-in that doesn't load a new page: is the password box still
+        // there? Asked twice, for sites that take a moment to move on.
+        for delay in [2.0, 5.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, let pending = self.pendingSignIn, pending.host == host, pending.password == password else { return }
+                self.webView?.evaluateJavaScript(
+                    "[...document.querySelectorAll('input[type=password]')].some(i => i.value && i.getBoundingClientRect().width > 0)",
+                    completion: { [weak self] value, _ in
+                        MainActor.assumeIsolated {
+                            if (value as? Bool) == false { self?.offerToKeepSignIn() }
+                        }
+                    })
+            }
         }
     }
 
@@ -546,13 +552,8 @@ extension Tab {
         Task { @MainActor in
             let state = await SavedPasswords.state(pending.password, user: pending.user, host: pending.host)
             guard state != .same else { return }
-            let site = Domains.bare(pending.host)
-            let update = state == .updated
-            ask(SiteAsk(symbol: "key.fill", title: update ? "Update your password for \(site)?" : "Save your password for \(site)?",
-                        detail: pending.user.isEmpty ? nil : pending.user, choices: ["Not Now", update ? "Update" : "Save"]) { choice, picked in
-                guard picked, choice == 1 else { return }
-                Task { await SavedPasswords.save(pending.password, user: pending.user, host: pending.host) }
-            })
+            host?.offerToSavePassword(for: self, host: pending.host, user: pending.user, password: pending.password,
+                                      update: state == .updated)
         }
     }
 
