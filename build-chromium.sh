@@ -90,7 +90,10 @@ rm -f build/chromium-helper
 # then python3 -m castlabs_evs.account signup), so it runs only when asked for. On macOS
 # it has to come before code signing: it adds files that the code signature then seals.
 if [ "${SILL_EVS_SIGN:-}" = "1" ]; then
-  python3 -m castlabs_evs.vmp sign-pkg "$APP" || { echo "EVS signing failed (castlabs-evs installed and signed in?)"; exit 1; }
+  # sign-pkg only knows Electron's framework, so the binary and the place Chromium reads
+  # its signature from (the framework's Resources) are named here.
+  EVS_FW="$APP/Contents/Frameworks/Chromium Embedded Framework.framework"
+  python3 -m castlabs_evs.vmp sign "$EVS_FW/Chromium Embedded Framework" "$EVS_FW/Resources/Chromium Embedded Framework.sig" || { echo "EVS signing failed (castlabs-evs installed and signed in?)"; exit 1; }
 fi
 
 IDENTITY="${SILL_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | grep -m1 -o '"Developer ID Application[^"]*"' | tr -d '"' || true)}"
