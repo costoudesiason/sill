@@ -175,7 +175,9 @@ final class TabStripView: NSView {
         }
         let frames = frames ?? targetFrames()
         guard let fa = frames[ObjectIdentifier(a)], let fb = frames[ObjectIdentifier(b)] else { return }
-        let target = fa.union(fb).insetBy(dx: -2, dy: 0)
+        // Tucked inside the two tabs, so the glass of the one in front is
+        // the larger and covers its end; wider than them, it showed past it.
+        let target = fa.union(fb).insetBy(dx: 2, dy: 2)
         let wasHidden = pairBackdrop.isHidden
         pairBackdrop.isHidden = false
         if animated && animates && !wasHidden {

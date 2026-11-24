@@ -20,25 +20,6 @@
       "layers": [
         {
           "glass": true,
-          "image-name": "sill.svg",
-          "name": "sill"
-        }
-      ],
-      "shadow": {
-        "kind": "neutral",
-        "opacity": 0.4
-      },
-      "specular": true,
-      "translucency": {
-        "enabled": true,
-        "value": 0.75
-      },
-      "blur-material": 0.3
-    },
-    {
-      "layers": [
-        {
-          "glass": true,
           "image-name": "pane-left.svg",
           "name": "pane-left"
         },
