@@ -79,8 +79,9 @@ cd ~/sill && ./build-chromium.sh
   allow the Widevine component.
 - Netflix, Disney+, Prime Video and Max also require the app to be signed through
   Google's Verified Media Path. castLabs' EVS service does this for free
-  (`pip install castlabs-evs`, then `python3 -m castlabs_evs.vmp sign-pkg <app>`), after
-  Sill's own code signing.
+  (`pip install castlabs-evs`, then `python3 -m castlabs_evs.vmp sign <framework binary> <signature>`). On
+  macOS this has to run before Sill's own code signing. `SILL_EVS_SIGN=1
+  ./build-chromium.sh` does it at the right point; it needs a castLabs account.
 
 ## Check it worked
 

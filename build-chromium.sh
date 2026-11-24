@@ -5,6 +5,41 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 CEF="$HOME/sill-chromium/.cef/cef"
+WRAPPER="$HOME/sill-chromium/.cef/libcef_dll_wrapper.a"
+# The engine, when it isn't there yet: Sill's own CEF build with every video
+# format (ENGINE.md), kept as a release of this repository, and the small C++
+# wrapper Sill links against, built from it.
+ENGINE_TAG="engine-158.0.3-codecs"
+ENGINE_FILE="cef_binary_158.0.3+g8c29be2+chromium-158.0.8127.18_macosarm64_minimal.tar.bz2"
+ENGINE_SHA256="7a18cb9699e14a6f25a65d205eb8e290cdb035e9cb0a5910834100f27bc2d9a8"
+if [ ! -d "$CEF/Release/Chromium Embedded Framework.framework" ]; then
+  echo "Fetching the engine ($ENGINE_TAG)"
+  TMP="$(mktemp -d)"
+  if ! curl -fL --retry 3 ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} -o "$TMP/$ENGINE_FILE" \
+      "https://github.com/costoudesiason/sill/releases/download/$ENGINE_TAG/${ENGINE_FILE//+/%2B}" \
+     && ! { command -v gh >/dev/null && gh release download "$ENGINE_TAG" -R costoudesiason/sill -p "$ENGINE_FILE" -D "$TMP" --clobber; }; then
+    rm -rf "$TMP"; echo "couldn't download $ENGINE_FILE (release $ENGINE_TAG)"; exit 1
+  fi
+  if [ "$(shasum -a 256 "$TMP/$ENGINE_FILE" | cut -d' ' -f1)" != "$ENGINE_SHA256" ]; then
+    rm -rf "$TMP"; echo "$ENGINE_FILE isn't the engine this build expects (checksum differs)"; exit 1
+  fi
+  # Unpacked beside its place and moved in whole, so a half-unpacked engine is never taken for one.
+  rm -rf "$CEF" "$CEF.part" "$WRAPPER"
+  mkdir -p "$CEF.part"
+  if ! tar -xjf "$TMP/$ENGINE_FILE" -C "$CEF.part" --strip-components=1; then
+    rm -rf "$TMP" "$CEF.part"; echo "couldn't unpack $ENGINE_FILE"; exit 1
+  fi
+  mv "$CEF.part" "$CEF"
+  rm -rf "$TMP"
+fi
+if [ ! -f "$WRAPPER" ]; then
+  command -v cmake >/dev/null && command -v ninja >/dev/null || { echo "cmake and ninja are needed to build libcef_dll_wrapper (brew install cmake ninja)"; exit 1; }
+  mkdir -p "$CEF/build"
+  if ! (cd "$CEF/build" && cmake -G Ninja -DPROJECT_ARCH=arm64 -DCMAKE_BUILD_TYPE=Release .. && ninja libcef_dll_wrapper) > "$CEF/build/wrapper.log" 2>&1; then
+    tail -20 "$CEF/build/wrapper.log"; echo "libcef_dll_wrapper build failed"; exit 1
+  fi
+  cp "$CEF/build/libcef_dll_wrapper/libcef_dll_wrapper.a" "$WRAPPER"
+fi
 if ! swift build -c release --arch arm64 > build.log 2>&1; then grep -E "error" build.log | head -20; echo "build failed"; exit 1; fi
 BIN="$(swift build -c release --arch arm64 --show-bin-path)/Sill"
 APP="build/Sill Chromium.app"
@@ -33,7 +68,7 @@ if [ -n "$UBOL" ]; then
   cp -Rc "$UBOL" "$APP/Contents/Resources/Extensions/uBlock Origin Lite"
 fi
 clang++ -x objective-c++ -arch arm64 -mmacosx-version-min=26.0 -std=c++20 -O2 -fobjc-arc -fno-rtti -fno-exceptions \
-  -I"$CEF" Tools/chromium-helper.mm -x none "$HOME/sill-chromium/.cef/libcef_dll_wrapper.a" -framework Cocoa -Wl,-dead_strip -o build/chromium-helper
+  -I"$CEF" Tools/chromium-helper.mm -x none "$WRAPPER" -framework Cocoa -Wl,-dead_strip -o build/chromium-helper
 for kind in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
   H="Sill Helper$kind"
   HA="$APP/Contents/Frameworks/$H.app"
@@ -50,6 +85,17 @@ for kind in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
 P
 done
 rm -f build/chromium-helper
+# Google's Verified Media Path signature, which Netflix, Disney+, Prime Video and Max ask
+# for. castLabs' EVS makes it and needs an account with them (pip install castlabs-evs,
+# then python3 -m castlabs_evs.account signup), so it runs only when asked for. On macOS
+# it has to come before code signing: it adds files that the code signature then seals.
+if [ "${SILL_EVS_SIGN:-}" = "1" ]; then
+  # sign-pkg only knows Electron's framework, so the binary and the place Chromium reads
+  # its signature from (the framework's Resources) are named here.
+  EVS_FW="$APP/Contents/Frameworks/Chromium Embedded Framework.framework"
+  python3 -m castlabs_evs.vmp sign "$EVS_FW/Chromium Embedded Framework" "$EVS_FW/Resources/Chromium Embedded Framework.sig" || { echo "EVS signing failed (castlabs-evs installed and signed in? castLabs signs builds other than their Electron only for accounts they have approved)"; exit 1; }
+fi
+
 # Signed as the same app from build to build (Developer ID if there is one),
 # inside out: the engine, its helpers, the agent tool, then the app. macOS
 # then knows it across builds: the Keychain's "always allow" holds, and
