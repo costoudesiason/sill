@@ -81,10 +81,6 @@ for kind in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
 P
 done
 rm -f build/chromium-helper
-# Signed as the same app from build to build (Developer ID if there is one),
-# inside out: the engine, its helpers, the agent tool, then the app. macOS
-# then knows it across builds: the Keychain's "always allow" holds, and
-# saved passwords open without asking again.
 # Google's Verified Media Path signature, which Netflix, Disney+, Prime Video and Max ask
 # for. castLabs' EVS makes it and needs an account with them (pip install castlabs-evs,
 # then python3 -m castlabs_evs.account signup), so it runs only when asked for. On macOS
@@ -93,9 +89,13 @@ if [ "${SILL_EVS_SIGN:-}" = "1" ]; then
   # sign-pkg only knows Electron's framework, so the binary and the place Chromium reads
   # its signature from (the framework's Resources) are named here.
   EVS_FW="$APP/Contents/Frameworks/Chromium Embedded Framework.framework"
-  python3 -m castlabs_evs.vmp sign "$EVS_FW/Chromium Embedded Framework" "$EVS_FW/Resources/Chromium Embedded Framework.sig" || { echo "EVS signing failed (castlabs-evs installed and signed in?)"; exit 1; }
+  python3 -m castlabs_evs.vmp sign "$EVS_FW/Chromium Embedded Framework" "$EVS_FW/Resources/Chromium Embedded Framework.sig" || { echo "EVS signing failed (castlabs-evs installed and signed in? castLabs signs builds other than their Electron only for accounts they have approved)"; exit 1; }
 fi
 
+# Signed as the same app from build to build (Developer ID if there is one),
+# inside out: the engine, its helpers, the agent tool, then the app. macOS
+# then knows it across builds: the Keychain's "always allow" holds, and
+# saved passwords open without asking again.
 IDENTITY="${SILL_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | grep -m1 -o '"Developer ID Application[^"]*"' | tr -d '"' || true)}"
 [ -z "$IDENTITY" ] && IDENTITY="-"
 codesign --force -s "$IDENTITY" "$APP/Contents/Frameworks/Chromium Embedded Framework.framework" >/dev/null 2>&1
