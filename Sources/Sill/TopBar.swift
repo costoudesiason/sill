@@ -147,15 +147,63 @@ final class BarButton: NSButton {
         contentTintColor = .labelColor
         setAccessibilityLabel(label)
         setButtonType(.momentaryChange)
+        wantsLayer = true
+        hover.opacity = 0
+        hover.actions = ["bounds": NSNull(), "position": NSNull(), "cornerRadius": NSNull()]
+        layer?.insertSublayer(hover, at: 0)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Under the pointer: a soft pill, inset evenly from the capsule's edge
+    /// so its ends follow the capsule's curve.
+    private let hover = CALayer()
+    private var tracking: NSTrackingArea?
+
+    override func layout() {
+        super.layout()
+        let inset: CGFloat = 3
+        let rect = bounds.insetBy(dx: inset, dy: inset)
+        hover.frame = rect
+        hover.cornerRadius = rect.height / 2
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            hover.backgroundColor = NSColor.labelColor.withAlphaComponent(0.08).cgColor
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { showHover(isEnabled) }
+    override func mouseExited(with event: NSEvent) { showHover(false) }
+
+    private func showHover(_ on: Bool) {
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = hover.presentation()?.opacity ?? hover.opacity
+        animation.duration = on ? 0.12 : 0.2
+        hover.opacity = on ? 1 : 0
+        hover.add(animation, forKey: "opacity")
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsLayout = true
+    }
 
     override var mouseDownCanMoveWindow: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     /// Set on every tab switch and back/forward change: redrawn only when it changes.
     override var isEnabled: Bool {
-        didSet { if isEnabled != oldValue { contentTintColor = isEnabled ? .labelColor : .tertiaryLabelColor } }
+        didSet {
+            guard isEnabled != oldValue else { return }
+            contentTintColor = isEnabled ? .labelColor : .tertiaryLabelColor
+            if !isEnabled { hover.opacity = 0 }
+        }
     }
 }
 

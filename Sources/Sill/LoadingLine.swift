@@ -134,7 +134,11 @@ final class LoadingLine: NSView {
                 alphaValue = 1
                 if jump { return glide(to: reached, quick: true) }
             }
-            guard fraction > reached || reached == 0 else { return }
+            // Chromium reports progress in dozens of small steps, not WebKit's
+            // few big ones: re-aiming at each restarted the glide and the line
+            // stuttered. It re-aims only when the load is well ahead of where
+            // the line is already gliding to; the creep covers the rest.
+            guard reached == 0 || fraction >= reached + 0.15 else { return }
             reached = max(reached, fraction)
             glide(to: reached)
         } else {
