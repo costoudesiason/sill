@@ -85,6 +85,14 @@ rm -f build/chromium-helper
 # inside out: the engine, its helpers, the agent tool, then the app. macOS
 # then knows it across builds: the Keychain's "always allow" holds, and
 # saved passwords open without asking again.
+# Google's Verified Media Path signature, which Netflix, Disney+, Prime Video and Max ask
+# for. castLabs' EVS makes it and needs an account with them (pip install castlabs-evs,
+# then python3 -m castlabs_evs.account signup), so it runs only when asked for. On macOS
+# it has to come before code signing: it adds files that the code signature then seals.
+if [ "${SILL_EVS_SIGN:-}" = "1" ]; then
+  python3 -m castlabs_evs.vmp sign-pkg "$APP" || { echo "EVS signing failed (castlabs-evs installed and signed in?)"; exit 1; }
+fi
+
 IDENTITY="${SILL_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | grep -m1 -o '"Developer ID Application[^"]*"' | tr -d '"' || true)}"
 [ -z "$IDENTITY" ] && IDENTITY="-"
 codesign --force -s "$IDENTITY" "$APP/Contents/Frameworks/Chromium Embedded Framework.framework" >/dev/null 2>&1
