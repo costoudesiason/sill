@@ -200,7 +200,14 @@ func runGoal(_ sill: Sill, _ args: [String: Any]) throws -> String {
         thinking += Date().timeIntervalSince(t0)
         let op = answers["operation"]?["choice"] as? String ?? "BLOCKED"
         let took = { Int(Date().timeIntervalSince(t0) * 1000) }
-        if op == "DONE" { outcome = "Done: the fast model sees every requirement met. Check the page below before you answer."; break }
+        if op == "DONE" {
+            // Checked, not taken on trust: every value it was given should show on the page (in a field or its text).
+            let shown = compactSnapshot(snapshot).lowercased()
+            let missing = values.filter { !shown.contains($0.value.lowercased()) }.map { "“\($0.value)”" }
+            outcome = missing.isEmpty ? "Done: the fast model sees every requirement met, and every value given shows on the page. Check the page below before you answer."
+                                      : "The fast model says done, but \(missing.joined(separator: ", ")) doesn't show on the page: check below, and finish with page_do."
+            break
+        }
         if op == "BLOCKED" { outcome = "The fast model can't make progress from here: look at the page below and carry on yourself."; break }
 
         var did = "", kind = op.lowercased(), typed: String?
@@ -254,7 +261,7 @@ func runGoal(_ sill: Sill, _ args: [String: Any]) throws -> String {
         let changed = after != before
         history.append(["action": did, "kind": kind, "text": typed as Any, "page_changed": changed].compactMapValues { $0 is NSNull ? nil : $0 })
         lines.append("\(lines.count + 1). \(did) (\(took()) ms)")
-        still = changed || op == "WAIT" ? 0 : still + 1
+        still = changed || op == "WAIT" || op == "TYPE_TEXT" ? 0 : still + 1
         if failures >= 4 { outcome = "Four steps in a row failed: look at the page below and carry on yourself."; break }
         if still >= 3 { outcome = "Three steps changed nothing on the page: it's stuck. Look at the page below and carry on yourself."; break }
     }

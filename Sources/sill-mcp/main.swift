@@ -680,7 +680,8 @@ Act on the page: any number of steps in one call, run in order, each waiting onl
 match flagged; add "in": "December 2026" (a heading, panel, dialog or month) to say which of several. Steps:
 {"click": T} (also "double", "button": "right", "hold": seconds, "modifiers": ["Meta"]); {"click": [x, y]} a point \
 · {"type": T, "text": "…", "submit": true, "clear": false} · {"press": "Enter" | "Meta+A" | …, "on": T} \
-· {"select": T, "value": "…"} · {"hover": T} · {"scroll": 600, "on": T} (or {"scroll": T} into view) \
+· {"type": T, "text": "Lon", "pick": "London, United Kingdom"} types and chooses the suggestion · \
+{"date": "2026-12-26", "on": T} opens a date field and picks that day in its calendar · {"select": T, "value": "…"} · {"hover": T} · {"scroll": 600, "on": T} (or {"scroll": T} into view) \
 · {"drag": T or [x, y], "to": T or [x, y]} or {"drag": T, "by": [[dx, dy], …]} · {"touch": T, "kind": "tap" | "longpress" | "swipe", \
 "dx": 0, "dy": -300} · {"wait": "text"} (words to appear), {"wait": "settled"} (the page held still: results that \
 arrive in parts), {"until_gone": "Verifying…"} · {"navigate": "url" | "back" | "forward" | "reload"} · {"dialog": true, \
@@ -913,6 +914,12 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 let reads = r["value"] as? String ?? ""
                 did = (r["followed"] != nil ? "typed into the field that opened, " : "typed into ") + "\(r["ref"] as? String ?? "") → “\(clip(reads.isEmpty && a["submit"] as? Bool == true ? a["text"] as? String ?? "" : reads, 60))”"
                     + (a["submit"] as? Bool == true ? " and pressed Enter" : "")
+                // Type and choose in one gesture: the suggestion it should become, waited for and clicked.
+                if let pick = step["pick"] as? String, !pick.isEmpty {
+                    let c = try sill.run("page.click", tab.merging(["text": pick, "wait": 4]) { $1 }) as? [String: Any] ?? [:]
+                    if let missed = c["missed"] as? String { throw Failure(missed) }
+                    did += ", then chose “\(c["name"] as? String ?? pick)”"
+                }
             } else if let text = step["paste"] as? String {
                 // Pasted as a person pastes: lines become rows, tabs columns, in a sheet or a grid.
                 var html: String?
@@ -928,6 +935,19 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 _ = try sill.run("page.press", a)
                 let lines = text.split(separator: "\n").count
                 did = "pasted \(lines > 1 ? "\(lines) lines" : "“\(clip(text, 40))”")"
+            } else if let day = step["date"] as? String, let parts = Optional(day.split(separator: "-")), parts.count == 3,
+                      let y = Int(parts[0]), let m = Int(parts[1]), let d = Int(parts[2]), (1...12).contains(m) {
+                // A day in a calendar: by the date the page keeps on it, else by its month's heading.
+                if let on = step["on"] { _ = try sill.run("page.click", tab.merging(target(on)) { $1 }) }
+                let month = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][m - 1]
+                var picked: [String: Any]?
+                for scope in [day, "\(month) \(y)", month] {
+                    if let r = try? sill.run("page.click", tab.merging(["text": "\(d)", "in": scope, "wait": 2]) { $1 }) as? [String: Any], r["missed"] == nil {
+                        picked = r; break
+                    }
+                }
+                guard picked != nil else { throw Failure("No day \(d) of \(month) \(y) in view: move the calendar to that month (its Next button), then try again.") }
+                did = "chose \(d) \(month) \(y)"
             } else if let key = step["press"] as? String {
                 var a = tab.merging(["key": key]) { $1 }
                 if let on = step["on"] { a.merge(target(on)) { $1 } }
@@ -1069,6 +1089,17 @@ func webSearch(_ sill: Sill, _ args: [String: Any]) throws -> String {
         throw Failure("Missing \"query\".")
     }
     let count = max(1, min(20, args["count"] as? Int ?? 8))
+    // Half of the searches with site: or quotes came back empty: one more try without them before saying so.
+    let loose = query.replacingOccurrences(of: #"\bsite:\S+"#, with: "", options: .regularExpression)
+        .replacingOccurrences(of: "\"", with: "").trimmingCharacters(in: .whitespaces)
+    if let found = try? search(sill, query, count: count, engine: args["engine"] as? String) { return found }
+    if loose != query, !loose.isEmpty, let found = try? search(sill, loose, count: count, engine: args["engine"] as? String) {
+        return "(Nothing came back for “\(query)”; these are for “\(loose)”.)\n\n" + found
+    }
+    throw Failure("No results came back for “\(query)”. Try tabs_open on the site's own search, or other words.")
+}
+
+private func search(_ sill: Sill, _ query: String, count: Int, engine: String?) throws -> String {
     var allowed = CharacterSet.urlQueryAllowed
     allowed.remove(charactersIn: "&+=?#")
     let q = query.addingPercentEncoding(withAllowedCharacters: allowed) ?? query
@@ -1076,7 +1107,7 @@ func webSearch(_ sill: Sill, _ args: [String: Any]) throws -> String {
         ("Google", "https://www.google.com/search?q=\(q)&num=\(max(10, count))&hl=en", googleResults, "#search a h3, #captcha-form, #botstuff"),
         ("DuckDuckGo", "https://html.duckduckgo.com/html/?q=\(q)", duckResults, ".result, .no-results"),
     ]
-    if (args["engine"] as? String)?.lowercased() == "duckduckgo" { engines.reverse() }
+    if engine?.lowercased() == "duckduckgo" { engines.reverse() }
     for (name, url, script, ready) in engines {
         let found: [[String: Any]] = (try? inScratchTab(sill, url, ready: ready) { tab in
             let r = try sill.run("page.eval", ["tab": tab, "remember": false,
@@ -1091,7 +1122,7 @@ func webSearch(_ sill: Sill, _ args: [String: Any]) throws -> String {
         }
         return "\(name) results for “\(query)”:\n\n" + lines.joined(separator: "\n\n")
     }
-    throw Failure("No results came back for “\(query)”. Try tabs_open on a search page.")
+    throw Failure("none")
 }
 
 let readableText = """
