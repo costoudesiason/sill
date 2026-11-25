@@ -172,6 +172,7 @@ def main():
     ap.add_argument("--max-turns", type=int, default=150)
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--jev", action="store_true")
+    ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     ap.add_argument("--config-dir", default=os.environ.get("BENCH_CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude-normal")))
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--rejudge", default="", help="judge a saved run again (its bubench-<stamp>.json), with today's judge")
@@ -225,7 +226,7 @@ def main():
                 "--tools", "Read,Write,Edit,Glob",
                 "--allowedTools", "mcp__sill__*,Read,Write,Edit,Glob",
                 "--disallowedTools", ",".join(["WebFetch", "WebSearch", "Bash", "Task", "Agent"] + [f"mcp__sill__{d}" for d in bench.DENIED]),
-                "--disable-slash-commands", "--no-session-persistence", "--max-turns", str(args.max_turns)]
+                "--disable-slash-commands", "--no-session-persistence", "--max-turns", str(args.max_turns)] + (["--effort", args.effort] if args.effort else [])
         started = time.time()
         events, timed_out, err = bench.run_claude(argv, env, args.timeout, work)
         s = bench.summarize_agent(events, timed_out, err, started)

@@ -95,6 +95,7 @@ def main():
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--jev", action="store_true")
+    ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     ap.add_argument("--config-dir", default=os.environ.get("BENCH_CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude-normal")))
     args = ap.parse_args()
 
@@ -132,7 +133,7 @@ def main():
         argv = [binary, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose", "--model", args.model,
                 "--mcp-config", mcp_config, "--strict-mcp-config", "--tools", "", "--allowedTools", "mcp__sill__*",
                 "--disallowedTools", ",".join(["WebFetch", "WebSearch", "Bash", "Task", "Agent"] + [f"mcp__sill__{d}" for d in bench.DENIED]),
-                "--disable-slash-commands", "--no-session-persistence", "--max-turns", "80"]
+                "--disable-slash-commands", "--no-session-persistence", "--max-turns", "80"] + (["--effort", args.effort] if args.effort else [])
         started = time.time()
         events, timed_out, err = bench.run_claude(argv, env, args.timeout, work)
         s = bench.summarize_agent(events, timed_out, err, started)
