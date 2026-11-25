@@ -156,7 +156,26 @@ def discard_profile():
 # The benchmarks' sites are mostly American: the copy keeps US time (a date picked is the date meant).
 BENCH_TZ = os.environ.get("BENCH_TZ", "America/New_York")
 
+# If the copy dies mid-run (a crash), it's started again at once and the restart counted in the results:
+# the agents' next calls wait for it (sill-mcp waits up to 15 s) rather than all failing.
+RESTARTS = []
+_watching = threading.Event()
+
+def _watch_copy():
+    if _watching.is_set(): return
+    _watching.set()
+    def loop():
+        while _watching.is_set():
+            time.sleep(2)
+            if _watching.is_set() and not owner_of_socket():
+                RESTARTS.append(time.time())
+                print("warning: the bench copy of Sill died; starting it again", file=sys.stderr, flush=True)
+                try: start_copy()
+                except SystemExit: pass
+    threading.Thread(target=loop, daemon=True).start()
+
 def start_copy():
+    _watch_copy()
     prepare_copy()
     subprocess.run(["defaults", "write", DOMAIN, "agentControl", "-bool", "true"])
     subprocess.run(["defaults", "write", DOMAIN, "restoresTabs", "-bool", "false"])
@@ -168,6 +187,7 @@ def start_copy():
     raise SystemExit("Sill's bench copy didn't start")
 
 def stop_copy():
+    _watching.clear()
     pid = owner_of_socket()
     if pid and is_our_copy(pid):
         os.kill(pid, signal.SIGTERM)
@@ -474,6 +494,7 @@ def totals(rows):
         "mean_tool_calls": round(statistics.mean(r["tool_calls"] for r in rows), 1) if rows else None,
         "timeouts": sum("timeout" in r["errors"] for r in rows),
         "cost_usd": round(sum(r["cost_usd"] or 0 for r in rows), 3),
+        "copy_restarts": len(RESTARTS),
     }
 
 def write(path, args, version, source, skipped, rows):

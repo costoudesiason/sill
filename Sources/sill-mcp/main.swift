@@ -116,8 +116,19 @@ final class Sill {
     private var buffer = Data()
     private var nextID = 1
 
+    /// Once Sill has answered, a lost line means it's restarting (a crash, an update): wait for it, up to 15 s.
+    private var answeredBefore = false
+
     private func connect() throws {
         if fd >= 0 { return }
+        let deadline = Date().addingTimeInterval(answeredBefore ? 15 : 0)
+        while true {
+            do { try connectOnce(); answeredBefore = true; return }
+            catch { if Date() >= deadline { throw error }; Thread.sleep(forTimeInterval: 0.5) }
+        }
+    }
+
+    private func connectOnce() throws {
         let s = socket(AF_UNIX, SOCK_STREAM, 0)
         guard s >= 0 else { throw Failure("Couldn't make a socket.") }
         var address = sockaddr_un()

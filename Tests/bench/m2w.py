@@ -158,7 +158,7 @@ def main():
         with lock:
             rows.append(row)
             print(f"  [{t['level']:6}] {verdict:7} {row['seconds']:5.0f} s {row['tool_calls']:3} calls  {t['task'][:70]}  ({reason[:80]})", flush=True)
-            json.dump({"when": stamp, "git": bench.git_rev(), "model": args.model, "jev": args.jev, "judge_model": args.judge_model, "results": rows},
+            json.dump({"when": stamp, "git": bench.git_rev(), "model": args.model, "jev": args.jev, "copy_restarts": len(bench.RESTARTS), "judge_model": args.judge_model, "results": rows},
                       open(os.path.join(RESULTS, f"m2w-{stamp}.json"), "w"), indent=1)
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel) as pool:
@@ -173,6 +173,7 @@ def main():
         ok = sum(r["verdict"] == "SUCCESS" for r in rs)
         secs = sorted(r["seconds"] for r in rs)
         print(f"{level or 'all':6} {ok}/{len(rs)} ({ok / len(rs):.0%}) · median {secs[len(secs) // 2]:.0f} s · mean {sum(r['tool_calls'] for r in rs) / len(rs):.1f} calls")
+    if bench.RESTARTS: print(f"warning: the bench copy of Sill crashed and was restarted {len(bench.RESTARTS)} time(s) during this run")
     print(f"cost ${sum(r['cost_usd'] or 0 for r in rows):.2f} · results Tests/bench/results/m2w-{stamp}.json")
 
 

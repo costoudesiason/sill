@@ -253,7 +253,7 @@ def main():
             print(f"  {t['id']} {t['title'][:40]:40} score {sc if sc is None else round(sc, 2)}  {row['seconds']:6.0f} s  {row['tool_calls']:3} calls"
                   + (f"  [{'; '.join(row['errors'])}]" if row["errors"] else "") + (f"  judge: {row['error']}" if row.get("error") else ""), flush=True)
             with open(os.path.join(RESULTS, f"bubench-{stamp}.json"), "w") as fh:
-                json.dump({"when": stamp, "git": bench.git_rev(), "model": args.model, "jev": args.jev, "judge_model": args.judge_model,
+                json.dump({"when": stamp, "git": bench.git_rev(), "model": args.model, "jev": args.jev, "copy_restarts": len(bench.RESTARTS), "judge_model": args.judge_model,
                            "timeout": args.timeout, "results": rows}, fh, indent=1)
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel) as pool:
@@ -262,6 +262,7 @@ def main():
         if not args.keep:
             bench.stop_copy()
             if not args.keep_profile: bench.discard_profile()
+    if bench.RESTARTS: print(f"warning: the bench copy of Sill crashed and was restarted {len(bench.RESTARTS)} time(s) during this run")
     scored = [r["score"] for r in rows if r.get("score") is not None]
     if scored:
         print(f"\nmean score {sum(scored) / len(scored):.3f} over {len(scored)} tasks · median {sorted(r['seconds'] for r in rows)[len(rows) // 2]:.0f} s"
