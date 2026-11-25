@@ -64,8 +64,14 @@ private let weighty = try! NSRegularExpression(pattern:
     + #"delete|remove|erase|cancel|unsubscribe|subscribe|transfer|withdraw|deposit|book|reserve|donate|"#
     + #"sign up|agree|accept terms|submit|apply|invite|upgrade|renew|refund|close account)\b"#, options: [.caseInsensitive])
 
-private func isWeighty(_ text: String) -> Bool {
-    weighty.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+/// Choosing (a filter, a sort, an option, a tab) never commits; and words that only name things ("Best Buy",
+/// "Apply filters", "Sort order") don't make a choice weighty.
+private let harmless = try! NSRegularExpression(pattern: #"\b(filters?|sort|order by|show|refine|view)\b"#, options: [.caseInsensitive])
+
+private func isWeighty(role: String, label: String) -> Bool {
+    guard ["button", "link", "generic", "clickable", "menuitem"].contains(role) else { return false }
+    let r = NSRange(label.startIndex..., in: label)
+    return weighty.firstMatch(in: label, range: r) != nil && harmless.firstMatch(in: label, range: r) == nil
 }
 
 let goalTool = Tool(
@@ -134,7 +140,7 @@ func runGoal(_ sill: Sill, _ args: [String: Any]) throws -> String {
             text.append(line); size += line.count
         }
         var elements: [[String: Any]] = [], click: [String: Any] = [:], fill: [String: Any] = [:], choose: [String: Any] = [:]
-        var names: [String: String] = [:], roles: [String: String] = [:]
+        var names: [String: String] = [:], roles: [String: String] = [:], labels: [String: String] = [:]
         // Boxes that scroll on their own, and how much of what's in them is scrolled out of view.
         var scroll: [String: Any] = [:], hidden: [String: Int] = [:]
         for item in items where item["clipped"] != nil { hidden[item["clipped"] as? String ?? "", default: 0] += 1 }
@@ -168,6 +174,7 @@ func runGoal(_ sill: Sill, _ args: [String: Any]) throws -> String {
             element["operations"] = operations
             elements.append(element)
             names[ref] = "\(role) “\(clip(label, 70))”"
+            labels[ref] = item["name"] as? String ?? label
             roles[ref] = role
         }
         var operations: [String: String] = [
@@ -227,7 +234,7 @@ func runGoal(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 did = "scrolled inside \(name)"
             case "CLICK":
                 guard let ref = answers["click_target"]?["choice"] as? String, let name = names[ref] else { throw Failure("no target") }
-                if isWeighty(name) {
+                if isWeighty(role: roles[ref] ?? "", label: labels[ref] ?? name) {
                     outcome = "Next would be clicking \(name) (\(ref)), which may pay, send, post, delete or commit. Ask the user, then do it with page_do."
                     snapshot = try sill.run("page.snapshot", tab); throw Stop()
                 }
@@ -274,6 +281,12 @@ func runGoal(_ sill: Sill, _ args: [String: Any]) throws -> String {
         let changed = after != before
         if Trace.dir != nil { Trace.record(sill, tab: tab["tab"], action: "page_goal step: " + did) }
         history.append(["action": did, "kind": kind, "text": typed as Any, "page_changed": changed].compactMapValues { $0 is NSNull ? nil : $0 })
+        // Going back and forth (down, up, down, up) gets nowhere: hand back now rather than at the step limit.
+        let lastMoves = history.suffix(4).compactMap { $0["action"] as? String }
+        if lastMoves.count == 4, Set(lastMoves).count == 2, lastMoves[0] == lastMoves[2], lastMoves[1] == lastMoves[3], lastMoves[0] != lastMoves[1] {
+            outcome = "The fast model was going back and forth (\(lastMoves[0]), \(lastMoves[1])) without progress: look at the page below and carry on yourself with page_do."
+            break
+        }
         lines.append("\(lines.count + 1). \(did) (\(took()) ms)")
         still = changed || op == "WAIT" || op == "TYPE_TEXT" ? 0 : still + 1
         if failures >= 4 { outcome = "Four steps in a row failed: look at the page below and carry on yourself."; break }

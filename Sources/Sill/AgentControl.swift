@@ -826,6 +826,22 @@ enum AgentCommands {
                 chosen = try await evaluate("return window.__sillAgent.choose(ref, value)", in: view, world: Web.world,
                                             arguments: ["ref": target.ref, "value": value])
             }
+            if chosen as? Bool != true, target.frame == nil,
+               (try? await evaluate("return window.__sillAgent.isSelect(ref)", in: view, world: Web.world, arguments: ["ref": target.ref])) as? Bool == false {
+                // A dropdown the page draws itself (a button and a list): open it, then choose the option by name, as a person does.
+                var tabArgs: [String: Any] = [:]
+                for k in ["tab", "_session", "remember"] { if let v = args[k] { tabArgs[k] = v } }
+                var option = (try? await evaluate("return window.__sillAgent.optionRef(ref, value)", in: view, world: Web.world, arguments: ["ref": target.ref, "value": value])) as? String
+                if option == nil {
+                    _ = try await perform("page.click", tabArgs.merging(["ref": target.ref]) { $1 })
+                    option = (try? await evaluate("return window.__sillAgent.optionRef(ref, value)", in: view, world: Web.world, arguments: ["ref": target.ref, "value": value])) as? String
+                }
+                guard let option else { throw AgentError("Opened “\(target.name)”, but no option “\(value)” showed in its list.") }
+                let clicked = try await perform("page.click", tabArgs.merging(["ref": option]) { $1 })
+                var answer = clicked as? [String: Any] ?? [:]
+                answer["selected"] = true
+                return answer
+            }
             if chosen as? Bool != true {
                 let options = (try? await evaluate("return window.__sillAgent.options(ref)", in: view, world: Web.world,
                                                    arguments: ["ref": target.ref])) as? [String] ?? []
@@ -1939,7 +1955,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 13) return;
+      if (window.__sillAgent && window.__sillAgent.v === 14) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -2268,7 +2284,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 13,
+        v: 14,
         // The page as a person sees it, in reading order: headings, the text around the
         // controls (prices, results, messages), every control (including ones made clickable
         // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.
@@ -2672,6 +2688,20 @@ enum AgentScript {
           return true;
         },
         options(ref) { const el = find(ref); return el && el.options ? [...el.options].map((o) => o.text.trim()) : []; },
+        isSelect(ref) { const el = find(ref); return !!(el && el.tagName === 'SELECT'); },
+        // A list a custom dropdown opened: the option named `value`, in the list it controls, else any shown option.
+        optionRef(ref, value) {
+          const el = find(ref); const want = clean(value).toLowerCase();
+          const root = el ? el.getRootNode() : document;
+          const lists = ((el && (el.getAttribute('aria-controls') || el.getAttribute('aria-owns'))) || '').split(/\s+/).filter(Boolean)
+            .map((id) => (root.getElementById ? root.getElementById(id) : null) || document.getElementById(id)).filter(Boolean);
+          const pool = (scope) => [...scope.querySelectorAll('[role=option],[role=menuitem],[role=menuitemradio],option,li')].filter(seen);
+          let options = lists.flatMap(pool);
+          if (!options.length) options = pool(document).filter((o) => o.matches('[role=option],[role=menuitem],[role=menuitemradio]') || o.closest('[role=listbox],[role=menu]'));
+          const name = (o) => clean(o.getAttribute('aria-label') || o.innerText || o.textContent).toLowerCase();
+          const hit = options.find((o) => name(o) === want) || options.find((o) => name(o).startsWith(want)) || options.find((o) => name(o).includes(want));
+          return hit ? refOf(hit) : null;
+        },
         draggable(ref) { const el = find(ref); return !!(el && el.closest && el.closest('[draggable=true]')); },
         // Changes that answer an action: elements coming or going, text, a widget's
         // state. Not style or class (animations churn them all the time), nor

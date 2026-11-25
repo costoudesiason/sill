@@ -920,7 +920,7 @@ func target(_ value: Any?) -> [String: Any] {
 
 func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
     let steps = args["steps"] as? [[String: Any]] ?? []
-    guard !steps.isEmpty else { throw Failure("Give \"steps\".") }
+    guard !steps.isEmpty || args["read"] != nil || args["full"] != nil else { throw Failure("Give \"steps\" (or just \"read\").") }
     var tab: [String: Any] = [:]
     if let t = args["tab"] { tab["tab"] = t }
     var lines: [String] = []

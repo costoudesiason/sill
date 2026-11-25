@@ -1,0 +1,13 @@
+<!doctype html><meta charset=utf-8><title>A dropdown drawn by the page</title><script src=kit.js></script>
+<p>Sort by, as many shops draw it: a button and a list, no &lt;select&gt;.</p>
+<div style="position:relative">
+  <button id=sort role=combobox aria-haspopup=listbox aria-expanded=false aria-controls=opts>Best Match</button>
+  <ul id=opts role=listbox hidden style="position:absolute;top:28px;left:0;background:#fff;border:1px solid #999;list-style:none;padding:0;margin:0">
+    <li role=option aria-selected=true>Best Match</li><li role=option>Best Selling</li><li role=option>Price Low to High</li>
+  </ul>
+</div>
+<p>Results sorted by <span id=now>Best Match</span>.</p>
+<script>
+sort.onclick = () => { opts.hidden = !opts.hidden; sort.setAttribute('aria-expanded', String(!opts.hidden)); };
+for (const li of opts.children) li.onclick = () => { sort.textContent = now.textContent = li.textContent; opts.hidden = true; sort.setAttribute('aria-expanded', 'false'); done('sort', li.textContent); };
+</script>

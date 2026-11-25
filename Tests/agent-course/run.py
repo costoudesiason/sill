@@ -421,6 +421,12 @@ def stale_wait(c):
     return True
 
 @case
+def drawn_select(c):
+    # "select" on a dropdown the page draws itself: opened and chosen as a person would.
+    c.must("page_do", steps=[{"select": "Best Match", "value": "Best Selling"}])
+    return c.result().get("sort") == "Best Selling"
+
+@case
 def pick(c):
     # Type and choose the suggestion, one step.
     c.must("page_do", steps=[{"type": "City", "text": "Pr", "pick": "Prague"}])
@@ -695,7 +701,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)
