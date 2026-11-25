@@ -125,6 +125,11 @@ async function toBridge(message, timeout) {
   });
 }
 
+/// A message down the line that wants no answer.
+function tellBridge(message) {
+  if (bridge && bridge.readyState === 1) bridge.send(JSON.stringify({ t: "rpc", msg: message, id: nextId++ }));
+}
+
 class Offline extends Error {
   constructor() { super("Sill isn't connected. Open Sill on your Mac and turn on Settings › Agents › “Let claude.ai control Sill”."); }
 }
@@ -428,7 +433,11 @@ const fallbackInitialize = (params, base) => ({
 async function rpc(message, base) {
   const { id, method } = message;
   const isRequest = id !== undefined && id !== null;
-  if (!isRequest) return null; // notifications: nothing to forward or answer
+  if (!isRequest) {
+    // The user stopped Claude mid-call: Sill drops its glow. Other notifications need nothing.
+    if (method === "notifications/cancelled") tellBridge(message);
+    return null;
+  }
 
   try {
     const answer = await toBridge({ t: "rpc", msg: message }, CALL_TIMEOUT);
@@ -470,7 +479,13 @@ async function mcp(req, res) {
     const answers = (await Promise.all(payload.map((m) => rpc(m, base)))).filter(Boolean);
     return answers.length ? send(res, 200, answers) : (res.writeHead(202, CORS), res.end());
   }
+  // A tool call whose asker hung up before the answer (claude.ai's stop button): tell Sill it was stopped.
+  let answered = false;
+  if (payload?.method === "tools/call") {
+    res.on("close", () => { if (!answered) tellBridge({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: payload.id, reason: "The client went away." } }); });
+  }
   const answer = await rpc(payload, baseURL(req));
+  answered = true;
   if (!answer) { res.writeHead(202, CORS); return res.end(); }
   send(res, 200, answer);
 }

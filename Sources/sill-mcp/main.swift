@@ -919,6 +919,8 @@ func listing(_ tool: Tool) -> [String: Any] {
 /// The answer to one JSON-RPC message, or nil for a notification.
 func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
     let method = message["method"] as? String ?? ""
+    // The client stopped a call (the user pressed stop): Sill drops the glow at once.
+    if method == "notifications/cancelled" { _ = try? sill.run("agent.stopped"); return nil }
     guard let id = message["id"] else { return nil }
     func result(_ value: Any) -> [String: Any] { ["jsonrpc": "2.0", "id": id, "result": value] }
     func error(_ code: Int, _ text: String) -> [String: Any] { ["jsonrpc": "2.0", "id": id, "error": ["code": code, "message": text]] }

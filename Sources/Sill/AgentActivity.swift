@@ -38,7 +38,15 @@ final class AgentActivity {
     private let release: TimeInterval = 60
 
     func began() { busy += 1; keepAwake() }
-    func ended() { busy = max(0, busy - 1); keepAwake() }
+    func ended() {
+        busy = max(0, busy - 1)
+        if let latest { work[latest]?.last = Date() }   // the fade counts from when the work ended
+        keepAwake()
+    }
+
+    /// The agent was stopped (its client cancelled a call): every tab goes dark now.
+    /// They stay its own; the next command lights them again.
+    func quiet() { for key in Array(work.keys) { work[key]?.last = .distantPast; hide(key) } }
 
     // MARK: awake while working
 
@@ -116,10 +124,12 @@ final class AgentActivity {
         for (key, item) in work {
             guard let tab = item.tab else { hide(key, now: true); work[key] = nil; continue }
             let current = busy > 0 && key == latest
-            // Dots and glow only on the tab the agent is at work in: the one it's
-            // acting in now, or touched in the last 15 s (a model thinking between
-            // steps). Others it still holds go quiet until it comes back to them.
-            if current || Date().timeIntervalSince(item.last) < 15 { show(key) } else { hide(key) }
+            // Dots and glow only while the agent is at work in the tab: acting in it
+            // now, or a few seconds after (a model choosing its next step). Nothing
+            // tells Sill a chat was paused or stopped, so the glow follows the work
+            // itself: no more commands, and it fades. The tab stays the agent's
+            // (its next command lights it again) until released.
+            if current || Date().timeIntervalSince(item.last) < 5 { show(key) } else { hide(key) }
             if Date().timeIntervalSince(item.last) > release && !current {
                 if let view = item.view { AgentCommands.letGo(view, of: tab) }
                 hide(key, now: true)

@@ -427,6 +427,11 @@ enum AgentCommands {
             }
             return describe(tab, in: browser)
 
+        case "agent.stopped":
+            // The client stopped the agent (claude.ai's stop button, a cancelled call): lights out.
+            AgentActivity.shared.quiet()
+            return ["quiet": true]
+
         case "tabs.release":
             // The agent is done with it: the tab is yours again (dots and glow go).
             if args["all"] as? Bool == true {
