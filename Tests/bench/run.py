@@ -280,9 +280,12 @@ def summarize_agent(events, timed_out, err, started):
         elif e.get("type") == "result":
             result = e
     final = (result or {}).get("result") or "\n".join(text)
-    answers = [l.split("ANSWER:", 1)[1].strip() for l in final.splitlines() if "ANSWER:" in l]
-    if not answers:   # the line may be in an earlier message when the last one is a sign-off
-        answers = [l.split("ANSWER:", 1)[1].strip() for l in "\n".join(text).splitlines() if "ANSWER:" in l]
+    # The answer is everything from the last "ANSWER:" to the end of that message: lists under it included
+    # (a single-line cut dropped "Key points:" and everything after it).
+    answers = [final.rsplit("ANSWER:", 1)[1].strip()] if "ANSWER:" in final else []
+    if not answers:   # it may be in an earlier message when the last one is a sign-off
+        earlier = [t for t in text if "ANSWER:" in t]
+        answers = [earlier[-1].rsplit("ANSWER:", 1)[1].strip()] if earlier else []
     errors = []
     if timed_out: errors.append("timeout")
     if result and result.get("is_error"): errors.append(f"agent error: {(result.get('result') or result.get('subtype') or '')[:200]}")

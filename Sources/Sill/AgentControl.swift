@@ -648,7 +648,9 @@ enum AgentCommands {
             } else if let text = args["text"] as? String {
                 let count = { (try? await evaluate("return window.__sillAgent.textCount(text)", in: view, world: Web.world, arguments: ["text": text])) as? Int ?? 0 }
                 // "measure": how often the words show now, taken before an action whose answer is awaited.
-                if args["measure"] as? Bool == true { return ["count": await count(), "url": view.url?.absoluteString ?? ""] }
+                // The document's identity (its time origin): a reload or a new page is new even at the same address.
+                let document = { (try? await evaluate("return String(performance.timeOrigin)", in: view, world: Web.world)) as? String ?? "" }
+                if args["measure"] as? Bool == true { return ["count": await count(), "url": await document()] }
                 // Words that were already there before the action don't answer the wait: it waits for
                 // them to show again (a new result, the next page) and says so if they never do.
                 if let before = args["before"] as? Int, before > 0 {
@@ -656,7 +658,8 @@ enum AgentCommands {
                     var fresh = false
                     while true {
                         let now = await count()
-                        if now > before || (now > 0 && url != nil && view.url?.absoluteString != url) { fresh = true; break }
+                        if now > before { fresh = true; break }
+                        if now > 0, let url, await document() != url { fresh = true; break }
                         if Date() >= deadline { break }
                         try await Task.sleep(nanoseconds: 150_000_000)
                     }

@@ -418,6 +418,8 @@ def stale_wait(c):
     if not c.result().get("saved"): raise Fail(f"the wait ended before the new “Saved” ({time.time() - t0:.1f} s): " + out[:300])
     out = c.must("page_do", steps=[{"click": "Refresh"}, {"wait": "Saved"}])
     if "already on the page" not in out: raise Fail("a wait answered by old words wasn't flagged: " + out[:300])
+    out = c.must("page_do", steps=[{"navigate": "reload"}, {"wait": "Saved"}])
+    if "already on the page" in out: raise Fail("words on a reloaded page counted as old: " + out[:300])
     return True
 
 @case

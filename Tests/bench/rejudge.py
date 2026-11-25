@@ -29,7 +29,14 @@ def main():
         folder = os.path.join(trail, r["id"].replace("/", "_"))
         steps = judges.read_trace(folder)
         claude = judges.Claude(binary, env, args.judge_model, work, args.judge_effort)
+        # The answer read again from the transcript, whole (an older run may have kept only its first line).
         answer = r.get("answer") or ""
+        transcript = os.path.join(folder, "transcript.json") if m2w else folder + ".json"
+        if os.path.exists(transcript):
+            events = [(e.get("at", 0), e) for e in json.load(open(transcript))]
+            s = bench.summarize_agent(events, False, [], 0)
+            answer = s["answer"] or s["final_message"][-1500:] or answer
+            r["answer"] = answer
         if m2w: ok, detail = judges.webjudge(claude, r["task"], steps, answer)
         else: ok, detail = judges.webvoyager_judge(claude, r["question"], steps, answer)
         with open(os.path.join(folder, f"judge-{args.judge_model}.json"), "w") as fh: json.dump(detail, fh, indent=1)
