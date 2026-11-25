@@ -80,6 +80,12 @@ rarely need to recover by hand.
 Never spend a call closing tabs: Sill closes the tabs you leave a minute after your last call. To leave one open \
 for the user (results to look at, a filled-in form), tabs_close keep_open=true.
 
+Finish where the user can see it. When the task is to find, show or set up something on a site: leave your tab on \
+the result, scrolled to the part that answers ({"scroll": "words in it"}); set each condition the task names in the \
+page's own controls when the site has one (a filter or sort, not just a word in the search; the exact range asked, \
+not a near one); and answer with the specifics (names, numbers, prices, dates), not just where they are. If a \
+condition can't be met, say which and why rather than settling for a near one silently.
+
 Files: `files` finds the user's files with Spotlight (Desktop, Documents, Downloads, Pictures, Movies, Music, iCloud \
 Drive) and reads PDFs, Word, text; page_upload puts files into a page's file field. A file the user drops into this \
 chat reaches you, not their Mac's pages: find it on the Mac by its name with `files`, then page_upload it.
@@ -888,7 +894,10 @@ func errandRest(_ sill: Sill, id: String, _ args: [String: Any], opened: String)
     }
     if args["close"] as? Bool == true {
         if stopped { out.append("(left open: a step failed, so the tab is still yours to look at)") }
-        else { _ = try? sill.run("tabs.close", ["tab": id]); out.append("Closed the tab.") }
+        else {
+            if Trace.dir != nil { Trace.record(sill, tab: id, action: "read the page, then closed its tab") }
+            _ = try? sill.run("tabs.close", ["tab": id]); out.append("Closed the tab.")
+        }
     }
     return out.joined(separator: "\n\n")
 }
@@ -1209,7 +1218,11 @@ func inScratchTab<T>(_ sill: Sill, _ url: String, keep: Bool = false, ready: Str
     let opened = try sill.run("tabs.open", ["url": url, "background": true, "wait": ready == nil, "timeout": 20, "remember": keep])
     guard let id = (opened as? [String: Any])?["id"] as? String else { throw Failure("The tab didn't open.") }
     if let ready { _ = try? sill.run("page.wait", ["tab": id, "remember": false, "selector": ready, "timeout": 12]) }
-    defer { if !keep { _ = try? sill.run("tabs.close", ["tab": id, "remember": false]) } }
+    defer {
+        // For a run's trace: the page as it was read, before its tab goes.
+        if Trace.dir != nil { Trace.record(sill, tab: id, action: "read \(url)") }
+        if !keep { _ = try? sill.run("tabs.close", ["tab": id, "remember": false]) }
+    }
     return try body(id)
 }
 

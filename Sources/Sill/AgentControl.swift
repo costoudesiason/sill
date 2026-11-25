@@ -1693,7 +1693,7 @@ enum AgentCommands {
         var partial = false
 
         func mustBeClickable() throws {
-            if disabled { throw AgentError("“\(name)” (\(ref)) is disabled: something on the page has to be done first (a required field, a box to tick).") }
+            if disabled { throw AgentError("“\(name)” (\(ref)) is disabled: the page has turned it off. In a form, a required field or box may still be empty; among filters or options, the choices already made may leave nothing for it.") }
             if let cover = coveredBy {
                 if let dialog = cover["dialog"] as? String {
                     let exits = (cover["exits"] as? [[String: Any]] ?? []).map { "“\($0["name"] as? String ?? "")” (\($0["ref"] as? String ?? ""))" }

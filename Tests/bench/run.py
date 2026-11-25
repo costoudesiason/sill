@@ -329,11 +329,8 @@ def judge(binary, env, task, answer, model, cwd):
     prompt = JUDGE_PROMPT.format(web=task["web_name"], ques=task["ques"].strip(), kind=task["reference_type"] or "unknown",
                                  ref=task["reference"] or "(none)", answer=answer,
                                  notice=f"Reference note: {task['reference_notice'].strip()}\n" if task["reference_notice"].strip() else "")
-    argv = [binary, "-p", prompt, "--output-format", "stream-json", "--verbose", "--model", model,
-            "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-            "--disable-slash-commands", "--no-session-persistence", "--max-turns", "2"]
-    events, timed_out, err = run_claude(argv, env, 120, cwd)
-    out = next((e.get("result") or "" for _, e in events if e.get("type") == "result"), "")
+    out = judges.Claude(binary, env, model, cwd).ask("You grade web agents' answers.", [{"type": "text", "text": prompt}], timeout=180)
+    err = []
     m = re.search(r"VERDICT:\s*(SUCCESS|FAIL)", out, re.I)
     reason = re.search(r"REASON:\s*(.+)", out)
     if not m: return "ERROR", f"judge said: {out[:200] or (err[-1] if err else 'nothing')}"
