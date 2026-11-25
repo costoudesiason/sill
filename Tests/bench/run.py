@@ -363,7 +363,8 @@ def main():
     ap.add_argument("--ids", help="comma-separated task ids, e.g. 'Apple--3,ArXiv--7' (skips filtering)")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--model", default="claude-sonnet-5-5", help="agent model")
-    ap.add_argument("--judge-model", default="claude-opus-5-5")
+    ap.add_argument("--judge-model", default="gpt-5.6-luna")
+    ap.add_argument("--judge-effort", default="xhigh")
     ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="agent effort (default: claude's own)")
     ap.add_argument("--timeout", type=int, default=240, help="seconds per task (default 240)")
     ap.add_argument("--max-turns", type=int, default=60)
@@ -429,7 +430,7 @@ def main():
         row = {"id": t["id"], "site": t["web_name"], "question": t["ques"], "reference": t["reference"],
                "reference_type": t["reference_type"], **summarize_agent(events, timed_out, err, started)}
         # WebVoyager's own evaluator (screenshots win over the answer); the reference check beside it.
-        ok, detail = judges.webvoyager_judge(judges.Claude(binary, env, args.judge_model, work), t["ques"], judges.read_trace(traced), row["answer"] or row.get("final_message", "")[-1500:])
+        ok, detail = judges.webvoyager_judge(judges.Claude(binary, env, args.judge_model, work, args.judge_effort), t["ques"], judges.read_trace(traced), row["answer"] or row.get("final_message", "")[-1500:])
         row["verdict"] = "SUCCESS" if ok else "FAIL"
         row["judge_reason"] = detail["verdict"].strip().splitlines()[-1][:300] if detail["verdict"] else "no verdict"
         row["judge_detail"] = detail

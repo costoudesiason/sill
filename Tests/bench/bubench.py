@@ -15,12 +15,13 @@ prompt, the rubric, the agent's trajectory, the pictures it looked at (up to 12)
 files; it marks each rubric item met / violated / not assessable, and the score is the met
 items' share of the weights, as Browser Use computes it. A different judge model and no
 screenshots: scores are for comparing Sill builds, not with Browser Use's published ones."""
-import argparse, ast, base64, concurrent.futures, hashlib, json, os, re, shutil, subprocess, sys, tempfile, threading, time
+import argparse, ast, base64, concurrent.futures, hashlib, json, os, random, re, shutil, subprocess, sys, tempfile, threading, time
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run as bench   # the bench copy of Sill, claude helpers
+import judges
 
 REPO = os.environ.get("BU_BENCH_REPO", "/tmp/bubench/benchmark")
 RESULTS = os.path.join(bench.HERE, "results")
@@ -121,28 +122,27 @@ def run_with_input(argv, env, timeout, cwd, text):
     return events, False, err.splitlines()
 
 
-def judge(binary, env, task, system, events, final, folder, model, cwd):
+def judge(binary, env, task, system, events, final, folder, model, cwd, trace=None, effort=None):
     items = list(task["weights"])
     prompt = JUDGE_PROMPT.format(system=system, items=", ".join(items), task=task["task"], rubric=task["rubric"],
                                  trajectory=clip_middle(trajectory(events), 300_000), final=clip_middle(final, 60_000),
                                  files=clip_middle(files_text(folder), 200_000))
-    # The pictures the agent looked at go to the judge too, as Browser Use's judge sees screenshots:
-    # visual evidence (a map, a drawing, a photo) can't be judged from words alone. Up to 12, spread over the run.
-    shots = []
+    # As Browser Use's judge: screenshots taken by the harness right after browser actions (the trace),
+    # up to 20 spread over the run with the last always in, then the pictures the agent asked for.
+    traced = [x["shot"] for x in judges.read_trace(trace)] if trace else []
+    traced = [p for p in traced if p]
+    if len(traced) > 20: traced = [traced[round(i * (len(traced) - 1) / 19)] for i in range(20)]
+    own = []
     for _, e in events:
         if e.get("type") == "user" and isinstance(e.get("message", {}).get("content"), list):
             for b in e["message"]["content"]:
                 if b.get("type") == "tool_result" and isinstance(b.get("content"), list):
-                    shots += [x for x in b["content"] if isinstance(x, dict) and x.get("type") == "image" and x.get("source", {}).get("data")]
-    if len(shots) > 12: shots = [shots[round(i * (len(shots) - 1) / 11)] for i in range(12)]
-    content = [{"type": "text", "text": prompt + (f"\n\n<screenshots>The {len(shots)} pictures below are what the agent looked at, in order.</screenshots>" if shots else "")}]
-    content += [{"type": "image", "source": s["source"]} for s in shots]
-    argv = [binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--model", model,
-            "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-            "--disable-slash-commands", "--no-session-persistence", "--max-turns", "2"]
-    message = json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
-    evs, _, err = run_with_input(argv, env, 600, cwd, message)
-    out = next((e.get("result") or "" for _, e in evs if e.get("type") == "result"), "")
+                    own += [x for x in b["content"] if isinstance(x, dict) and x.get("type") == "image" and x.get("source", {}).get("data")]
+    if len(own) > 6: own = [own[round(i * (len(own) - 1) / 5)] for i in range(6)]
+    note = f"\n\n<screenshots>{len(traced)} independent screenshots taken by the harness after browser actions, in order, then {len(own)} the agent itself requested.</screenshots>"
+    content = [{"type": "text", "text": prompt + note}] + [judges.picture(p) for p in traced] + [{"type": "image", "source": x["source"]} for x in own]
+    out = judges.Claude(binary, env, model, cwd, effort).ask("You are the findings judge for BU Bench.", content, timeout=900)
+    err = []
     m = re.search(r"\{.*\}", out, re.S)
     if not m: return {"error": f"judge said: {out[:300] or (err[-1] if err else 'nothing')}"}
     try: j = json.loads(m.group(0))
@@ -164,10 +164,12 @@ def judge(binary, env, task, system, events, final, folder, model, cwd):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--n", type=int, default=8, help="the N shortest tasks (default 8)")
+    ap.add_argument("--n", type=int, default=8, help="N tasks drawn at random (default 8)")
+    ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--ids", default="")
     ap.add_argument("--model", default="claude-sonnet-5-5")
-    ap.add_argument("--judge-model", default="claude-opus-5-5")
+    ap.add_argument("--judge-model", default="gpt-5.6-luna")
+    ap.add_argument("--judge-effort", default="xhigh")
     ap.add_argument("--timeout", type=int, default=1500, help="seconds per task (default 1500; Browser Use allows 3600)")
     ap.add_argument("--max-turns", type=int, default=150)
     ap.add_argument("--parallel", type=int, default=4)
@@ -189,7 +191,7 @@ def main():
         for r in saved["results"]:
             events = [(0, e) for e in json.load(open(os.path.join(trail, r["id"], "events.json")))]
             final = next((e.get("result") or "" for _, e in events if e.get("type") == "result"), "")
-            j = judge(binary, env, by_id[r["id"]], system, events, final, os.path.join(trail, r["id"], "outputs"), args.judge_model, tempfile.mkdtemp())
+            j = judge(binary, env, by_id[r["id"]], system, events, final, os.path.join(trail, r["id"], "outputs"), args.judge_model, tempfile.mkdtemp(), os.path.join(trail, r["id"], "trace"), args.judge_effort)
             scores.append(j.get("score") or 0)
             print(f"  {r['id']} {r['title'][:40]:40} was {r.get('score')}  now {j.get('score')}" + (f"  ({j['error']})" if j.get("error") else ""), flush=True)
         print(f"\nmean now {sum(scores) / len(scores):.3f} (was {sum(r.get('score') or 0 for r in saved['results']) / len(saved['results']):.3f})")
@@ -198,7 +200,8 @@ def main():
         want = [i.strip() for i in args.ids.split(",") if i.strip()]
         chosen = [t for t in tasks if t["id"] in want]
     else:
-        chosen = sorted(tasks, key=lambda t: len(t["task"]))[:args.n]
+        # A fair draw: random with a fixed seed, not the short (easy) ones.
+        chosen = random.Random(args.seed).sample(tasks, min(args.n, len(tasks)))
     binary = bench.claude_bin()
     env = bench.claude_env(os.path.expanduser(args.config_dir))
     root = tempfile.mkdtemp(prefix="sill-bubench-")
@@ -229,11 +232,16 @@ def main():
                 "--allowedTools", "mcp__sill__*,Read,Write,Edit,Glob",
                 "--disallowedTools", ",".join(["WebFetch", "WebSearch", "Bash", "Task", "Agent"] + [f"mcp__sill__{d}" for d in bench.DENIED]),
                 "--disable-slash-commands", "--no-session-persistence", "--max-turns", str(args.max_turns)] + (["--effort", args.effort] if args.effort else [])
+        traced = os.path.join(trail, t["id"], "trace"); os.makedirs(traced, exist_ok=True)
+        config = os.path.join(work, "mcp.json")
+        with open(os.open(config, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+            json.dump({"mcpServers": {"sill": {"command": bench.MCP_BIN, "env": {**mcp_env, "SILL_TRACE_DIR": traced}}}}, fh)
+        argv[argv.index(mcp_config)] = config
         started = time.time()
         events, timed_out, err = bench.run_claude(argv, env, args.timeout, work)
         s = bench.summarize_agent(events, timed_out, err, started)
         final = s["final_message"]
-        j = judge(binary, env, t, system, events, final, os.path.join(work, "outputs"), args.judge_model, root)
+        j = judge(binary, env, t, system, events, final, os.path.join(work, "outputs"), args.judge_model, root, traced, args.judge_effort)
         row = {"id": t["id"], "title": t["title"], "seconds": s["seconds"], "tool_calls": s["tool_calls"], "tools": s["tools"],
                "cost_usd": s["cost_usd"], "errors": s["errors"], "turns": s["turns"], **j}
         shutil.copytree(os.path.join(work, "outputs"), os.path.join(trail, t["id"], "outputs"), dirs_exist_ok=True)

@@ -92,7 +92,8 @@ def main():
     ap.add_argument("--ids", default="")
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--model", default="claude-sonnet-5-5")
-    ap.add_argument("--judge-model", default="claude-opus-5-5")
+    ap.add_argument("--judge-model", default="gpt-5.6-luna")
+    ap.add_argument("--judge-effort", default="xhigh")
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--jev", action="store_true")
@@ -146,7 +147,7 @@ def main():
         events, timed_out, err = bench.run_claude(argv, env, args.timeout, work)
         s = bench.summarize_agent(events, timed_out, err, started)
         # WebJudge, as Online-Mind2Web's paper runs it, on the pictures the harness took after every action.
-        ok, detail = judges.webjudge(judges.Claude(binary, env, args.judge_model, work), t["task"], judges.read_trace(traced), s["answer"] or s["final_message"][-1500:])
+        ok, detail = judges.webjudge(judges.Claude(binary, env, args.judge_model, work, args.judge_effort), t["task"], judges.read_trace(traced), s["answer"] or s["final_message"][-1500:])
         verdict = "SUCCESS" if ok else "FAIL"
         reason = (detail["verdict"].split("Thoughts:")[-1].split("Status:")[0].strip() or "no verdict")[:400]
         with open(os.path.join(traced, "judge.json"), "w") as fh: json.dump(detail, fh, indent=1)
@@ -157,7 +158,7 @@ def main():
         with lock:
             rows.append(row)
             print(f"  [{t['level']:6}] {verdict:7} {row['seconds']:5.0f} s {row['tool_calls']:3} calls  {t['task'][:70]}  ({reason[:80]})", flush=True)
-            json.dump({"when": stamp, "git": bench.git_rev(), "model": args.model, "jev": args.jev, "results": rows},
+            json.dump({"when": stamp, "git": bench.git_rev(), "model": args.model, "jev": args.jev, "judge_model": args.judge_model, "results": rows},
                       open(os.path.join(RESULTS, f"m2w-{stamp}.json"), "w"), indent=1)
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel) as pool:

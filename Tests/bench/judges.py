@@ -8,6 +8,8 @@
   auto_eval.py): the task, the agent's answer, and the last screenshots; the screenshots win
   when they contradict the answer.
 
+The judge model is gpt-5.6-luna by default (BU Bench's own judge model), so no Claude grades Claude.
+
 The screenshots come from the run's trace (sill-mcp with SILL_TRACE_DIR): one after every
 action, taken by the harness, never shown to the agent. The judge sees what the page showed,
 not what the agent said it showed."""
@@ -100,14 +102,18 @@ You should elaborate on how you arrived at your final evaluation and then provid
 
 
 class Claude:
-    """One message in, one answer out, through the claude CLI (no tools, no MCP)."""
-    def __init__(self, binary, env, model, cwd):
-        self.binary, self.env, self.model, self.cwd = binary, env, model, cwd
+    """One message in, one answer out, through the claude CLI (no tools, no MCP). Models that
+    aren't Claude go through the user's ~/.claude config (claude-code-proxy, their Codex sign-in)."""
+    def __init__(self, binary, env, model, cwd, effort=None):
+        self.binary, self.env, self.model, self.cwd, self.effort = binary, env, model, cwd, effort
+        if not model.startswith("claude"):
+            self.env = {**env, "CLAUDE_CONFIG_DIR": os.path.expanduser("~/.claude")}
 
     def ask(self, system, content, timeout=300):
         argv = [self.binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
                 "--model", self.model, "--system-prompt", system, "--tools", "", "--strict-mcp-config",
                 "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands", "--no-session-persistence", "--max-turns", "1"]
+        if self.effort: argv += ["--effort", self.effort]
         text = json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
         for attempt in range(3):
             p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=self.env, cwd=self.cwd)
