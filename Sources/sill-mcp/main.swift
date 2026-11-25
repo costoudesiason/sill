@@ -204,7 +204,12 @@ func compactSnapshot(_ result: Any, boxes: Bool = false) -> String {
     let url = page["url"] as? String ?? ""
     let here = URL(string: url)
     var lines = ["Tab \(page["tab"] as? String ?? "") · \(clip(page["title"] as? String ?? "", 100))", url]
-    let elements = collapseRuns(page["elements"] as? [[String: Any]] ?? [])
+    // A link with no name beside a named one to the same place (a product's picture and its title): only the named.
+    let raw = page["elements"] as? [[String: Any]] ?? []
+    let namedHrefs = Set(raw.compactMap { e -> String? in
+        guard let h = e["href"] as? String, !(e["name"] as? String ?? "").isEmpty else { return nil }; return h })
+    let elements = collapseRuns(raw.filter { e in
+        !((e["name"] as? String ?? "").isEmpty && e["context"] == nil && (e["href"] as? String).map(namedHrefs.contains) == true) })
     // Mostly behind something (a dialog, a cookie banner): those controls are left out, and said so.
     let covered = elements.filter { $0["covered"] as? Bool == true }.count
     let dropCovered = covered > 12

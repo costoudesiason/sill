@@ -1929,6 +1929,8 @@ enum AgentScript {
       const seen = (el) => {
         const r = el.getBoundingClientRect();
         if (r.width < 1 || r.height < 1) return false;
+        // Put off the page on purpose (left or above it, the "visually hidden" trick): not seen by anyone.
+        if (r.right <= 0 || r.bottom + (el.ownerDocument.defaultView.scrollY || 0) <= 0) return false;
         const s = style(el);
         return s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.01;
       };
@@ -1959,6 +1961,19 @@ enum AgentScript {
       const face = (el) => {
         if (seen(el)) return el;
         if (el.labels && el.labels.length && seen(el.labels[0]) && ['checkbox', 'radio', 'file'].includes(el.type)) return el.labels[0];
+        // A control drawn invisible over its own look (many shops' buttons, styled toggles and file pickers):
+        // the person sees its wrapper and clicks there, which reaches the control on top.
+        const r = el.getBoundingClientRect();
+        if (r.width >= 4 && r.height >= 4) {
+          const s = style(el);
+          if (s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) <= 0.01) {
+            for (let p = el.parentElement, d = 0; p && d < 3; p = p.parentElement, d++) {
+              if (!seen(p)) continue;
+              const pr = p.getBoundingClientRect();
+              if (pr.width * pr.height <= r.width * r.height * 4 + 400) return el;   // the look it sits on, not the whole page
+            }
+          }
+        }
         return null;
       };
       // Every element, through open shadow roots and same-origin frames, with
@@ -2053,7 +2068,7 @@ enum AgentScript {
           if (n.childElementCount >= 2) {
             for (const k of n.children) {
               if (contains(k, el)) break;
-              if (matches(k) || k.querySelector(interactive)) continue;
+              if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(k.tagName) || matches(k) || k.querySelector(interactive)) continue;
               const t = clean(k.innerText);
               if (t.length >= 3 && t.length <= 40 && t !== own) return t;
             }
@@ -2080,7 +2095,7 @@ enum AgentScript {
             const head = n.querySelector(':scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > legend, :scope > caption, :scope > [role=heading]');
             if (head && !contains(head, el)) parts.push(head.innerText || '');
             const f = n.firstElementChild;
-            if (f && !contains(f, el) && n.childElementCount >= 2) { const t = clean(f.innerText); if (t.length <= 40) parts.push(t); }
+            if (f && !contains(f, el) && n.childElementCount >= 2 && !['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(f.tagName)) { const t = clean(f.innerText); if (t.length <= 40) parts.push(t); }
           }
         }
         return parts.join(' | ').toLowerCase();

@@ -727,7 +727,7 @@ def stop_copy():
     if pid: os.kill(pid, 15)
 
 def main():
-    if "--keep" not in sys.argv: stop_copy(); time.sleep(1.5)   # always the current build
+    stop_copy(); time.sleep(1.5)   # always the current build (--keep only leaves it running afterwards)
     start_copy()
     a, b = serve(os.path.join(HERE, "site"), "127.0.0.1", 8801), serve(os.path.join(HERE, "other"), "127.0.0.1", 8802)
     try:
