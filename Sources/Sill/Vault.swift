@@ -21,7 +21,8 @@ enum AgentVault {
         var user: String?
     }
 
-    private static let service = "Sill Vault", account = "vault"
+    // "vault.1": an early test copy of Sill made an item named "vault" that your Sill can't read without asking.
+    private static let service = "Sill Vault", account = "vault.1"
     private static var cache: [String: Entry]?
 
     /// A test copy of Sill (the course, the benchmarks) is re-signed on every build, so the keychain would
@@ -35,8 +36,9 @@ enum AgentVault {
             cache = Dictionary(list.map { ($0.name.lowercased(), $0) }, uniquingKeysWith: { $1 })
             return cache ?? [:]
         }
+        // Never asks: an item Sill can't read without a prompt counts as empty, rather than freezing Sill behind a dialog.
         let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account,
-                                      kSecReturnData: true, kSecMatchLimit: kSecMatchLimitOne]
+                                      kSecReturnData: true, kSecMatchLimit: kSecMatchLimitOne, kSecUseAuthenticationUI: kSecUseAuthenticationUIFail]
         var found: CFTypeRef?
         var entries: [String: Entry] = [:]
         if SecItemCopyMatching(query as CFDictionary, &found) == errSecSuccess, let data = found as? Data,
