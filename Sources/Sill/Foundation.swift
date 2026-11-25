@@ -179,6 +179,10 @@ final class Preferences: ObservableObject {
     }
     /// Agents on this Mac may drive Sill over its local socket (sill-mcp).
     @Published var agentControl: Bool { didSet { store.set(agentControl, forKey: "agentControl") } }
+    /// Sill learns what you click on your sites and where it goes, for agents (Habits.swift). On this Mac only.
+    @Published var learnsHabits: Bool { didSet { store.set(learnsHabits, forKey: "learnsHabits") } }
+    /// Agents may find files (Spotlight) and read them, in your everyday folders only (AgentControl, Files.swift).
+    @Published var agentFiles: Bool { didSet { store.set(agentFiles, forKey: "agentFiles") } }
     /// claude.ai (or another app on the internet) may drive Sill through your relay (Connector.swift).
     @Published var remoteConnector: Bool { didSet { store.set(remoteConnector, forKey: "remoteConnector") } }
     /// The relay's address, e.g. https://sill-relay.up.railway.app.
@@ -206,7 +210,7 @@ final class Preferences: ObservableObject {
     private init() {
         store.register(defaults: ["suggestions": true, "restoresTabs": true, "applePasswords": true,
                                   "glassBar": true, "glassWash": 0.25, "cornerRadius": 26.0, "showsLinkPreview": true, "tabPreviews": true,
-                                  "autoPiP": true, "sleepsTabs": true, "warmClaude": true, "sleepAfterMinutes": 120, "blocksAds": true])
+                                  "autoPiP": true, "sleepsTabs": true, "warmClaude": true, "sleepAfterMinutes": 120, "blocksAds": true, "learnsHabits": true, "agentFiles": true])
         theme = Theme(rawValue: store.string(forKey: "theme") ?? "") ?? .system
         glassBar = store.bool(forKey: "glassBar")
         glassWash = store.double(forKey: "glassWash")
@@ -221,6 +225,8 @@ final class Preferences: ObservableObject {
         keepsClaudeReady = store.bool(forKey: "warmClaude")
         sleepAfterMinutes = store.integer(forKey: "sleepAfterMinutes")
         agentControl = store.bool(forKey: "agentControl")
+        learnsHabits = store.bool(forKey: "learnsHabits")
+        agentFiles = store.bool(forKey: "agentFiles")
         remoteConnector = store.bool(forKey: "remoteConnector")
         connectorRelay = store.string(forKey: "connectorRelay") ?? ""
         remoteScripts = store.bool(forKey: "remoteScripts")

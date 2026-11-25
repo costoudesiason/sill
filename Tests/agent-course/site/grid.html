@@ -1,0 +1,13 @@
+<!doctype html><meta charset=utf-8><title>Sheet</title><script src=kit.js></script>
+<style>td{border:1px solid #ccc;width:120px;height:22px}</style>
+<p>A sheet, as a spreadsheet does it: a pasted list goes one line per row, tabs across columns.</p>
+<table id=t><tr><td id=a1 tabindex=0 role=gridcell aria-label="A1"></td><td role=gridcell aria-label="B1"></td></tr></table>
+<script>
+a1.addEventListener('paste', (e) => {
+  e.preventDefault();
+  const text = e.clipboardData.getData('text/plain');
+  const rows = text.split('\n').map((l) => l.split('\t'));
+  t.innerHTML = rows.map((r) => '<tr>' + r.map((c) => '<td>' + c + '</td>').join('') + '</tr>').join('');
+  done('rows', rows.length); done('cols', rows[0].length); done('first', rows[0][0]); done('html', e.clipboardData.types.includes('text/html'));
+});
+</script>

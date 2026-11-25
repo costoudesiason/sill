@@ -228,6 +228,7 @@ final class Tab: NSObject {
                     if !self.isPrivate, !self.showingError, let url = view.url, self.lastRetitled?.url != url || self.lastRetitled?.title != title {
                         self.lastRetitled = (url, title)
                         History.shared.retitle(url, title)
+                        Habits.shared.retitle(url, title)
                     }
                     self.host?.tabChanged(self, .title)
                 }
@@ -622,7 +623,10 @@ extension Tab: SEWebViewDelegate {
         hovered(link: nil)
         guard let url = view.url else { return }
         showingError = url == notOpened || view.url?.scheme == "data"
-        if !isPrivate, !showingError { History.shared.record(url, title: view.title, typed: typedNavigation) }
+        if !isPrivate, !showingError {
+            History.shared.record(url, title: view.title, typed: typedNavigation)
+            Habits.shared.went(self, to: url, title: view.title)
+        }
         typedNavigation = false
         if favicon == nil || Favicons.shared.cached(for: url) == nil {
             favicon = Favicons.shared.cached(for: url)

@@ -493,6 +493,14 @@ final class MessageRouter: NSObject, WKScriptMessageHandler {
             tab.audible = (body["on"] as? Bool) ?? false
         case "backdrop":
             if let text = body["c"] as? String, let color = Self.color(css: text) { tab.webView?.backdrop = color }
+        case "click":
+            if let role = body["role"] as? String, let name = body["name"] as? String {
+                Habits.shared.clicked(in: tab, role: role, name: name, href: body["href"] as? String)
+            }
+        case "went":
+            if let href = body["href"] as? String, let url = URL(string: href) {
+                Habits.shared.went(tab, to: url, title: body["title"] as? String)
+            }
         case "pipReturn":
             // Back from the floating window: to its tab, its window, to the front.
             tab.host?.bringBack(tab)
@@ -735,6 +743,39 @@ enum PageScripts {
       }, true);
       document.addEventListener('keydown', (e) => {
         if (e.isTrusted && e.key === 'Enter' && e.target instanceof HTMLInputElement) signingIn(scope(e.target));
+      }, true);
+
+      // What you click, for Habits.swift: the thing's role and visible name
+      // (never a field, never what's typed), and the address it led to when
+      // the page changes its own. Sill skips private windows and agents' tabs.
+      const clickable = 'a[href], button, summary, input[type=submit], input[type=button], input[type=checkbox], input[type=radio], ' +
+        '[role=button], [role=link], [role=tab], [role=menuitem], [role=menuitemradio], [role=menuitemcheckbox], [role=option], [role=treeitem], [role=switch], [role=checkbox], [role=radio]';
+      const roles = { A: 'link', BUTTON: 'button', SUMMARY: 'button', INPUT: 'button' };
+      const named = (el) => {
+        const label = el.getAttribute('aria-label') || el.getAttribute('title') || '';
+        if (label.trim()) return label;
+        const by = el.getAttribute('aria-labelledby');
+        if (by) { const t = by.split(/\s+/).map((id) => document.getElementById(id)?.innerText || '').join(' '); if (t.trim()) return t; }
+        const text = (el.innerText || '').trim().split('\n').find((l) => l.trim()) || '';
+        if (text) return text;
+        if (el instanceof HTMLInputElement && (el.type === 'submit' || el.type === 'button')) return el.value;
+        const img = el.querySelector && el.querySelector('img[alt], svg[aria-label]');
+        return img ? (img.getAttribute('alt') || img.getAttribute('aria-label') || '') : '';
+      };
+      document.addEventListener('click', (e) => {
+        if (!e.isTrusted) return;
+        const start = e.composedPath ? e.composedPath()[0] : e.target;
+        const el = start && start.closest ? start.closest(clickable) : null;
+        if (!el || el.isContentEditable) return;
+        const type = el instanceof HTMLInputElement ? el.type : '';
+        const role = el.getAttribute('role') || (type === 'checkbox' || type === 'radio' ? type : roles[el.tagName]) || 'button';
+        const name = named(el).replace(/\s+/g, ' ').trim().slice(0, 80);
+        if (!name) return;
+        const before = location.href;
+        post({ t: 'click', role, name, href: el instanceof HTMLAnchorElement ? el.href : null });
+        for (const ms of [400, 1200, 3000]) setTimeout(() => {
+          if (location.href !== before) post({ t: 'went', href: location.href, title: document.title });
+        }, ms);
       }, true);
 
       window.__sillFillCode = (code) => {

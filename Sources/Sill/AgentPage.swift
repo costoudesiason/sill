@@ -209,7 +209,9 @@ final class AgentPage {
         let results = await withTaskGroup(of: (Int, [[String: Any]]).self) { group -> [(Int, [[String: Any]])] in
             for (i, (frame, at)) in placed.enumerated() {
                 group.addTask { @MainActor in
-                    let items = (try? await self.evaluate("window.__sillAgent.snapshot(\(all))", in: frame, timeout: 0.5)) as? [[String: Any]] ?? []
+                    // The frame's own "how much more page" line is the frame's business, not the page's.
+                    let items = ((try? await self.evaluate("window.__sillAgent.snapshot(\(all))", in: frame, timeout: 0.5)) as? [[String: Any]] ?? [])
+                        .filter { $0["context"] as? String != "page" }
                     if items.isEmpty { self.emptyFrames[frame.session] = Date() }
                     return (i, items.map { item in
                         var item = item

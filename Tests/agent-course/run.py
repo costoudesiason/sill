@@ -32,6 +32,7 @@ class Fresh(http.server.SimpleHTTPRequestHandler):
 def serve(folder, host, port):
     handler = functools.partial(Fresh, directory=folder)
     socketserver.TCPServer.allow_reuse_address = True
+    socketserver.ThreadingTCPServer.daemon_threads = True   # pages kept open (--keep) don't hold up the exit
     httpd = socketserver.ThreadingTCPServer((host, port), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd
@@ -245,21 +246,94 @@ def animated(c):
 def read_script(c):
     # The listed tools are the short set; page_read pulls data with a script, and reads text.
     names = [t["name"] for t in c.m.rpc("tools/list", {})["result"]["tools"]]
-    if "page_click" in names or "page_read" not in names or len(names) > 15: raise Fail(f"tools listed: {names}")
+    if "page_click" in names or "page_read" not in names or len(names) > 16: raise Fail(f"tools listed: {names}")
     out = c.must("page_read", script="return [...document.querySelectorAll('button')].map(b => b.textContent)")
     text = c.must("page_read", text=True)
     return "Add one" in out and "Live" in text
 
+def sock(cmd, **args):
+    """One command straight to the test copy's socket (what no tool does: a click as if the user made it)."""
+    import socket as so
+    s = so.socket(so.AF_UNIX, so.SOCK_STREAM); s.connect(SOCKET)
+    s.sendall((json.dumps({"id": 1, "cmd": cmd, "args": args}) + "\n").encode())
+    buf = b""
+    while not buf.endswith(b"\n"): buf += s.recv(65536)
+    s.close(); return json.loads(buf)
+
+@case
+def habits(c):
+    # What the user clicks is learned: history_search finds the way, tabs_open shows it on the site.
+    r = sock("habits.record", page=A + "spa.html", role="treeitem", name="Travel notebook", to=A + "checkout.html", title="Travel notes")
+    if not r.get("ok"): raise Fail(str(r))
+    ok, out = c.m.call("history_search", query="travel notebook")
+    if not ok or "Travel notebook" not in out or "checkout.html" not in out: raise Fail("history_search: " + out[:300])
+    ok, opened = c.m.call("tabs_open", url=A + "spa.html")
+    tab = opened.splitlines()[1].split()[0] if ok else None
+    if tab: c.m.call("tabs_close", tab=tab)
+    return "Travel notebook" in opened
+
+@case
+def cross_tab(c):
+    # Read on one page, open another, type it there: one call, no round trips.
+    out = c.must("page_do", steps=[{"read": "return document.title", "as": "t"},
+                                   {"open": A + "react-input.html", "as": "b"},
+                                   {"type": "Search products", "text": "{{t}}"}])
+    other = re.search(r"in tab (\S+) \(", out)
+    if not other: raise Fail("no tab opened: " + out[:300])
+    ok, got = c.m.call("page_eval", tab=other.group(1), script="return window.__result")
+    c.m.call("tabs_close", tab=other.group(1))
+    return "Always moving" in got
+
+@case
+def errands(c):
+    # Three sites at once, one answer, no tabs left behind.
+    t0 = time.time()
+    ok, out = c.m.call("tabs_open", errands=[{"url": A + p + ".html", "read": "return document.title"} for p in ("spa", "lazy", "modal")])
+    took = time.time() - t0
+    if not ok or out.count("Read:") != 3 or out.count("Closed the tab.") != 3: raise Fail(out[:400])
+    if took > 4: raise Fail(f"three errands took {took:.1f} s")
+    return True
+
+@case
+def files(c):
+    # A file of the user's, read; a hidden one, refused.
+    # The copy's own folder: macOS would ask before it reads Downloads.
+    folder = subprocess.run(["getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True).stdout.strip() + f"sill-{PROFILE}-files"
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "course-file.txt")
+    with open(path, "w") as fh: fh.write("Course file: the answer is 42.")
+    try:
+        ok, out = c.m.call("files", read=path)
+        bad, why = c.m.call("files", read=os.path.expanduser("~/.zshrc"))
+    finally: os.remove(path)
+    if bad: raise Fail("read a hidden file outside the everyday folders")
+    return ok and "the answer is 42" in out
+
+@case
+def beside(c):
+    # The agent's tab beside the user's, then apart again.
+    ok, out = c.m.call("tabs_split", tab=c.tab)
+    if not ok or "your-tab" not in out or "animated" not in out: raise Fail(out[:300])
+    ok, _ = c.m.call("tabs_split", tab=c.tab, off=True)
+    return ok
+
+@case
+def paste_rows(c):
+    # A list pasted into a sheet: one line per row, tabs across columns, in one step.
+    c.must("page_do", steps=[{"click": "A1"}, {"paste": "apple\t1\nbanana\t2\ncherry\t3", "on": "A1"}])
+    r = c.result()
+    return r.get("rows") == 3 and r.get("cols") == 2 and r.get("first") == "apple"
+
 class FakeJev(http.server.BaseHTTPRequestHandler):
-    """A stand-in for TypeSafe's Jev: clicks "Add one" until three clicks are done."""
+    """A stand-in for TypeSafe's Jev: an operation head and a click head; clicks "Add one" until three are done."""
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         q, state = body["questions"], body["state"]
-        clicks = sum("Add one" in d for d in state["done_so_far"])
-        add = next(k for k, v in q["element"]["criteria"].items() if "Add one" in v)
-        answers = {"goal_met": {"type": "noul", "noul": 1.0 if clicks >= 3 else 0.0},
-                   "action": {"type": "choice", "choice": "click", "confidence": 1.0},
-                   "element": {"type": "choice", "choice": add, "confidence": 0.9, "probabilities": {add: 0.9}}}
+        clicks = sum("Add one" in h["action"] for h in state["recent_actions"])
+        add = next(k for k, v in q["click_target"]["criteria"].items() if "Add one" in v["element"])
+        op = "DONE" if clicks >= 3 else "CLICK"
+        answers = {"operation": {"type": "choice", "choice": op, "confidence": 0.9, "probabilities": {op: 0.9}},
+                   "click_target": {"type": "choice", "choice": add, "confidence": 0.9, "probabilities": {add: 0.9}}}
         out = json.dumps({"model": "fake", "answers": answers}).encode()
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(out)
     def log_message(self, *a): pass
@@ -273,7 +347,7 @@ def goal(c):
     try:
         if "page_goal" not in [t["name"] for t in m.rpc("tools/list", {})["result"]["tools"]]: raise Fail("page_goal not listed with a key")
         ok, out = m.call("page_goal", tab=c.tab, goal="Add one three times")
-        if not ok or "Goal reached" not in out: raise Fail(out[:300])
+        if not ok or not out.startswith("Done") or out.count("clicked") != 3: raise Fail(out[:300])
     finally:
         m.p.stdin.close(); httpd.shutdown(); httpd.server_close()
     return c.result().get("count") == 3
@@ -512,7 +586,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)

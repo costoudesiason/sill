@@ -15,6 +15,16 @@ Sill then listens on a Unix socket:
 - The folder is yours alone (0700), the socket 0600, and every connection's other end is
   checked to be the same user before anything is read. Nothing listens on the network.
 - Private windows are never visible. Password fields never give up their values.
+- Files: agents can find (Spotlight) and read files only in Desktop, Documents,
+  Downloads, Pictures, Movies, Music and iCloud Drive, never hidden ones. The first time,
+  macOS asks you whether Sill may open each of those folders. Settings › Agents ›
+  **Let agents find and read my files** turns this off.
+- Habits: Sill learns what you click on your sites (a link, tab or menu item's role and
+  visible name) and where each click took you, so agents can go straight to a page
+  instead of clicking their way there. It records nothing from private windows or agents'
+  tabs, and nothing you type or any field's value. It stays on this Mac (`habits.json`
+  beside your history). Settings › Agents › **Learn from what I do** turns it off, and
+  **Forget what Sill learned** clears it.
 - Only `http` and `https` addresses can be opened. Tabs an agent opens are marked
   `openedByAgent`.
 - Agents work in the background. Their tabs open behind yours, and clicks, typing,
@@ -41,7 +51,7 @@ Sill then listens on a Unix socket:
   can't close your window), the keyboard stays in your tab, and an agent closing the last
   tab of your last window leaves an empty tab rather than no window.
 
-`Tests/agent-course/` is the proof: 48 cases taken from what breaks agents on real sites
+`Tests/agent-course/` is the proof: 55 cases taken from what breaks agents on real sites
 (shadow DOM, cross-origin card frames, covered buttons, re-rendering lists, custom
 dropdowns, two-step sign-in, dialogs, popups, drag and drop, infinite lists, a full
 checkout, right-click menus, long press, drawing, sortable lists, touch, keystroke-driven
@@ -107,12 +117,14 @@ Any client (JSON config):
 
 ## Tools
 
-A model is shown fourteen tools that cover everything: `tabs_open`, `tabs_list`,
+A model is shown fifteen tools that cover everything: `tabs_open` (also `errands=[…]` in
+parallel, `beside=true` side by side), `tabs_list`,
 `tabs_close` (`keep_open=true` hands a tab back), `page_navigate` (also back, forward,
 reload), `page_do` (every action: click, type, press, select, hover, scroll, drag, touch,
 pinch, wait, dialogs, sign-in), `page_read` (elements, `text=true`, or a `script` whose
 answer comes back), `page_screenshot`, `page_sign_in`, `passwords_save`, `page_upload`,
-`wait_for_user`, `web_search`, `read_url`, `history_search`. The single-action tools below
+`wait_for_user`, `web_search`, `read_url`, `history_search` (the user's pages and what they
+click to get there), `files` (find and read the user's files). The single-action tools below
 still answer when called (older clients, the test course), but aren't listed.
 
 | Tool | What it does | Arguments |
@@ -136,15 +148,17 @@ still answer when called (older clients, the test course), but aren't listed.
 | `page_eval` | Run JavaScript in the page as an async function body (use `return`) | `tab`, `script` |
 | `page_screenshot` | JPEG of the page, in any tab; `marks` draws each element's box and ref on it | `tab`, `maxWidth`, `marks` |
 | `page_find` | Find text and scroll to it | `tab`, `text` |
-| `history_search` | Search Sill's history | `query`, `limit` |
-| `page_do` | Many steps in one call (click, type, press, select, wait, …) | `steps`, `full` |
+| `history_search` | Where you go and what you click to get there: pages ranked by use, clicks and where they lead | `query`, `limit` |
+| `files` | Find your files with Spotlight, or read one as text (PDF, Word, RTF, HTML, Pages, text) | `query`, `read`, `limit`, `maxChars` |
+| `tabs_split` | Show an agent's tab beside yours, side by side; `off` puts them back | `tab`, `with`, `left`, `off` |
+| `page_do` | Many steps in one call (click, type, press, select, wait, …), across pages and tabs: `read`/`as` keeps a value, `{{x}}` uses it, `open`/`tab` work in another tab | `steps`, `full`, `read` |
 | `page_sign_in` | Sign in with the password saved in Sill for this site; the agent never sees it | `tab`, `user`, `submit` |
 | `passwords_list` | Saved accounts for this site (names only) | `tab`, `host` |
 | `passwords_save` | Keep a password; `generate` makes a strong one and fills the sign-up form | `tab`, `user`, `password`, `generate` |
 | `page_drag` | Press, move, let go: to a target, or along a drawn path (`by`) | `fromRef`/`fromX`…, `toRef`/`toX`…, `by`, `steps` |
 | `page_touch` | Tap, long press or swipe with a finger | `ref`/`x`,`y`, `kind`, `dx`, `dy` |
 | `page_pinch` / `page_zoom` | Pinch to zoom; the page's zoom level | `scale` / `level` |
-| `page_upload` | Files into a file field, also inside frames from other sites; the user is always asked | `ref`, `paths` |
+| `page_upload` | Files into a file field, also inside frames from other sites; you're asked only for files outside your everyday folders | `ref`, `paths` |
 | `wait_for_user` | Hand over for a CAPTCHA, a code or a passkey, and wait | `message`, `until`, `timeout` |
 | `page_dialog` | Answer the page's alert, confirm or prompt (held while an agent works) | `accept`, `text` |
 | `web_search` | Search the web in your browser (Google, else DuckDuckGo) | `query`, `count`, `engine` |
@@ -164,7 +178,35 @@ Fast by design: Sill acts in milliseconds; the time is the model's round trips. 
    Animations don't count (style, class, svg, canvas), so a page that never stops moving
    doesn't hold a click up. A new page answers once it's parsed, not when its last ad loads.
 
+5. Know the way: `history_search` and `tabs_open` tell the agent which pages you use on a
+   site and what you click to reach them, so it opens the page instead of clicking there.
+6. Several at once: `tabs_open errands=[…]` runs errands in parallel tabs, and tool calls
+   from one client run side by side (each on its own line to Sill). One `page_do` can read
+   on one site and type it into another (`{"read": …, "as": "x"}`, `{"open": url}`, `{{x}}`).
+
+7. Claude thinks, Jev clicks: with a TypeSafe key (the Keychain item "Sill TypeSafe", or
+   `TYPESAFE_API_KEY`), `page_goal` (and `tabs_open goal=… values=…`) hands a multi-step form,
+   search, filter or date picker to TypeSafe's Jev. Each step is one request: an operation
+   head (click, type, select, scroll, scroll in a box, wait, done, blocked) and a target head
+   per operation, only the chosen one used (after Browser Use's Jev Ultrafast, MIT). Jev types
+   only the values Claude gave it, stops before anything that pays, sends or commits, and
+   hands back the finished page for Claude to check. Google Flights, one-way with a date and
+   a nonstop filter: one call, about 13 s of driving.
+
+How a page reads to a model: in reading order, headings, the page's own text, and its
+controls (`[e12] button "Search"`), including ones made clickable only by script
+(`clickable`), boxes that scroll on their own (`scroll area … ↓ 2400px more`), what draws
+itself (canvas, maps, video, with its box), controls under something (`[covered]`), and
+controls scrolled out of their box folded into one line. Controls that share a name say where
+they are (`"26" (in 2026-12-26)`), and runs of numbered ones collapse
+(`[e98…e128] button "1"…"31"`). Typing into a combobox that opens its own field types into
+that field. A ref re-rendered since the last look goes to the one control with the same role
+and name, and is refused if there are several.
+
 Trip.com, London → Paris one-way on a chosen date, ten steps: one `page_do` call, 7 s.
+
+`Tests/bench/` runs WebVoyager tasks with Claude Code driving a copy of Sill, and reports how
+many it got right, how long each took and how many calls it made (see its README).
 
 ## The socket directly
 

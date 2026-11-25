@@ -21,6 +21,7 @@ struct PaletteSettingsView: View {
     @State private var copied = false
     @State private var copiedConnector = false
     @State private var signedOut = false
+    @State private var forgotHabits = false
 
     enum Choice { case engine }
 
@@ -112,6 +113,22 @@ struct PaletteSettingsView: View {
                                       isOn: $prefs.remoteConnector)
                             Hairline()
                             ActionRow(icon: .history, tint: .gray, title: "Agent activity", value: "Show") { AgentLog.show() }
+                            Hairline()
+                            SwitchRow(icon: .importing, tint: .blue, title: "Let agents find and read my files",
+                                      detail: "Desktop, Documents, Downloads, Pictures, Movies, Music and iCloud Drive",
+                                      isOn: $prefs.agentFiles)
+                            Hairline()
+                            SwitchRow(icon: .history, tint: .indigo, title: "Learn from what I do",
+                                      detail: "What you click on your sites and where it goes, so agents know the way. On this Mac only",
+                                      isOn: $prefs.learnsHabits)
+                            if prefs.learnsHabits {
+                                Hairline()
+                                ActionRow(icon: .trash, tint: .gray, title: "Forget what Sill learned",
+                                          value: forgotHabits ? "Forgotten" : nil) {
+                                    Habits.shared.forget()
+                                    forgotHabits = true
+                                }
+                            }
                             if prefs.remoteConnector {
                                 Hairline()
                                 SwitchRow(icon: .code, tint: .gray, title: "Let claude.ai run scripts in pages",

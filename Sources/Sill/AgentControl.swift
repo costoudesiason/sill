@@ -203,8 +203,9 @@ enum AgentCommands {
             AgentActivity.shared.ended()
             Self.giveBack(keyboard)
         }
+        let session = args["_session"] as? String ?? (args["_via"] as? String).map { "via:" + $0 } ?? owner.map { "\($0.hashValue)" } ?? "local"
         do {
-            let result = try await perform(command, args)
+            let result = try await Self.$session.withValue(session) { try await perform(command, args) }
             AgentLog.record(command: command, args: args, result: result, error: nil)
             return ["ok": true, "result": result]
         } catch let error as AgentError {
@@ -262,7 +263,15 @@ enum AgentCommands {
     /// Tabs the agent opened or named, the latest first. Leaving out "tab"
     /// means the latest of these still open, so an agent's work stays in its
     /// own tabs, out of sight, and never wanders into the one you're reading.
-    private static var agentTabs: [WeakTab] = []
+    /// Per agent: each client (a Claude Code session, claude.ai through the relay) has its
+    /// own current tab, so agents working side by side never act in each other's tabs.
+    private static var agentTabs: [WeakTab] {
+        get { tabsBySession[session] ?? [] }
+        set { tabsBySession[session] = newValue }
+    }
+    private static var tabsBySession: [String: [WeakTab]] = [:]
+    /// The agent a command comes from: sill-mcp stamps "_session" (one per client); else its connection.
+    @TaskLocal static var session: String = "local"
 
     private final class WeakTab {
         weak var tab: Tab?
@@ -378,10 +387,19 @@ enum AgentCommands {
     }
 
     /// A file in Desktop, Documents, Downloads, Pictures, Movies or Music, and not hidden.
+    /// Where your own files are: what agents may find, read and upload without asking.
+    nonisolated static var everydayFolders: [String] {
+        let home = NSHomeDirectory()
+        // A test copy also has a folder of its own (macOS asks before an app reads Downloads and the like).
+        let test = Places.testProfile.map { [NSTemporaryDirectory() + "sill-\($0)-files"] } ?? []
+        return (["Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music",
+                 "Library/Mobile Documents/com~apple~CloudDocs"].map { home + "/" + $0 } + test)
+            .filter { FileManager.default.fileExists(atPath: $0) }
+    }
+
     private static func everyday(_ path: String) -> Bool {
         let real = (path as NSString).resolvingSymlinksInPath
-        let home = (NSHomeDirectory() as NSString).resolvingSymlinksInPath
-        let folders = ["Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music"].map { home + "/" + $0 + "/" }
+        let folders = everydayFolders.map { (($0 as NSString).resolvingSymlinksInPath) + "/" }
         guard let folder = folders.first(where: { real.hasPrefix($0) }) else { return false }
         return !real.dropFirst(folder.count).split(separator: "/").contains { $0.hasPrefix(".") }
     }
@@ -426,6 +444,12 @@ enum AgentCommands {
                 await settle(tab, view)
             }
             return describe(tab, in: browser)
+
+        case "clipboard.set":
+            // The agent's own clipboard (yours is never touched): what its next ⌘V pastes.
+            guard let text = args["text"] as? String else { throw AgentError("Give \"text\".") }
+            AgentClipboard.set(text: text, html: args["html"] as? String)
+            return ["set": text.count]
 
         case "agent.stopped":
             // The client stopped the agent (claude.ai's stop button, a cancelled call): lights out.
@@ -506,6 +530,15 @@ enum AgentCommands {
         case "page.text":
             let (view, _, _) = try await webView(args)
             let limit = args["maxChars"] as? Int ?? 40_000
+            // Markdown (headings, lists, table rows) through shadow roots and frames; plain innerText if that fails.
+            let main = args["main"] as? Bool ?? false
+            if args["raw"] as? Bool != true,
+               let md = try? await evaluate("return window.__sillAgent.markdown(main, max)", in: view, world: Web.world,
+                                            arguments: ["main": main, "max": limit]) as? [String: Any],
+               let text = md["text"] as? String, !text.isEmpty {
+                return ["url": view.url?.absoluteString ?? "", "title": view.title ?? "", "text": text,
+                        "truncated": md["truncated"] as? Bool ?? false, "main": md["main"] as? Bool ?? false]
+            }
             let text = try await evaluate("return (document.body ? document.body.innerText : '')", in: view, world: Web.world) as? String ?? ""
             return ["url": view.url?.absoluteString ?? "", "title": view.title ?? "",
                     "text": String(text.prefix(limit)), "truncated": text.count > limit]
@@ -621,7 +654,8 @@ enum AgentCommands {
                 try await key("Enter", in: view)
                 await settle(tab, view)
             }
-            var answer: [String: Any] = ["typed": typed.ok, "ref": target.ref]
+            var answer: [String: Any] = ["typed": typed.ok, "ref": typed.into ?? target.ref]
+            if let into = typed.into { answer["followed"] = into }
             if let value = typed.value { answer["value"] = value }
             return outcome(answer, view, since: Date())
 
@@ -692,7 +726,7 @@ enum AgentCommands {
             if args["_via"] as? String == "relay", !Preferences.shared.remoteScripts {
                 throw AgentError("Running scripts is off for claude.ai (Sill › Settings › Agents). Use the other tools: page_snapshot, page_text, page_click, page_type.")
             }
-            let value = try await evaluate(script, in: view, world: .page)
+            let value = try await evaluate(script, in: view, world: .page, timeout: 30)
             return ["value": sanitize(value)]
 
         case "page.screenshot":
@@ -714,6 +748,70 @@ enum AgentCommands {
             configuration.caseSensitive = false
             let found = try await view.find(text, configuration: configuration)
             return ["found": found.matchFound]
+
+        case "habits.site":
+            // Where you go on a site and what you click there (Habits.swift).
+            guard Habits.shared.enabled else { return ["pages": [], "clicks": [], "off": true] }
+            let host = (args["host"] as? String) ?? (try? tab(args.merging(["remember": false]) { $1 }).0.webView?.url?.host()) ?? ""
+            guard !host.isEmpty else { throw AgentError("Give a \"host\".") }
+            let page = (args["url"] as? String).flatMap(URL.init(string:))
+            return Habits.shared.site(host, page: page, limit: args["limit"] as? Int ?? 6)
+
+        case "habits.search":
+            guard Habits.shared.enabled else {
+                let visits = History.shared.search(args["query"] as? String ?? "", limit: args["limit"] as? Int ?? 12)
+                return ["pages": visits.map { ["url": $0.url, "title": $0.title, "visits": $0.count,
+                                               "last": ISO8601DateFormatter().string(from: $0.last)] }, "clicks": []]
+            }
+            return Habits.shared.search(args["query"] as? String ?? "", limit: args["limit"] as? Int ?? 12)
+
+        case "habits.record":
+            // The test course only: a click as if the user made it.
+            guard Places.testProfile != nil, let page = (args["page"] as? String).flatMap(URL.init(string:)) else {
+                throw AgentError("Only in a test copy of Sill.")
+            }
+            Habits.shared.record(page: page, role: args["role"] as? String ?? "link", name: args["name"] as? String ?? "",
+                                 to: (args["to"] as? String).flatMap(URL.init(string:)), title: args["title"] as? String)
+            return ["recorded": true]
+
+        case "files.find":
+            guard Preferences.shared.agentFiles else { throw AgentError("Finding files is off in Sill's settings (Agents › Let agents find and read my files).") }
+            return try await Files.find(args["query"] as? String ?? "", limit: min(args["limit"] as? Int ?? 20, 60))
+
+        case "files.read":
+            guard Preferences.shared.agentFiles else { throw AgentError("Reading files is off in Sill's settings (Agents › Let agents find and read my files).") }
+            guard let path = args["path"] as? String, !path.isEmpty else { throw AgentError("Give a \"path\".") }
+            let full = (path as NSString).expandingTildeInPath
+            guard everyday(full) else {
+                throw AgentError("Only files in Desktop, Documents, Downloads, Pictures, Movies, Music or iCloud Drive (not hidden ones) can be read.")
+            }
+            return try await Files.read(full, maxChars: args["maxChars"] as? Int ?? 30_000)
+
+        case "tabs.split":
+            // Two tabs side by side in your window: yours (or one named) on the left, the agent's on the right.
+            let (tab, browser) = try tab(args)
+            if args["off"] as? Bool == true {
+                if browser.split?.contains(tab) == true { browser.unsplit() }
+                return describe(tab, in: browser)
+            }
+            let partner: Tab
+            if let id = args["with"] as? String {
+                guard let other = browser.tabs.first(where: { $0.id.uuidString.caseInsensitiveCompare(id) == .orderedSame }) else {
+                    throw AgentError("The other tab has to be in the same window. Open it there, or leave out \"with\" to pair with the tab in front.")
+                }
+                partner = other
+            } else {
+                guard let front = browser.selected, front !== tab else {
+                    throw AgentError("Your tab is the one in front: name another with \"with\".")
+                }
+                partner = front
+            }
+            guard !browser.isPrivate else { throw AgentError("Not in a private window.") }
+            if browser.split != nil { browser.unsplit() }
+            browser.select(partner)
+            browser.split(tab, onLeft: args["left"] as? Bool ?? false)
+            browser.window?.orderFront(nil)
+            return ["left": describe(browser.split?.left ?? partner, in: browser), "right": describe(browser.split?.right ?? tab, in: browser)]
 
         case "history.search":
             let query = args["query"] as? String ?? ""
@@ -1327,15 +1425,26 @@ enum AgentCommands {
     // MARK: helpers
 
     private static func evaluate(_ body: String, in view: SillWebView, world: WKContentWorld,
-                                 arguments: [String: Any] = [:]) async throws -> Any? {
+                                 arguments: [String: Any] = [:], timeout: Double = 6) async throws -> Any? {
         // A page waiting on its own dialog runs no script until it's answered.
         if let dialog = view.openDialog { throw dialogError(dialog) }
+        // A page that navigates away mid-call (a click that loads a heavy page) may never answer:
+        // never wait on it for ever.
+        final class Once { var done = false }
+        let once = Once()
         return try await withCheckedThrowingContinuation { continuation in
             view.callAsyncJavaScript(body, arguments: arguments, in: nil, in: world) { result in
+                guard !once.done else { return }
+                once.done = true
                 switch result {
                 case .success(let value): continuation.resume(returning: value)
                 case .failure(let error): continuation.resume(throwing: AgentError("Script failed: \(error.localizedDescription)"))
                 }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+                guard !once.done else { return }
+                once.done = true
+                continuation.resume(throwing: AgentError("The page didn't answer within \(Int(timeout)) s (it may be loading a new page): look again."))
             }
         }
     }
@@ -1501,25 +1610,39 @@ enum AgentCommands {
     }
 
     /// Types `text` into the target as a keyboard would, then reads it back.
-    private static func type(_ text: String, into target: Target, clear: Bool, in view: SillWebView) async throws -> (ok: Bool, value: String?) {
+    private static func type(_ text: String, into target: Target, clear: Bool, in view: SillWebView) async throws -> (ok: Bool, value: String?, into: String?) {
         let page = AgentPage.of(view)
         func run(_ call: String) async throws -> Any? {
             if let frame = target.frame { return try await page.evaluate("window.__sillAgent.\(call)", in: frame) }
             return try await evaluate("return window.__sillAgent.\(call)", in: view, world: Web.world)
         }
-        let ref = target.inner ?? target.ref
+        let baseRef = target.inner ?? target.ref
         if target.backend != nil {
             // Inside a closed shadow root: click to focus, then type.
             try await click(at: target.x, target.y, in: view, count: 1)
             if clear { try? await key("Meta+A", in: view) }
             try await devtools(view, "Input.insertText", ["text": text])
-            return (true, nil)
+            return (true, nil, nil)
+        }
+        var ref = baseRef
+        var into: String?
+        if target.frame == nil {
+            // A combobox or popup trigger: clicked for real first, as a person would, so its field opens.
+            if let prep = try? await run("prepType(\(json(ref)))") as? [String: Any], prep["click"] as? Bool == true {
+                try await click(at: target.x, target.y, in: view, count: 1)
+                try? await Task.sleep(nanoseconds: 120_000_000)
+            }
+            // The page put the focus in a field of its own (a popup's search box): type there.
+            if let moved = try? await run("retarget(\(json(ref)))") as? [String: Any], let to = moved["ref"] as? String {
+                ref = to
+                into = to
+            }
         }
         let kind = try await run("valueKind(\(json(ref)))") as? String ?? ""
         if ["date", "time", "datetime-local", "month", "week", "color", "range"].contains(kind) {
             let ok = try await run("setValue(\(json(ref)), \(json(text)))") as? Bool ?? false
             if !ok { throw AgentError("“\(target.name)” didn't take “\(text)”. \(kind == "date" ? "Dates go as YYYY-MM-DD." : "")") }
-            return (true, text)
+            return (true, text, into)
         }
         // A frame in another process gets the keyboard by being clicked first.
         if target.frame != nil { try await click(at: target.x, target.y, in: view, count: 1) }
@@ -1548,7 +1671,7 @@ enum AgentCommands {
             value = try await run("typed(\(json(ref)))") as? String
         }
         let isPassword = kind == "password"
-        return (took(value), isPassword ? nil : value)
+        return (took(value), isPassword ? nil : value, into)
     }
 
     /// An action's answer, with what it set off: a dialog, a new tab.
@@ -1578,6 +1701,14 @@ enum AgentClipboard {
     /// What the page just copied: the agent's now.
     static func keepAgents() { agents = take() }
 
+    /// Text the agent wants to paste: lines and tabs, so a spreadsheet puts each
+    /// piece in its own row and column, as it would yours.
+    static func set(text: String, html: String?) {
+        var item: [NSPasteboard.PasteboardType: Data] = [.string: Data(text.utf8)]
+        if let html { item[.html] = Data(html.utf8) }
+        agents = [item]
+    }
+
     /// For a paste: the agent's clipboard, briefly.
     static func lend() { put(agents) }
 
@@ -1602,7 +1733,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 12) return;
+      if (window.__sillAgent && window.__sillAgent.v === 13) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -1671,6 +1802,7 @@ enum AgentScript {
         }
       };
       const offsets = new WeakMap();   // element → its frame's offset, from the last walk
+      const metas = new Map();         // ref → its role and name when last listed, to find it again after a re-render
       const describe = (el, f, dx, dy) => {
         const r = f.getBoundingClientRect();
         const item = { ref: refOf(el), role: role(el), name: name(el), tag: el.tagName.toLowerCase(),
@@ -1692,12 +1824,53 @@ enum AgentScript {
         }
         if (el.getRootNode().activeElement === el || document.activeElement === el) item.focused = true;
         if (el.tagName === 'IFRAME') item.frame = true;
+        // A slider's range, so a value can be typed straight in.
+        if (el.type === 'range' || el.getAttribute('role') === 'slider') {
+          item.min = el.min || el.getAttribute('aria-valuemin') || ''; item.max = el.max || el.getAttribute('aria-valuemax') || '';
+          if (!item.value) item.value = el.getAttribute('aria-valuetext') || el.getAttribute('aria-valuenow') || '';
+        }
+        if (metas.size > 3000) metas.clear();
+        metas.set(item.ref, { role: item.role, name: item.name });
         return item;
       };
       const all = (fn) => { const out = []; walk(document.documentElement, 0, 0, (el, dx, dy) => { offsets.set(el, [dx, dy]); return fn(el, dx, dy, out); }); return out; };
-      const matches = (el) => { try { return el.matches(interactive); } catch (_) { return false; } };
+      // Things the page made clickable without saying so (a div with a click handler): found by the
+      // pointer cursor the page gives them, outermost only, at the last look.
+      let clickables = new WeakSet();
+      const matches = (el) => { try { return el.matches(interactive) || clickables.has(el); } catch (_) { return false; } };
       const deepQuery = (selector) => { let hit = null; walk(document.documentElement, 0, 0, (el, dx, dy) => { offsets.set(el, [dx, dy]); try { if (el.matches(selector)) { hit = el; return false; } } catch (_) { return false; } }); return hit; };
-      let lastAmbiguous = null, lastScore = 0;
+      let lastAmbiguous = null, lastScore = 0, lastClicked = null;
+      const deepActive = () => { let a = document.activeElement; while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement; return a; };
+      // Where a control sits, for ones that can't be told apart by name ("26" in two months'
+      // calendars, "Edit" on every row): the nearest container that says what it is.
+      const within = (el, own) => {
+        const up = (n) => n && (n.parentElement || (n.getRootNode() && n.getRootNode().host));
+        // A date the page keeps on it or its cell (data-iso="2026-12-26", datetime=…): the plainest answer.
+        for (let d = el, i = 0; d && i < 3; d = up(d), i++) {
+          if (!d.attributes) continue;
+          for (const a of d.attributes) if ((a.name.startsWith('data-') || a.name === 'datetime') && /^\d{4}-\d{2}-\d{2}/.test(a.value)) return a.value.slice(0, 25);
+        }
+        let n = up(el);
+        for (let depth = 0; n && n !== document.body && depth < 7; depth++, n = up(n)) {
+          const label = n.getAttribute('aria-label') || byIds(n, 'aria-labelledby');
+          if (label && clean(label) !== own) return clean(label).slice(0, 60);
+          // A heading, caption or legend inside it, before the control.
+          const head = n.querySelector(':scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6, :scope > caption, :scope > legend, :scope > [role=heading], :scope h2, :scope h3, :scope [role=heading], :scope caption');
+          if (head && !contains(head, el) && (head.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+            const t = clean(head.innerText); if (t && t !== own) return t.slice(0, 60);
+          }
+          // A short line of text that opens the container ("December 2026").
+          if (n.childElementCount >= 2) {
+            for (const k of n.children) {
+              if (contains(k, el)) break;
+              if (matches(k) || k.querySelector(interactive)) continue;
+              const t = clean(k.innerText);
+              if (t.length >= 3 && t.length <= 40 && t !== own) return t;
+            }
+          }
+        }
+        return '';
+      };
       const typable = (el) => (el.tagName === 'INPUT' && !['checkbox', 'radio', 'submit', 'button', 'reset', 'file', 'image', 'hidden'].includes(el.type))
         || el.tagName === 'TEXTAREA' || el.isContentEditable;
       // `editable`: only what can be typed into, the focused one first (a popup's search box shares its trigger's name).
@@ -1722,7 +1895,7 @@ enum AgentScript {
         // One thing, or nested parts of one thing (a group and its field): that. Otherwise it's a guess: say so.
         const apart = tied.filter((el) => !tied.some((other) => other !== el && contains(other, el)));
         if (apart.length > 1) {
-          lastAmbiguous = apart.slice(0, 6).map((el) => ({ ref: refOf(el), role: role(el), name: name(el).slice(0, 70) }));
+          lastAmbiguous = apart.slice(0, 6).map((el) => { const n = name(el).slice(0, 70), w = within(el, n); return { ref: refOf(el), role: role(el), name: w ? n + ' (in ' + w + ')' : n }; });
           return null;
         }
         lastScore = score;
@@ -1764,25 +1937,192 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 12,
+        v: 13,
+        // The page as a person sees it, in reading order: headings, the text around the
+        // controls (prices, results, messages), every control (including ones made clickable
+        // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.
+        // Controls something else is on top of are marked. Near the view unless all_.
         snapshot(all_) {
+          const t0 = performance.now();
+          const H = innerHeight, W = innerWidth;
+          const near = (top, h, below) => all_ || (top + h > -200 && top < H + below);
+          const box = (r, dx, dy) => ({ x: Math.round(r.left + dx), y: Math.round(r.top + dy), w: Math.round(r.width), h: Math.round(r.height) });
+          const blocky = (el) => { const d = style(el).display; return !d.startsWith('inline') && d !== 'contents'; };
+          const fresh = new WeakSet();
+          let lastText = null, lastControl = null, texts = 0, styled = 0;
+          const recentNames = [];
+          const scrollers = [];   // boxes that clip what's inside them: what's scrolled out of them isn't visible now
+          const textBudget = all_ ? 400 : 70;
+          const ownText = (el) => { for (const n of el.childNodes) if (n.nodeType === 3 && n.textContent.trim()) return true; return false; };
+          const skip = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'svg', 'SVG', 'PATH', 'OPTION']);
           const items = all((el, dx, dy, out) => {
-            if (out.length >= 500) return;
+            if (out.length >= 700) return false;
+            if (skip.has(el.tagName)) return;
             const said = context(el);
             if (said) {
               const text = clean(el.innerText || el.textContent).slice(0, 200);
               const r = el.getBoundingClientRect();
-              if (text && seen(el) && (all_ || (r.top + dy > -200 && r.top + dy < innerHeight + 1200)))
-                out.push({ context: said, text, level: said === 'heading' ? Number((el.tagName.match(/\d/) || [el.getAttribute('aria-level') || 2])[0]) : 0,
-                           box: { x: Math.round(r.left + dx), y: Math.round(r.top + dy), w: Math.round(r.width), h: Math.round(r.height) } });
+              if (text && seen(el) && near(r.top + dy, r.height, 1200)) {
+                out.push({ context: said, text, level: said === 'heading' ? Number((el.tagName.match(/\d/) || [el.getAttribute('aria-level') || 2])[0]) : 0, box: box(r, dx, dy) });
+                lastText = el;
+              }
               if (said === 'alert') return;
             }
-            if (!matches(el)) return;
-            const f = face(el); if (!f) return;
-            if (!all_) { const r = f.getBoundingClientRect(); const t = r.top + dy; if (t + r.height < -200 || t > innerHeight + 1200) return; }
-            out.push(describe(el, f, dx, dy));
+            let control = matches(el);
+            const r = el.getBoundingClientRect();
+            const inView = near(r.top + dy, r.height, 1200);
+            // Clickable by script only: the pointer cursor starts here (not inherited), nothing inside or around is a control.
+            if (!control && inView && r.width >= 8 && r.height >= 8 && performance.now() - t0 < 250 && r.width * r.height < W * H * 0.5) {
+              styled++;
+              const st = style(el);
+              if (st.cursor === 'pointer' && el.parentElement && style(el.parentElement).cursor !== 'pointer'
+                  && !el.closest(interactive) && !el.querySelector(interactive) && seen(el)) {
+                clickables.add(el); fresh.add(el); control = true;
+              }
+              // A box that scrolls on its own (a results list beside a map, a chat): say how much more there is.
+              if (/(auto|scroll|hidden)/.test(st.overflowY + st.overflowX) && el.clientHeight > 80 && el !== document.scrollingElement
+                  && (el.scrollHeight > el.clientHeight + 4 || el.scrollWidth > el.clientWidth + 4)) scrollers.push(el);
+              if (/(auto|scroll)/.test(st.overflowY + st.overflowX) && el.clientHeight > 80 && el !== document.scrollingElement) {
+                const down = el.scrollHeight - el.clientHeight - el.scrollTop, right = el.scrollWidth - el.clientWidth - el.scrollLeft;
+                if (down > 40 || el.scrollTop > 40 || right > 80) {
+                  const label = el.getAttribute('aria-label') || (el.querySelector('h1,h2,h3,[role=heading]') || {}).innerText || '';
+                  out.push({ context: 'scroll', ref: refOf(el), name: clean(label).slice(0, 60), below: Math.round(down), above: Math.round(el.scrollTop),
+                             right: right > 80 ? Math.round(right) : 0, box: box(r, dx, dy) });
+                }
+              }
+            }
+            // What draws itself: words in it aren't elements, so it's acted on by point (or its ref, at its middle).
+            if (!control && ['CANVAS', 'VIDEO', 'EMBED', 'OBJECT'].includes(el.tagName) && r.width >= 80 && r.height >= 60 && inView && seen(el)) {
+              const label = el.getAttribute('aria-label') || el.getAttribute('title') || (el.closest('[aria-label]') || {}).getAttribute?.('aria-label') || '';
+              out.push({ context: 'media', ref: refOf(el), kind: el.tagName.toLowerCase(), name: clean(label).slice(0, 60), box: box(r, dx, dy) });
+              return;
+            }
+            if (control) {
+              const f = face(el); if (!f) return;
+              const fr = f.getBoundingClientRect();
+              if (!near(fr.top + dy, fr.height, 1200)) return;
+              const item = describe(el, f, dx, dy);
+              if (fresh.has(el)) { item.role = 'clickable'; item.byScript = true; }
+              // Scrolled out of a box it's in (the months of a calendar after the first two, a carousel's far cards).
+              for (const box of scrollers) {
+                if (!contains(box, el)) continue;
+                const b = box.getBoundingClientRect();
+                if (fr.bottom <= b.top + 2 || fr.top >= b.bottom - 2 || fr.right <= b.left + 2 || fr.left >= b.right - 2) { item.clipped = refOf(box); break; }
+              }
+              // On screen but under something else (a dialog, a banner): a click wouldn't reach it.
+              if (fr.top >= 0 && fr.bottom <= f.ownerDocument.defaultView.innerHeight && fr.left >= 0 && fr.right <= f.ownerDocument.defaultView.innerWidth) {
+                const hit = hitAt(f.ownerDocument, fr.left + fr.width / 2, fr.top + fr.height / 2);
+                if (hit && !reaches(el, f, hit)) {
+                  const hr = (hit.getBoundingClientRect && hit.getBoundingClientRect()) || { width: 0, height: 0 };
+                  if (!(hr.width * hr.height < fr.width * fr.height * 0.3)) item.covered = true;   // a small badge on it isn't cover
+                }
+              }
+              out.push(item);
+              lastControl = el;
+              recentNames.push(String(item.name || '').toLowerCase(), String(item.value || '').toLowerCase());
+              if (recentNames.length > 8) recentNames.splice(0, recentNames.length - 8);
+              return;
+            }
+            // The words: a block's text once (not again for what's inside it), not a control's own name again.
+            if (texts >= textBudget || !ownText(el) || (lastText && contains(lastText, el)) || (lastControl && contains(lastControl, el)) || el.closest(interactive)) return;
+            let block = el;
+            while (block.parentElement && !blocky(block) && block.parentElement !== document.body) block = block.parentElement;
+            if (lastText && contains(lastText, block)) return;
+            const br = block.getBoundingClientRect();
+            if (!near(br.top + dy, br.height, all_ ? 1e9 : 700) || !seen(block)) return;
+            const text = clean(block.innerText);
+            if (text.length < 2) return;
+            // Not the words of a control just listed again (a tooltip, a label beside it).
+            const bare = text.replace(/[\u200b-\u200f\u2060\ufeff]/g, '').toLowerCase();
+            if (recentNames.some((n) => n && (n === bare || (bare.length < 40 && n.includes(bare))))) return;
+            lastText = block; texts++;
+            out.push({ context: 'text', text: text.length > 180 ? text.slice(0, 177) + '…' : text, box: box(br, dx, dy) });
           });
+          // Names shared by several controls, or too short to say anything: where each one is.
+          const counts = new Map();
+          for (const it of items) if (it.ref && !it.context) counts.set(it.role + '|' + it.name, (counts.get(it.role + '|' + it.name) || 0) + 1);
+          let placed = 0; const tw = performance.now();
+          for (const it of items) {
+            if (!it.ref || it.context || placed > 150 || performance.now() - tw > 250) continue;
+            if (counts.get(it.role + '|' + it.name) > 1 || (it.name && it.name.length <= 3)) {
+              const el = find(it.ref); const w = el ? within(el, it.name) : '';
+              if (w) { it.within = w; placed++; }
+            }
+          }
+          const se = document.scrollingElement || document.documentElement;
+          items.push({ context: 'page', below: Math.max(0, Math.round(se.scrollHeight - se.scrollTop - innerHeight)), above: Math.round(se.scrollTop),
+                       truncated: texts >= textBudget, ms: Math.round(performance.now() - t0) });
           return items;
+        },
+        // The page's words as plain Markdown: headings, paragraphs, lists, table rows as
+        // "a | b | c", through open shadow roots and same-origin frames, only what's shown.
+        // main: just the main content (no navigation, header, footer, sidebars).
+        markdown(main, max) {
+          const out = []; let size = 0;
+          const visible = (el) => el.checkVisibility ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : seen(el);
+          const isBlock = (el) => { const d = style(el).display; return d !== 'none' && !d.startsWith('inline') && d !== 'contents'; };
+          const chrome = /^(navigation|banner|contentinfo|complementary|search)$/;
+          const push = (line) => {
+            line = line.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim();
+            if (!line || size > max) return;
+            if (out.length && out[out.length - 1] === line) return;
+            out.push(line); size += line.length + 1;
+          };
+          const kidsOf = (el) => {
+            if (el.shadowRoot) return [...el.shadowRoot.childNodes];
+            if (el.tagName === 'SLOT') return el.assignedNodes({ flatten: true });
+            if (el.tagName === 'IFRAME') { let d = null; try { d = el.contentDocument; } catch (_) {} return d && d.body ? [d.body] : []; }
+            return [...el.childNodes];
+          };
+          const walkMd = (el, prefix) => {
+            if (size > max || el.nodeType !== 1) return;
+            const tag = el.tagName;
+            if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'svg', 'SVG', 'HEAD', 'SELECT', 'OPTION'].includes(tag)) return;
+            if (!visible(el) && tag !== 'SLOT') return;
+            const r = el.getAttribute('role') || '';
+            if (main && (['NAV', 'FOOTER', 'ASIDE', 'HEADER'].includes(tag) && !el.closest('main,article,[role=main]') || chrome.test(r))) return;
+            // Main content only: a block that's all links and buttons (tabs, menus, toolbars) is furniture.
+            if (main && el.childElementCount >= 3) {
+              const all = clean(el.innerText);
+              if (all.length && all.length < 600) {
+                let linked = 0;
+                el.querySelectorAll('a, button, label, [role=button], [role=tab], [role=menuitem], [role=link]').forEach((a) => { if (!a.parentElement.closest('a, button, label, [role=button], [role=tab], [role=menuitem], [role=link]') || a.parentElement === el) linked += clean(a.innerText).length; });
+                if (linked / all.length > 0.8) return;
+              }
+            }
+            if (/^H[1-6]$/.test(tag) || r === 'heading') {
+              if (!clean(el.innerText)) return;
+              push('#'.repeat(Number((tag.match(/\d/) || [el.getAttribute('aria-level') || 2])[0])) + ' ' + clean(el.innerText)); return;
+            }
+            if (tag === 'TR' || r === 'row') {
+              const cells = [...el.children].filter(visible).map((c) => clean(c.innerText)).filter(Boolean);
+              if (cells.length) push(prefix + cells.join(' | ')); return;
+            }
+            if (tag === 'IMG') { const alt = clean(el.getAttribute('alt')); if (alt && alt.length > 3) push(prefix + '[image: ' + alt.slice(0, 100) + ']'); return; }
+            if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+            const kids = kidsOf(el);
+            const deep = el.shadowRoot || tag === 'IFRAME' || tag === 'SLOT' ||
+              kids.some((k) => k.nodeType === 1 && (k.shadowRoot || k.tagName === 'IFRAME' || k.tagName === 'SLOT' || (visible(k) && isBlock(k))));
+            const mark = tag === 'LI' ? '- ' : tag === 'BLOCKQUOTE' ? '> ' : '';
+            if (!deep) { const t = clean(el.innerText); if (t) push(prefix + mark + t); return; }
+            let run = '';
+            for (const k of kids) {
+              if (k.nodeType === 3) { run += k.textContent; continue; }
+              if (k.nodeType !== 1) continue;
+              if (!isBlock(k) && !k.shadowRoot && k.tagName !== 'IFRAME' && k.tagName !== 'SLOT') { if (visible(k)) run += ' ' + (k.innerText || '') + ' '; continue; }
+              if (clean(run)) { push(prefix + mark + clean(run)); run = ''; }
+              walkMd(k, prefix + (mark === '- ' ? '  ' : ''));
+            }
+            if (clean(run)) push(prefix + mark + clean(run));
+          };
+          let root = document.body;
+          if (main) {
+            const cands = [...document.querySelectorAll('main,[role=main],article')].filter(visible);
+            if (cands.length) root = cands.sort((a, b) => b.innerText.length - a.innerText.length)[0];
+          }
+          if (root) walkMd(root, '');
+          const text = out.join('\n');
+          return { text: text.slice(0, max), truncated: size > max, main: !!main && root !== document.body };
         },
         // Custom elements whose insides are hidden (closed shadow roots): Sill asks Chromium's accessibility tree.
         opaque() {
@@ -1824,8 +2164,24 @@ enum AgentScript {
           return placed;
         },
         // Where a click on it lands, for checking afterwards that it did.
+        // Before typing: a combobox or popup trigger not yet open gets a real click first
+        // (that's what opens its field). After: if the page moved the focus to a field of its
+        // own (the search box of a popup that opened), that's where the typing goes.
+        prepType(ref) {
+          const el = find(ref); if (!el) return { click: false };
+          const active = deepActive();
+          const opener = el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-haspopup') || el.getAttribute('aria-expanded') === 'false';
+          return { click: opener && active !== el && !contains(el, active) };
+        },
+        retarget(ref) {
+          const el = find(ref); const active = deepActive();
+          if (!el || !active || active === el || contains(el, active) || !typable(active) || !seen(active)) return null;
+          const opener = el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-haspopup') || el.hasAttribute('aria-expanded') || lastClicked === el || !typable(el);
+          return opener ? { ref: refOf(active), name: name(active) } : null;
+        },
         arm(ref, button) {
           const el = find(ref); if (!el) return false;
+          lastClicked = el;
           const doc = el.ownerDocument, win = doc.defaultView;
           window.__sillLanding = null;
           // A right button makes contextmenu, a middle one auxclick: no click.
@@ -1838,6 +2194,16 @@ enum AgentScript {
         landed() { return window.__sillLanding; },
         place(ref, selector, text, settled, editable) {
           let el = ref ? find(ref) : null;
+          // Re-rendered since the last look: the one control with the same role and name is the same
+          // control (never a lookalike: two or more with that name, and the old ref is refused).
+          if (ref && !el && metas.has(ref)) {
+            const m = metas.get(ref), same = [];
+            walk(document.documentElement, 0, 0, (e, dx, dy) => {
+              offsets.set(e, [dx, dy]);
+              if (matches(e) && role(e) === m.role && name(e) === m.name && face(e)) { same.push(e); if (same.length > 1) return false; }
+            });
+            if (same.length === 1) el = same[0];
+          }
           if (ref && !el) return { gone: known(ref) || /^e\d+$/.test(ref) };
           if (!el && selector) el = deepQuery(selector);
           lastAmbiguous = null; lastScore = 0;
@@ -1989,7 +2355,14 @@ enum AgentScript {
         mark(ref, token) { const el = find(ref); if (!el) return false; el.setAttribute('data-sill-pick', token); return true; },
         present(selector, text) {
           if (selector) return !!deepQuery(selector);
-          if (text) return (document.body && document.body.innerText || '').toLowerCase().includes(String(text).toLowerCase()) || !!byText(text);
+          if (text) {
+            const want = String(text).toLowerCase();
+            if ((document.body && document.body.innerText || '').toLowerCase().includes(want) || byText(text)) return true;
+            // What a field shows counts too ("New York" in the From box).
+            let hit = false;
+            walk(document.documentElement, 0, 0, (el) => { if (typable(el) && String(el.value || el.innerText || '').toLowerCase().includes(want)) { hit = true; return false; } });
+            return hit;
+          }
           return document.readyState === 'complete';
         },
       };
