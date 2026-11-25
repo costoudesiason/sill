@@ -72,6 +72,11 @@ filter URL, a page from history_search) rather than typing and clicking your way
 the goal and the values to type, TypeSafe's Jev drives the page on the Mac at a fraction of a second per step with no \
 round trip to you, and you get back the finished page to check. You think and check; it clicks. (tabs_open takes a \
 goal and values too: open, drive and see the result in one call.)
+Nothing is out of reach. A tab a page opens from your click is yours at once (you act in it next). When no step fits, a \
+short script does it: read or change the page with page_read script or a {"read": script} step, in any tab. Structured \
+data goes into sheets and grids with {"paste"} (lines become rows, tabs columns). A step that fails is retried once \
+after the general fix (a consent banner turned down, a wrong turn undone, a page still arriving waited out), so you \
+rarely need to recover by hand.
 Never spend a call closing tabs: Sill closes the tabs you leave a minute after your last call. To leave one open \
 for the user (results to look at, a filled-in form), tabs_close keep_open=true.
 
@@ -875,10 +880,9 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
     // What steps read ("as"), for "{{name}}" in later steps; tabs opened by name.
     var vars: [String: String] = [:]
     var tabs: [String: String] = [:]
-    for (i, raw) in steps.enumerated() {
-        let t0 = Date()
-        let step = fill(raw, vars) as? [String: Any] ?? raw
-        do {
+    // Where the tab is, from the actions' own answers: a click that went somewhere unexpected can be undone.
+    var currentURL: String? = nil, lastStepWentAway = false
+    func attempt(_ step: [String: Any]) throws -> String {
             var did = ""
             // A step in another tab: by the name an "open" step gave it, or by id. Later steps stay there.
             if let t = step["tab"] as? String, !t.isEmpty { tab["tab"] = tabs[t] ?? t }
@@ -909,6 +913,8 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 var a = tab.merging(target(t, in: step["in"])) { $1 }
                 for k in ["double", "button", "hold", "modifiers"] { if let v = step[k] { a[k] = v } }
                 let r = try sill.run("page.click", a) as? [String: Any] ?? [:]
+                if let u = r["url"] as? String { currentURL = u }
+                if let from = r["from"] as? String, let to = r["url"] as? String, from != to { lastStepWentAway = true }
                 if let missed = r["missed"] as? String { throw Failure(missed) }
                 did = "clicked \(r["name"] as? String ?? (t as? String ?? ""))"
                 if r["partial"] as? Bool == true { did += " ⚠ partial match for “\(t as? String ?? "")”: check it's what you meant" }
@@ -921,6 +927,7 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 if let r = tt["ref"] { a["ref"] = r } else if let s = tt["selector"] { a["selector"] = s } else { a["label"] = tt["text"] }
                 if let scope = tt["in"] { a["in"] = scope }
                 let r = try sill.run("page.type", a) as? [String: Any] ?? [:]
+                if let u = r["url"] as? String { currentURL = u }
                 let reads = r["value"] as? String ?? ""
                 did = (r["followed"] != nil ? "typed into the field that opened, " : "typed into ") + "\(r["ref"] as? String ?? "") → “\(clip(reads.isEmpty && a["submit"] as? Bool == true ? a["text"] as? String ?? "" : reads, 60))”"
                     + (a["submit"] as? Bool == true ? " and pressed Enter" : "")
@@ -1032,6 +1039,26 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
             } else {
                 throw Failure("Unknown step \(step.keys.sorted().joined(separator: ", ")).")
             }
+            return did
+    }
+    for (i, raw) in steps.enumerated() {
+        let t0 = Date()
+        let step = fill(raw, vars) as? [String: Any] ?? raw
+        do {
+            let wentAway = lastStepWentAway
+            lastStepWentAway = false
+            var did: String
+            do { did = try attempt(step) }
+            catch let failure as Failure {
+                // Recalculate, as a map does after a wrong turn: one general fix, then the same step again.
+                guard let fix = recalculate(sill, failure, tab: tab, wentAway: wentAway) else { throw failure }
+                do { did = try attempt(step) + " (recalculated: \(fix))" }
+                catch {
+                    // The way back didn't have it either: return to where the click went, and say what failed first.
+                    if fix.contains("went back") { _ = try? sill.run("page.forward", tab) }
+                    throw failure
+                }
+            }
             lines.append("\(i + 1). ✓ \(did) (\(Int(Date().timeIntervalSince(t0) * 1000)) ms)")
         } catch let failure as Failure {
             lines.append("\(i + 1). ✗ \(failure.message)")
@@ -1054,6 +1081,36 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
         lines.append(listing(snapshot, full: args["full"] as? Bool ?? false))
     }
     return lines.joined(separator: "\n")
+}
+
+/// After a step fails, the general ways back on course, tried before giving up: what's in the way
+/// closed (a consent banner the privacy-keeping way, a menu left open by Escape), a click that took the
+/// tab somewhere unexpected undone, a page still arriving waited out. Never a guess at a different target.
+func recalculate(_ sill: Sill, _ failure: Failure, tab: [String: Any], wentAway: Bool) -> String? {
+    let lower = failure.message.lowercased()
+    if lower.contains("covered by") || lower.contains("behind the open dialog") || lower.contains("page-wide overlay") {
+        if ["cookie", "consent", "privacy", "gdpr"].contains(where: lower.contains) {
+            for name in ["Reject all", "Reject All", "Decline", "Necessary only", "Only necessary", "Use necessary cookies only", "Continue without accepting", "Close"] {
+                if let r = try? sill.run("page.click", tab.merging(["text": name, "wait": 0.2]) { $1 }) as? [String: Any], r["missed"] == nil {
+                    return "closed the consent banner in the way (“\(name)”)"
+                }
+            }
+        }
+        if lower.contains("page-wide overlay") || lower.contains("covered by") {
+            _ = try? sill.run("page.press", tab.merging(["key": "Escape"]) { $1 })
+            return "pressed Escape to close what was in the way"
+        }
+        return nil
+    }
+    if lower.hasPrefix("nothing on the page matches") && wentAway {
+        _ = try? sill.run("page.back", tab)
+        return "the click before went somewhere else, so went back"
+    }
+    if lower.hasPrefix("nothing on the page matches") || lower.contains("no longer on the page") {
+        _ = try? sill.run("page.wait", tab.merging(["settled": true, "timeout": 3]) { $1 })
+        return "waited for the page to finish changing"
+    }
+    return nil
 }
 
 // MARK: - One-step tools

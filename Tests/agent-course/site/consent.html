@@ -1,0 +1,6 @@
+<!doctype html><meta charset=utf-8><title>Consent</title><script src=kit.js></script>
+<button style="margin:80px" onclick="done('clickedTarget', true)">Download report</button>
+<a href="two-months.html">Open details</a> <button onclick="done('added', true)">Add to list</button>
+<div id=banner style="position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:end;justify-content:center">
+<div style="background:#fff;padding:20px;margin-bottom:30px">We use cookies to improve your experience.
+<button onclick="banner.remove();done('choice','rejected')">Reject all</button> <button onclick="banner.remove();done('choice','accepted')">Accept all</button></div></div>

@@ -747,6 +747,7 @@ enum AgentCommands {
                 for _ in 0..<15 where adopted.map({ $0.at < started }) ?? true { try? await Task.sleep(nanoseconds: 10_000_000) }
             }
             var answer: [String: Any] = ["clicked": target.ref, "name": target.name]
+            if let from = answerURL { answer["from"] = from }   // where it was: a click that went somewhere can be undone
             if target.partial { answer["partial"] = true }
             // No click arrived at all (and the page didn't move on): say so, never "clicked".
             let urlBefore = answerURL
@@ -1680,7 +1681,8 @@ enum AgentCommands {
                         + (exits.isEmpty ? "Close it first (page_press Escape often does)." : "Close it first: \(exits.joined(separator: " or ")), or page_press Escape."))
                 }
                 if cover["overlay"] as? Bool == true {
-                    throw AgentError("“\(name)” (\(ref)) is under a page-wide overlay (a menu, picker or banner left open). Close it first: page_press Escape often does.")
+                    let says = (cover["name"] as? String).flatMap { $0.isEmpty ? nil : " (it says “\($0)”)" } ?? ""
+                    throw AgentError("“\(name)” (\(ref)) is under a page-wide overlay\(says): a menu, picker or banner left open. Close it first: page_press Escape often does.")
                 }
                 let what = (cover["name"] as? String).flatMap { $0.isEmpty ? nil : "“\(String($0.prefix(60)))”" } ?? "a \(cover["tag"] as? String ?? "layer")"
                 let coverRef = (cover["ref"] as? String).map { " (\($0))" } ?? ""
@@ -2504,7 +2506,7 @@ enum AgentScript {
               out.coveredBy = { dialog: name(dialog).slice(0, 50) || 'a dialog', ref: refOf(dialog), exits: exits.map((b) => ({ ref: refOf(b), name: name(b) })) };
             } else {
               const cr = cover.getBoundingClientRect();
-              if (cr.width * cr.height > innerWidth * innerHeight * 0.6) out.coveredBy = { overlay: true, tag: cover.tagName.toLowerCase() };
+              if (cr.width * cr.height > innerWidth * innerHeight * 0.6) out.coveredBy = { overlay: true, tag: cover.tagName.toLowerCase(), name: clean(cover.innerText).slice(0, 80) };
               else { let c = cover; while (c && !matches(c) && c.parentElement) c = c.parentElement;
                      out.coveredBy = { ref: c && matches(c) ? refOf(c) : null, name: name(c || cover).slice(0, 60), tag: (c || cover).tagName.toLowerCase() }; }
             }

@@ -391,6 +391,17 @@ def pdf(c):
     return "image" in [x.get("type") for x in r.get("content", [])]
 
 @case
+def recalculate(c):
+    # Off course and back without a turn: a consent banner in the way is turned down (never accepted),
+    # and a click that went to another page is undone when the next target was on this one.
+    out = c.must("page_do", steps=[{"click": "Download report"}])
+    if "recalculated" not in out: raise Fail("no recalculation: " + out[:300])
+    if c.result().get("choice") != "rejected": raise Fail(f"banner: {c.result()}")
+    out = c.must("page_do", steps=[{"click": "Open details"}, {"click": "Add to list"}])
+    if "went back" not in out: raise Fail("no way back: " + out[:300])
+    return c.result().get("added") is True
+
+@case
 def pick(c):
     # Type and choose the suggestion, one step.
     c.must("page_do", steps=[{"type": "City", "text": "Pr", "pick": "Prague"}])
@@ -665,7 +676,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)
