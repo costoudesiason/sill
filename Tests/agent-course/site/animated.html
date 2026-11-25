@@ -1,0 +1,14 @@
+<!doctype html><meta charset=utf-8><title>Always moving</title><script src=kit.js></script>
+<style>.pulse{opacity:.5}</style>
+<!-- A page that never holds still, as many do: a spinner moved by script every frame, an svg
+     redrawn, a class flipped on a timer. None of it answers a click, so none of it should be
+     waited for. -->
+<div id=spin style="width:20px;height:20px;background:#09f"></div>
+<svg width=60 height=60><circle id=dot cx=30 cy=30 r=10 fill=red /></svg>
+<p id=badge>Live</p>
+<button onclick="n++; out.textContent = n; if (n === 3) done('count', n)">Add one</button> <span id=out>0</span>
+<script>
+let n = 0, t = 0;
+(function frame() { t++; spin.style.transform = `rotate(${t * 6}deg)`; dot.setAttribute('cx', 30 + 20 * Math.sin(t / 10)); requestAnimationFrame(frame); })();
+setInterval(() => badge.classList.toggle('pulse'), 100);
+</script>

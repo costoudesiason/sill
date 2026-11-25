@@ -30,11 +30,23 @@ final class AgentActivity {
 
     /// A tab is the agent's from its first touch until it's released: closed,
     /// handed back (tabs_release), the agent gone (its connection closed), or
-    /// left untouched this long. All that time, its dots and glow show.
-    private let release: TimeInterval = 300
+    /// left untouched this long. All that time, its dots and glow show. A chat
+    /// you stop in claude.ai says nothing to Sill (the relay's line stays up),
+    /// so a minute without a touch is taken as the agent having stopped: long
+    /// enough for a model's longest pause between steps, and it takes the tab
+    /// up again with its next one.
+    private let release: TimeInterval = 60
 
     func began() { busy += 1; keepAwake() }
-    func ended() { busy = max(0, busy - 1); keepAwake() }
+    func ended() {
+        busy = max(0, busy - 1)
+        if let latest { work[latest]?.last = Date() }   // the fade counts from when the work ended
+        keepAwake()
+    }
+
+    /// The agent was stopped (its client cancelled a call): every tab goes dark now.
+    /// They stay its own; the next command lights them again.
+    func quiet() { for key in Array(work.keys) { work[key]?.last = .distantPast; hide(key) } }
 
     // MARK: awake while working
 
@@ -111,8 +123,13 @@ final class AgentActivity {
     private func tick() {
         for (key, item) in work {
             guard let tab = item.tab else { hide(key, now: true); work[key] = nil; continue }
-            show(key)   // held: dots, and the glow when you look at it
             let current = busy > 0 && key == latest
+            // Dots and glow only while the agent is at work in the tab: acting in it
+            // now, or a few seconds after (a model choosing its next step). Nothing
+            // tells Sill a chat was paused or stopped, so the glow follows the work
+            // itself: no more commands, and it fades. The tab stays the agent's
+            // (its next command lights it again) until released.
+            if current || Date().timeIntervalSince(item.last) < 5 { show(key) } else { hide(key) }
             if Date().timeIntervalSince(item.last) > release && !current {
                 if let view = item.view { AgentCommands.letGo(view, of: tab) }
                 hide(key, now: true)

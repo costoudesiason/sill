@@ -10,9 +10,10 @@ const PORT = 18000 + Math.floor(Math.random() * 1000);
 const BASE = `http://127.0.0.1:${PORT}`;
 const SECRET = crypto.randomBytes(32).toString("hex");
 let relay, mac, approve = true;
+const cancelled = [];
 
 test.before(async () => {
-  relay = spawn(process.execPath, ["server.mjs"], { env: { ...process.env, PORT: String(PORT), RELAY_SECRET: SECRET, PUBLIC_URL: BASE }, stdio: "pipe" });
+  relay = spawn(process.execPath, ["server.mjs"], { env: { ...process.env, PORT: String(PORT), RELAY_SECRET: SECRET, PUBLIC_URL: BASE, RECONNECT_GRACE_MS: "1500" }, stdio: "pipe" });
   for (let i = 0; i < 50; i++) {
     try { await fetch(`${BASE}/health`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
   }
@@ -29,6 +30,7 @@ function connectMac() {
       if (m.t === "approve") ws.send(JSON.stringify({ id: m.id, approved: approve }));
       if (m.t === "rpc") {
         const { id, method, params } = m.msg;
+        if (method === "notifications/cancelled") { cancelled.push(params); return; }
         let result;
         if (method === "initialize") result = { protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "sill" } };
         else if (method === "tools/list") result = { tools: [{ name: "status", inputSchema: { type: "object" } }] };
@@ -135,6 +137,36 @@ test("calls answer even when the Mac drops off", async () => {
     body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "status" } }) })).json();
   assert.equal(res.result.isError, true);
   assert.match(res.result.content[0].text, /isn't connected/);
+});
+
+test("a call made while the Mac is reconnecting waits for it", async () => {
+  mac?.close();
+  mac = await connectMac();
+  const { reg, verifier, decided } = await signIn();
+  const code = new URL(decided.redirect).searchParams.get("code");
+  const tokens = await (await fetch(`${BASE}/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "authorization_code", code, code_verifier: verifier, client_id: reg.client_id }) })).json();
+  mac.close();
+  await new Promise((r) => setTimeout(r, 100));
+  const call = fetch(`${BASE}/mcp`, { method: "POST", headers: { Authorization: `Bearer ${tokens.access_token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "status" } }) });
+  await new Promise((r) => setTimeout(r, 400));
+  mac = await connectMac();
+  const res = await (await call).json();
+  assert.equal(res.result.content[0].text, "ran status");
+});
+
+test("a stopped call tells Sill, so its glow goes", async () => {
+  mac?.close();
+  mac = await connectMac();
+  const { reg, verifier, decided } = await signIn();
+  const code = new URL(decided.redirect).searchParams.get("code");
+  const tokens = await (await fetch(`${BASE}/token`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "authorization_code", code, code_verifier: verifier, client_id: reg.client_id }) })).json();
+  await fetch(`${BASE}/mcp`, { method: "POST", headers: { Authorization: `Bearer ${tokens.access_token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 3 } }) });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(cancelled.at(-1)?.requestId, 3);
 });
 
 test("Sign out claude.ai in Sill turns earlier sign-ins away", async () => {

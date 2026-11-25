@@ -308,9 +308,9 @@ enum AgentCommands {
         for weak in agentTabs {
             if let tab = weak.tab, let browser = browser(of: tab) { return (tab, browser) }
         }
-        guard let browser = AppDelegate.shared.current.flatMap({ $0.isPrivate ? nil : $0 }) ?? browsers.last,
-              let selected = browser.selected else { throw AgentError("No open tab. Use tabs.open first.") }
-        return (selected, browser)
+        // Never the tab you're in by default: an agent works only in tabs it opened or
+        // was given by id (tabs.list), so its clicks and glow can't land on your page.
+        throw AgentError("You have no tab of your own open. Open one with tabs_open, or name one of the user's by id (tabs_list).")
     }
 
     /// The tab's page, made if it was asleep, drawing even out of sight, and
@@ -377,6 +377,15 @@ enum AgentCommands {
         _ = try? await devtools(view, "Emulation.setFocusEmulationEnabled", ["enabled": true], timeout: 3)
     }
 
+    /// A file in Desktop, Documents, Downloads, Pictures, Movies or Music, and not hidden.
+    private static func everyday(_ path: String) -> Bool {
+        let real = (path as NSString).resolvingSymlinksInPath
+        let home = (NSHomeDirectory() as NSString).resolvingSymlinksInPath
+        let folders = ["Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music"].map { home + "/" + $0 + "/" }
+        guard let folder = folders.first(where: { real.hasPrefix($0) }) else { return false }
+        return !real.dropFirst(folder.count).split(separator: "/").contains { $0.hasPrefix(".") }
+    }
+
     private static func webURL(_ text: Any?) throws -> URL {
         guard let text = text as? String, !text.isEmpty else { throw AgentError("Missing \"url\".") }
         guard let url = Address.url(from: text) ?? URL(string: text),
@@ -412,11 +421,16 @@ enum AgentCommands {
             AgentActivity.shared.touch(tab, view: view, in: browser)
             await prepare(view)
             if args["wait"] as? Bool ?? true {
-                try await waitForLoad(tab, timeout: args["timeout"] as? Double ?? 20)
+                try await waitForReadable(tab, timeout: args["timeout"] as? Double ?? 20)
                 // A check page that sends you on (a bot check, a locale redirect) isn't the page: settle past it.
                 await settle(tab, view)
             }
             return describe(tab, in: browser)
+
+        case "agent.stopped":
+            // The client stopped the agent (claude.ai's stop button, a cancelled call): lights out.
+            AgentActivity.shared.quiet()
+            return ["quiet": true]
 
         case "tabs.release":
             // The agent is done with it: the tab is yours again (dots and glow go).
@@ -457,7 +471,7 @@ enum AgentCommands {
             let (_, tab, browser) = try await webView(args)
             tab.load(url)
             if args["wait"] as? Bool ?? true {
-                try await waitForLoad(tab, timeout: args["timeout"] as? Double ?? 20)
+                try await waitForReadable(tab, timeout: args["timeout"] as? Double ?? 20)
                 await settle(tab, tab.materialize())
             }
             return describe(tab, in: browser)
@@ -471,8 +485,9 @@ enum AgentCommands {
             default: tab.stop()
             }
             if command != "page.stop", args["wait"] as? Bool ?? true {
-                try await Task.sleep(nanoseconds: 150_000_000)
-                try await waitForLoad(tab, timeout: args["timeout"] as? Double ?? 20)
+                try await Task.sleep(nanoseconds: 60_000_000)
+                try await waitForReadable(tab, timeout: args["timeout"] as? Double ?? 20)
+                await settle(tab, tab.materialize())
             }
             return describe(tab, in: browser)
 
@@ -509,12 +524,13 @@ enum AgentCommands {
             var listed = try? await evaluate("return window.__sillAgent.snapshot(all)", in: view, world: Web.world,
                                              arguments: ["all": all]) as? [[String: Any]]
             if listed == nil || (listed?.isEmpty == true && view.isLoading) {
-                try? await waitForLoad(tab, timeout: 8)
+                try? await waitForReadable(tab, timeout: 8)
                 listed = try? await evaluate("return window.__sillAgent.snapshot(all)", in: view, world: Web.world,
                                              arguments: ["all": all]) as? [[String: Any]]
             }
             var elements = listed ?? []
-            if listed == nil || view.isLoading { answer["loading"] = true }
+            // Still arriving with nothing to act on yet: say so. A parsed page still fetching images is ready.
+            if listed == nil || (elements.isEmpty && view.isLoading) { answer["loading"] = true }
             answer["url"] = view.url?.absoluteString ?? ""
             answer["title"] = view.title ?? ""
             let page = AgentPage.of(view)
@@ -537,8 +553,6 @@ enum AgentCommands {
                 try target.mustBeClickable()
             }
             let double = args["double"] as? Bool ?? false
-            if let refused = await AgentJudge.clear(.init(action: "click", target: target.name, page: view.title ?? "",
-                                                          site: view.url?.host ?? "")) { throw AgentError(refused) }
             let started = Date()
             // Armed first: afterwards Sill can say whether the click reached it.
             let answerURL = view.url?.absoluteString
@@ -598,19 +612,12 @@ enum AgentCommands {
             for (key, from) in [("ref", "ref"), ("selector", "selector"), ("text", "label"), ("wait", "wait")] { if let v = args[from] { lookup[key] = v } }
             let target = try await locate(lookup, in: view)
             if target.disabled { throw AgentError("“\(target.name)” is disabled.") }
-            // Card details are money: always past the judge, which asks.
-            if Self.paymentField.firstMatch(in: target.name, range: NSRange(location: 0, length: target.name.utf16.count)) != nil,
-               let refused = await AgentJudge.clear(.init(action: "enter card details", target: target.name, page: view.title ?? "",
-                                                          site: view.url?.host ?? "")) {
-                throw AgentError(refused)
-            }
             let clear = args["clear"] as? Bool ?? true
             let typingStarted = Date()
             let typed = try await type(text, into: target, clear: clear, in: view)
             // Suggestions, validation: what the typing set off, before answering.
             await settle(tab, view, since: typingStarted)
             if args["submit"] as? Bool ?? false {
-                try await judgeSending(view)
                 try await key("Enter", in: view)
                 await settle(tab, view)
             }
@@ -645,7 +652,6 @@ enum AgentCommands {
                 let target = try await locate(args, in: view)
                 try await focus(target, in: view)
             }
-            if ["enter", "return"].contains(name.lowercased()) { try await judgeSending(view) }
             let started = Date()
             try await key(name, in: view)
             await settle(tab, view)
@@ -826,8 +832,7 @@ enum AgentCommands {
             return ["zoom": view.pageZoom]
 
         case "page.upload":
-            // Files from this Mac into a page: always asked first, naming them
-            // and the site. Otherwise a remote agent could send any file anywhere.
+            // Files from this Mac into a page.
             let (view, _, _) = try await webView(args)
             let paths = (args["paths"] as? [String] ?? []).map { ($0 as NSString).expandingTildeInPath }
             guard !paths.isEmpty else { throw AgentError("Give \"paths\": the files to upload.") }
@@ -835,9 +840,11 @@ enum AgentCommands {
             let target = try await locate(args, in: view)
             guard target.backend == nil else { throw AgentError("That field is inside a closed component; uploads can't reach it.") }
             let site = target.frame.flatMap { URL(string: $0.url)?.host } ?? view.url?.host ?? "this page"
-            // Always asked, except in the agent test course's own copy of Sill set to never ask.
-            let courseCopy = Places.testProfile != nil && Preferences.shared.store.string(forKey: "agentAsk") == "never"
-            if !courseCopy, !(await ConnectorApproval.allowUpload(paths, to: site)) {
+            // Claude asks in the chat before uploading. Sill asks too only for files
+            // outside your everyday folders (keys, settings, hidden files): what a
+            // page's hidden instructions would be after.
+            // (The agent test course's own copy of Sill never asks.)
+            if Places.testProfile == nil, paths.contains(where: { !everyday($0) }), !(await ConnectorApproval.allowUpload(paths, to: site)) {
                 throw AgentError("The user didn't allow uploading those files. Ask them in chat.")
             }
             return try await upload(paths, into: target, in: view)
@@ -996,19 +1003,6 @@ enum AgentCommands {
         _ = try? await page.call("Runtime.evaluate", ["expression": find + "?.removeAttribute('data-sill-pick')"], session: target.frame?.session)
         return ["uploaded": paths.map { ($0 as NSString).lastPathComponent }]
     }
-
-    /// Enter in a form sends it: what it would send goes past the judge first.
-    private static func judgeSending(_ view: SillWebView) async throws {
-        let sending = (try? await evaluate("return window.__sillAgent.sending()", in: view, world: Web.world)) as? String ?? ""
-        if let refused = await AgentJudge.clear(.init(action: "submit", target: sending.isEmpty ? "the form" : sending,
-                                                      page: view.title ?? "", site: view.url?.host ?? "")) {
-            throw AgentError(refused)
-        }
-    }
-
-    private static let paymentField = try! NSRegularExpression(
-        pattern: #"(card ?number|card number|\bcvc\b|\bcvv\b|security code|expir|\biban\b|sort code|account number|routing)"#,
-        options: [.caseInsensitive])
 
     // MARK: passwords
 
@@ -1270,25 +1264,64 @@ enum AgentCommands {
         return context.makeImage()
     }
 
-    /// After an action: a moment for the page to react, and the load it started, if any.
-    /// After an action: no fixed pause. Done as soon as the page is quiet (no
-    /// changes for 60 ms) and what the action asked the network for (fetch,
-    /// XHR: suggestions, results) has come back; a navigation it started is
-    /// waited for. At most 2.5 s beyond a load.
+    /// After an action, until the page has answered it, with no fixed pause:
+    /// done once the page has changed and then held still for 60 ms (or 0.8 s
+    /// after its first change, if it keeps ticking), or hasn't changed at all in
+    /// 100 ms;
+    /// with what the action asked the network for (suggestions, results) back,
+    /// and a page it started loading readable. Animations don't count as
+    /// change: style, class, svg and canvas are left out. At most 2.5 s beyond
+    /// a page's arrival (10 s).
     private static func settle(_ tab: Tab, _ view: SillWebView, since: Date = Date()) async {
         let page = AgentPage.of(view)
-        let deadline = Date().addingTimeInterval(2.5)
+        let start = Date()
+        var deadline = start.addingTimeInterval(2.5)
+        var firstChange: Date?
         try? await Task.sleep(nanoseconds: 16_000_000)   // a frame for the page's handlers to run
         while Date() < deadline {
             if view.openDialog != nil { return }
-            if view.isLoading {
-                try? await waitForLoad(tab, timeout: 10)
+            let state = (try? await evaluate("return window.__sillAgent.state()", in: view, world: Web.world)) as? [String: Any]
+            // No answer from the page and nothing loading (a dialog froze it, the script was refused): nothing to wait for.
+            if state == nil, !view.isLoading { return }
+            guard let state, readable(state["ready"] as? String, view) else {
+                // A page on its way: wait for it (up to 10 s), then for it to settle.
+                if Date().timeIntervalSince(start) < 10 { deadline = max(deadline, Date().addingTimeInterval(1)) }
+                try? await Task.sleep(nanoseconds: 30_000_000)
                 continue
             }
-            let quiet = (try? await evaluate("return window.__sillAgent.quiet(60)", in: view, world: Web.world)) as? Bool ?? true
-            if quiet && !page.fetching(since: since) { return }
-            try? await Task.sleep(nanoseconds: 20_000_000)
+            let idle = state["idle"] as? Double ?? .infinity
+            let elapsed = Date().timeIntervalSince(since) * 1000
+            if !page.fetching(since: since) {
+                if idle < elapsed {
+                    // It answered: done once it holds still, or a moment after it first did if it keeps ticking.
+                    let first = firstChange ?? Date()
+                    firstChange = first
+                    if idle >= 60 || Date().timeIntervalSince(first) > 0.8 { return }
+                } else if elapsed >= 100 {
+                    return
+                }
+            }
+            try? await Task.sleep(nanoseconds: 15_000_000)
         }
+    }
+
+    /// Something to read: a new document parsed (its images and ads may still
+    /// come), or the old one with no load pending.
+    private static func readable(_ ready: String?, _ view: SillWebView) -> Bool {
+        ready == "interactive" || (ready == "complete" && !view.isLoading)
+    }
+
+    /// Until the page can be read and acted on: parsed, not every last image and ad loaded.
+    private static func waitForReadable(_ tab: Tab, timeout: Double) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        let view = tab.materialize()
+        while Date() < deadline {
+            if view.openDialog != nil { return }
+            if let ready = try? await evaluate("return document.readyState", in: view, world: Web.world) as? String,
+               readable(ready, view) { return }
+            try await Task.sleep(nanoseconds: 30_000_000)
+        }
+        throw AgentError("Timed out after \(Int(timeout)) s waiting for the page to load.")
     }
 
     // MARK: helpers
@@ -1404,7 +1437,8 @@ enum AgentCommands {
             return Target(ref: ref, x: box.midX, y: box.midY, name: ref, backend: backend)
         }
         let byName = ref == nil
-        let deadline = Date().addingTimeInterval(byName ? (args["wait"] as? Double ?? 3) : 0)
+        // A step's own settle has already waited for the page to answer: a short wait covers late renders.
+        let deadline = Date().addingTimeInterval(byName ? (args["wait"] as? Double ?? 1.5) : 0)
         while true {
             if let dialog = view.openDialog { throw dialogError(dialog) }
             let found = try await evaluate("return window.__sillAgent.locate(ref, selector, text, editable)", in: view, world: Web.world, arguments: [
@@ -1422,11 +1456,28 @@ enum AgentCommands {
                 return target(from: found, ref: nil)
             }
             if Date() >= deadline {
-                throw AgentError(byName ? "Nothing on the page matches \((args["selector"] ?? args["text"]).map { "“\($0)”" } ?? "that") (waited \(Int(args["wait"] as? Double ?? 3)) s). Use page_snapshot for refs."
-                                        : "No element matched. Use page_snapshot for refs.")
+                let near = await closest(to: args["text"] as? String, in: view)
+                throw AgentError(byName ? "Nothing on the page matches \((args["selector"] ?? args["text"]).map { "“\($0)”" } ?? "that").\(near)"
+                                        : "No element matched. Use page_read for refs.")
             }
             try await Task.sleep(nanoseconds: 150_000_000)
         }
+    }
+
+    /// For a text that matched nothing: the elements nearest to it by words, so
+    /// the next try is right without a fresh look at the page.
+    private static func closest(to text: String?, in view: SillWebView) async -> String {
+        let words = { (s: String) in Set(s.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init).filter { $0.count > 1 }) }
+        let elements = (try? await evaluate("return window.__sillAgent.snapshot(false)", in: view, world: Web.world)) as? [[String: Any]] ?? []
+        let named = elements.compactMap { e -> (ref: String, label: String)? in
+            guard let ref = e["ref"] as? String, let name = e["name"] as? String, !name.isEmpty else { return nil }
+            return (ref, "\(e["role"] as? String ?? "") “\(name.prefix(60))”")
+        }
+        guard !named.isEmpty else { return " The page has nothing to act on in view: page_read text=true reads it, or scroll." }
+        let wanted = words(text ?? "")
+        let ranked = named.map { ($0, words($0.label).intersection(wanted).count) }.filter { $0.1 > 0 }.sorted { $0.1 > $1.1 }.map(\.0)
+        let shown = (ranked.isEmpty ? Array(named.prefix(12)) : Array(ranked.prefix(6))).map { "\($0.label) (\($0.ref))" }
+        return (ranked.isEmpty ? " On the page now: " : " Closest: ") + shown.joined(separator: ", ") + "."
     }
 
     private static func target(from found: [String: Any], ref: String?) -> Target {
@@ -1551,7 +1602,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 11) return;
+      if (window.__sillAgent && window.__sillAgent.v === 12) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -1713,7 +1764,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 11,
+        v: 12,
         snapshot(all_) {
           const items = all((el, dx, dy, out) => {
             if (out.length >= 500) return;
@@ -1746,6 +1797,7 @@ enum AgentScript {
         // Finds it, scrolls it into view, waits until it stops moving (a smooth
         // scroll, an animation), and checks a click there would reach it.
         async locate(ref, selector, text, editable) {
+          this.watch();   // from before the action, so its first change is seen
           const first = this.place(ref, selector, text, false, editable);
           if (!first || first.gone || first.ambiguous) return first;
           const el = find(first.ref); if (!el) return first;
@@ -1888,16 +1940,33 @@ enum AgentScript {
         },
         options(ref) { const el = find(ref); return el && el.options ? [...el.options].map((o) => o.text.trim()) : []; },
         draggable(ref) { const el = find(ref); return !!(el && el.closest && el.closest('[draggable=true]')); },
-        // Quiet: no change to the page for `ms`. The watcher starts on first use, only in pages an agent drives.
-        quiet(ms) {
-          if (!window.__sillWatch) {
-            window.__sillLastChange = performance.now();
-            window.__sillWatch = new MutationObserver(() => { window.__sillLastChange = performance.now(); });
-            window.__sillWatch.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
-            return false;
-          }
-          return performance.now() - window.__sillLastChange >= ms;
+        // Changes that answer an action: elements coming or going, text, a widget's
+        // state. Not style or class (animations churn them all the time), nor
+        // anything inside svg or canvas. The watcher starts on first use, only in
+        // pages an agent drives.
+        watch() {
+          if (window.__sillWatch) return;
+          window.__sillLastChange = -1e9;
+          const inArt = (n) => { const el = n.nodeType === 1 ? n : n.parentElement; return !!(el && el.closest('svg, canvas, script, style, noscript, template')); };
+          const counts = (n) => n.nodeType === 1 ? !/^(SCRIPT|STYLE|LINK|META|NOSCRIPT)$/.test(n.tagName) : n.nodeType === 3 && n.data.trim() !== '';
+          window.__sillWatch = new MutationObserver((records) => {
+            for (const r of records) {
+              if (inArt(r.target)) continue;
+              if (r.type === 'childList' && ![...r.addedNodes].some(counts) && ![...r.removedNodes].some(counts)) continue;
+              window.__sillLastChange = performance.now();
+              return;
+            }
+          });
+          window.__sillWatch.observe(document, { subtree: true, childList: true, characterData: true, attributes: true,
+            attributeFilter: ['aria-expanded', 'aria-hidden', 'aria-selected', 'aria-checked', 'aria-pressed', 'aria-busy',
+                              'aria-invalid', 'aria-disabled', 'hidden', 'open', 'disabled', 'value', 'checked', 'href', 'src'] });
         },
+        // How the page is doing: its load state, and ms since it last changed (huge if it hasn't).
+        state() {
+          this.watch();
+          return { ready: document.readyState, idle: performance.now() - window.__sillLastChange };
+        },
+        quiet(ms) { return this.state().idle >= ms; },
         sending() {
           const el = document.activeElement;
           if (!el || el === document.body) return '';

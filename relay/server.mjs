@@ -97,7 +97,22 @@ const pending = new Map();  // id → { resolve, reject, timer }
 let toolsCache = null;      // last tools/list answer, for when the Mac drops off briefly
 let notBefore = 0;          // sign-ins issued before this (seconds) are refused: Sill's "Sign out claude.ai"
 
-function toBridge(message, timeout) {
+// A Mac that dropped off a moment ago (Wi-Fi changed, it woke from sleep) is
+// usually back within seconds: a call that arrives meanwhile waits up to 10 s
+// for it instead of failing.
+const RECONNECT_GRACE = Number(process.env.RECONNECT_GRACE_MS) || 10_000;
+const bridgeWaiters = new Set();
+function bridgeReady(timeout) {
+  if (bridge && bridge.readyState === 1) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const done = (ok) => { clearTimeout(timer); bridgeWaiters.delete(done); resolve(ok); };
+    const timer = setTimeout(() => done(false), timeout);
+    bridgeWaiters.add(done);
+  });
+}
+
+async function toBridge(message, timeout) {
+  await bridgeReady(RECONNECT_GRACE);
   return new Promise((resolve, reject) => {
     if (!bridge || bridge.readyState !== 1) return reject(new Offline());
     const id = nextId++;
@@ -108,6 +123,11 @@ function toBridge(message, timeout) {
     pending.set(id, { resolve, reject, timer });
     bridge.send(JSON.stringify({ ...message, id }));
   });
+}
+
+/// A message down the line that wants no answer.
+function tellBridge(message) {
+  if (bridge && bridge.readyState === 1) bridge.send(JSON.stringify({ t: "rpc", msg: message, id: nextId++ }));
 }
 
 class Offline extends Error {
@@ -122,6 +142,7 @@ wss.on("connection", (socket) => {
   bridgeSince = new Date();
   socket.isAlive = true;
   console.log("bridge: connected");
+  for (const done of [...bridgeWaiters]) done(true);
 
   socket.on("pong", () => { socket.isAlive = true; });
   socket.on("message", (data) => {
@@ -412,7 +433,11 @@ const fallbackInitialize = (params, base) => ({
 async function rpc(message, base) {
   const { id, method } = message;
   const isRequest = id !== undefined && id !== null;
-  if (!isRequest) return null; // notifications: nothing to forward or answer
+  if (!isRequest) {
+    // The user stopped Claude mid-call: Sill drops its glow. Other notifications need nothing.
+    if (method === "notifications/cancelled") tellBridge(message);
+    return null;
+  }
 
   try {
     const answer = await toBridge({ t: "rpc", msg: message }, CALL_TIMEOUT);
@@ -454,7 +479,13 @@ async function mcp(req, res) {
     const answers = (await Promise.all(payload.map((m) => rpc(m, base)))).filter(Boolean);
     return answers.length ? send(res, 200, answers) : (res.writeHead(202, CORS), res.end());
   }
+  // A tool call whose asker hung up before the answer (claude.ai's stop button): tell Sill it was stopped.
+  let answered = false;
+  if (payload?.method === "tools/call") {
+    res.on("close", () => { if (!answered) tellBridge({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: payload.id, reason: "The client went away." } }); });
+  }
   const answer = await rpc(payload, baseURL(req));
+  answered = true;
   if (!answer) { res.writeHead(202, CORS); return res.end(); }
   send(res, 200, answer);
 }

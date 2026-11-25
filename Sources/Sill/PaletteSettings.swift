@@ -22,7 +22,7 @@ struct PaletteSettingsView: View {
     @State private var copiedConnector = false
     @State private var signedOut = false
 
-    enum Choice { case engine, agentAsk }
+    enum Choice { case engine }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -110,10 +110,6 @@ struct PaletteSettingsView: View {
                             SwitchRow(icon: .claude, tint: .orange, title: "Let claude.ai control Sill",
                                       detail: prefs.remoteConnector ? connector.summary : "A custom connector, through your own relay",
                                       isOn: $prefs.remoteConnector)
-                            Hairline()
-                            ChoiceRow(icon: .shield, tint: .green, title: "Ask before", value: AgentJudge.label(prefs.agentAsk)) {
-                                onChoose(.agentAsk, $0)
-                            }
                             Hairline()
                             ActionRow(icon: .history, tint: .gray, title: "Agent activity", value: "Show") { AgentLog.show() }
                             if prefs.remoteConnector {
