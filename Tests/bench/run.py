@@ -137,13 +137,23 @@ def prepare_copy():
     os.utime(mine)
     with open(source, "w") as fh: fh.write(os.path.realpath(APP))
 
+def use_profile(name):
+    """A profile of the bench copy's own: a fresh one per run (no cart, cookies or notes from the last)."""
+    global PROFILE, DOMAIN, SOCKET
+    PROFILE = name
+    DOMAIN = f"com.iasoncostoudes.sill.chromium.{PROFILE}"
+    SOCKET = os.path.expanduser(f"~/Library/Application Support/Sill Chromium ({PROFILE})/agent.sock")
+
+# The benchmarks' sites are mostly American: the copy keeps US time (a date picked is the date meant).
+BENCH_TZ = os.environ.get("BENCH_TZ", "America/New_York")
+
 def start_copy():
     prepare_copy()
     subprocess.run(["defaults", "write", DOMAIN, "agentControl", "-bool", "true"])
     subprocess.run(["defaults", "write", DOMAIN, "restoresTabs", "-bool", "false"])
     if owner_of_socket(): return
-    subprocess.run(["open", "-n", "-g", "--env", f"SILL_PROFILE={PROFILE}", COPY])
-    for _ in range(60):
+    subprocess.run(["open", "-n", "-g", "--env", f"SILL_PROFILE={PROFILE}", "--env", f"TZ={BENCH_TZ}", COPY])
+    for _ in range(180):
         if owner_of_socket(): time.sleep(1.5); return
         time.sleep(0.5)
     raise SystemExit("Sill's bench copy didn't start")

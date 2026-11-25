@@ -253,12 +253,14 @@ enum AgentCommands {
     }
 
     /// A tab a page opened while the agent worked in it: the agent's too, in the background.
-    static func adopt(_ tab: Tab) {
+    /// The opener is the tab the agent acted in: only an action in that very tab hears of the new one, so
+    /// agents working side by side never pick up each other's tabs. It becomes the agent's current tab when
+    /// its action answers (in that agent's own session).
+    static func adopt(_ tab: Tab, from opener: Tab) {
         tab.openedByAgent = true
-        remember(tab)
-        adopted = (tab, Date())
+        adoptedFrom[ObjectIdentifier(opener)] = (tab, Date())
     }
-    private static var adopted: (tab: Tab, at: Date)?
+    private static var adoptedFrom: [ObjectIdentifier: (tab: Tab, at: Date)] = [:]
 
     /// Tabs the agent opened or named, the latest first. Leaving out "tab"
     /// means the latest of these still open, so an agent's work stays in its
@@ -644,6 +646,24 @@ enum AgentCommands {
             } else if let selector = args["selector"] as? String {
                 try await waitFor(selector: selector, text: nil, in: view, timeout: timeout)
             } else if let text = args["text"] as? String {
+                let count = { (try? await evaluate("return window.__sillAgent.textCount(text)", in: view, world: Web.world, arguments: ["text": text])) as? Int ?? 0 }
+                // "measure": how often the words show now, taken before an action whose answer is awaited.
+                if args["measure"] as? Bool == true { return ["count": await count(), "url": view.url?.absoluteString ?? ""] }
+                // Words that were already there before the action don't answer the wait: it waits for
+                // them to show again (a new result, the next page) and says so if they never do.
+                if let before = args["before"] as? Int, before > 0 {
+                    let deadline = Date().addingTimeInterval(min(timeout, 3)), url = args["beforeURL"] as? String
+                    var fresh = false
+                    while true {
+                        let now = await count()
+                        if now > before || (now > 0 && url != nil && view.url?.absoluteString != url) { fresh = true; break }
+                        if Date() >= deadline { break }
+                        try await Task.sleep(nanoseconds: 150_000_000)
+                    }
+                    var answer = describe(tab, in: browser)
+                    if !fresh { answer["already"] = true }
+                    return answer
+                }
                 try await waitFor(selector: nil, text: text, in: view, timeout: timeout)
             } else {
                 try await waitForLoad(tab, timeout: timeout)
@@ -743,8 +763,8 @@ enum AgentCommands {
             }
             await settle(tab, view, since: started)
             // A link may open a tab: Chromium makes it a moment after the click.
-            if target.name.hasPrefix("link"), adopted.map({ $0.at < started }) ?? true {
-                for _ in 0..<15 where adopted.map({ $0.at < started }) ?? true { try? await Task.sleep(nanoseconds: 10_000_000) }
+            if target.name.hasPrefix("link"), adoptedFrom[ObjectIdentifier(tab)].map({ $0.at < started }) ?? true {
+                for _ in 0..<15 where adoptedFrom[ObjectIdentifier(tab)].map({ $0.at < started }) ?? true { try? await Task.sleep(nanoseconds: 10_000_000) }
             }
             var answer: [String: Any] = ["clicked": target.ref, "name": target.name]
             if let from = answerURL { answer["from"] = from }   // where it was: a click that went somewhere can be undone
@@ -1858,8 +1878,14 @@ enum AgentCommands {
     private static func outcome(_ answer: [String: Any], _ view: SillWebView, since: Date) -> [String: Any] {
         var answer = answer
         answer["url"] = view.url?.absoluteString ?? ""
+        // The page's own requests that this action set off and that failed: a search that can't run says so.
+        let failed = AgentPage.of(view).failedRequests(since: since.addingTimeInterval(-0.1))
+        if !failed.isEmpty { answer["failedRequests"] = failed }
         if let dialog = view.openDialog { answer["dialog"] = dialog }
-        if let adopted, adopted.at >= since, let browser = browser(of: adopted.tab) { answer["opened"] = describe(adopted.tab, in: browser) }
+        if let opener = view.tab, let adopted = adoptedFrom[ObjectIdentifier(opener)], adopted.at >= since, let browser = browser(of: adopted.tab) {
+            remember(adopted.tab)
+            answer["opened"] = describe(adopted.tab, in: browser)
+        }
         return answer
     }
 }
@@ -1944,7 +1970,8 @@ enum AgentScript {
       // Its words as a screen reader hears them: what the page marked aria-hidden (a price drawn in pieces
       // beside its spoken copy, icons) is left out, so a name reads once and whole.
       const shownText = (el) => {
-        const all = el.innerText || el.textContent || '';
+        // innerText, never raw textContent: a <noscript> fallback's markup isn't words anyone sees.
+        const all = el.innerText || (el.querySelector && el.querySelector('noscript') ? '' : el.textContent) || '';
         if (all.length > 400 || !el.querySelector || !el.querySelector('[aria-hidden=true]')) return all;
         const parts = [];
         const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
@@ -2032,6 +2059,11 @@ enum AgentScript {
         if (el.type === 'password') item.value = el.value ? '(hidden)' : '';
         if ('checked' in el && (el.type === 'checkbox' || el.type === 'radio')) item.checked = el.checked;
         const ac = el.getAttribute('aria-checked'); if (ac === 'true' || ac === 'false') item.checked = ac === 'true';
+        // A dropdown says what it shows, not its option's internal value ("29" for Idaho).
+        if (el.tagName === 'SELECT' && el.selectedIndex >= 0 && el.options[el.selectedIndex]) item.value = clean(el.options[el.selectedIndex].text).slice(0, 120) || item.value;
+        // Toggles and the current item say so: a filter that's on, the page you're on.
+        const ap = el.getAttribute('aria-pressed'); if (ap === 'true' || ap === 'false') item.checked = ap === 'true';
+        const acur = el.getAttribute('aria-current'); if (acur && acur !== 'false') item.selected = true;
         const ae = el.getAttribute('aria-expanded'); if (ae) item.expanded = ae === 'true';
         const as = el.getAttribute('aria-selected'); if (as === 'true') item.selected = true;
         if (el.disabled || el.getAttribute('aria-disabled') === 'true') item.disabled = true;
@@ -2206,6 +2238,17 @@ enum AgentScript {
         return hit;
       };
       const contains = (a, b) => { for (let n = b; n; n = n.parentNode || n.host) if (n === a) return true; return false; };
+      // What lies over a field is its own face (a custom dropdown's placeholder or chosen value drawn on top): a
+      // small wrapper they share holds no other control, so a click there reaches the field.
+      const ownSkin = (el, hit) => {
+        if (!hit || hit === el) return false;
+        for (let p = el.parentElement, d = 0; p && d < 3; p = p.parentElement, d++) {
+          if (!contains(p, hit)) continue;
+          const controls = [...p.querySelectorAll(interactive)].filter((c) => c !== el && !contains(c, el) && !contains(el, c));
+          return controls.length === 0;
+        }
+        return false;
+      };
       // Only the element itself, what's inside it, or its label: a hit on something
       // holding it (a scroll box under its overlay scrollbar) is a miss.
       const reaches = (el, f, hit) => hit && (contains(el, hit) || contains(f, hit) || (el.labels && [...el.labels].some((l) => contains(l, hit))));
@@ -2304,7 +2347,7 @@ enum AgentScript {
               // On screen but under something else (a dialog, a banner): a click wouldn't reach it.
               if (fr.top >= 0 && fr.bottom <= f.ownerDocument.defaultView.innerHeight && fr.left >= 0 && fr.right <= f.ownerDocument.defaultView.innerWidth) {
                 const hit = hitAt(f.ownerDocument, fr.left + fr.width / 2, fr.top + fr.height / 2);
-                if (hit && !reaches(el, f, hit)) {
+                if (hit && !reaches(el, f, hit) && !ownSkin(el, hit)) {
                   const hr = (hit.getBoundingClientRect && hit.getBoundingClientRect()) || { width: 0, height: 0 };
                   if (!(hr.width * hr.height < fr.width * fr.height * 0.3)) item.covered = true;   // a small badge on it isn't cover
                 }
@@ -2563,7 +2606,7 @@ enum AgentScript {
           for (const [px, py] of points) {
             const x = r.left + r.width * px, y = r.top + r.height * py;
             const hit = hitAt(doc, x, y);
-            if (reaches(el, f, hit)) { ok = [x + off[0], y + off[1]]; break; }
+            if (reaches(el, f, hit) || ownSkin(el, hit)) { ok = [x + off[0], y + off[1]]; break; }
             if (!cover) cover = hit;
           }
           if (ok) { out.x = ok[0]; out.y = ok[1]; }
@@ -2674,6 +2717,8 @@ enum AgentScript {
           if (frames.some((s) => /hcaptcha/.test(s))) found.push('hCaptcha');
           if (frames.some((s) => /challenges\.cloudflare\.com|turnstile/.test(s)) || /just a moment|checking your browser|attention required/.test(title)) found.push('Cloudflare check');
           if (/verify (that )?you('| a)re (a )?human|are you a robot|i'?m not a robot|unusual traffic from your computer|press (&|and) hold/.test(text)) found.push('human check');
+          // A refusal no person can clear from here: a security block, or not offered where the browser is.
+          if (/you have been blocked|access (is )?denied|request (was )?blocked|this (site|service|content|product) is (not available|unavailable) in your (country|region)|not available in your (country|region)|geo ?location/.test(title + ' ' + text.slice(0, 1500))) found.push('blocked by the site');
           return found;
         },
         mark(ref, token) { const el = find(ref); if (!el) return false; el.setAttribute('data-sill-pick', token); return true; },
@@ -2704,6 +2749,18 @@ enum AgentScript {
         absent(text) {
           const want = String(text).toLowerCase();
           return !(document.body && document.body.innerText || '').toLowerCase().includes(want);
+        },
+        // How many times the words show (the page's text, and what fields read): a wait for words
+        // that were already there waits for more of them, not for nothing.
+        textCount(text) {
+          const want = String(text).toLowerCase();
+          if (!want) return 0;
+          const body = (document.body && document.body.innerText || '').toLowerCase();
+          let n = 0, i = body.indexOf(want);
+          while (i >= 0) { n++; i = body.indexOf(want, i + want.length); }
+          walk(document.documentElement, 0, 0, (el) => { if (typable(el) && String(el.value || '').toLowerCase().includes(want)) n++; });
+          if (!n && byText(text)) n = 1;
+          return n;
         },
         present(selector, text) {
           if (selector) return !!deepQuery(selector);

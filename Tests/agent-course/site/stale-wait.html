@@ -1,0 +1,8 @@
+<!doctype html><meta charset=utf-8><title>Words already there</title><script src=kit.js></script>
+<p>A toast from before still reads “Saved”. Saving again shows a second one after a pause; Refresh changes nothing.</p>
+<div id=toasts><p class=toast>Saved</p></div>
+<button id=save>Save</button> <button id=noop>Refresh</button>
+<script>
+save.onclick = () => setTimeout(() => { const p = document.createElement('p'); p.className = 'toast'; p.textContent = 'Saved'; toasts.append(p); done('saved', Date.now()); }, 900);
+noop.onclick = () => {};
+</script>

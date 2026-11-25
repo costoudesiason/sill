@@ -307,7 +307,9 @@ func compactSnapshot(_ result: Any, boxes: Bool = false) -> String {
         lines.insert("⚠ The page is showing a \(dialog["kind"] ?? "dialog"): “\(dialog["message"] ?? "")”. Nothing else works until it's answered: page_dialog accept=true or false.", at: 2)
         return lines.joined(separator: "\n")
     }
-    if let walls = page["walls"] as? [String], !walls.isEmpty {
+    if let walls = page["walls"] as? [String], walls.contains("blocked by the site") {
+        lines.insert("⚠ The site is refusing this browser here (a security block, or not offered in this region). Nobody can clear it from this page: use another source for the same thing, or tell the user what blocked it.", at: 2)
+    } else if let walls = page["walls"] as? [String], !walls.isEmpty {
         lines.insert("⚠ This page wants a person (\(walls.joined(separator: ", "))). Don't try to get past it: call wait_for_user, and the user will clear it.", at: 2)
     }
     // Where scrolled-out controls were: one line saying how many, and how to reach them.
@@ -920,6 +922,10 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
     var tabs: [String: String] = [:]
     // Where the tab is, from the actions' own answers: a click that went somewhere unexpected can be undone.
     var currentURL: String? = nil, lastStepWentAway = false
+    var pageSaid: [String] = []   // what went wrong behind the page during a step (its data requests failing)
+    // A wait for words right after an action: how often they showed before it, so words that were
+    // already there don't answer the wait.
+    var baseline: (text: String, count: Int, url: String)? = nil
     func attempt(_ step: [String: Any]) throws -> String {
             var did = ""
             // A step in another tab: by the name an "open" step gave it, or by id. Later steps stay there.
@@ -952,6 +958,7 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 for k in ["double", "button", "hold", "modifiers"] { if let v = step[k] { a[k] = v } }
                 let r = try sill.run("page.click", a) as? [String: Any] ?? [:]
                 if let u = r["url"] as? String { currentURL = u }
+                if let failed = r["failedRequests"] as? [String], !failed.isEmpty { pageSaid.append("the page's requests failed: " + failed.joined(separator: "; ")) }
                 if let from = r["from"] as? String, let to = r["url"] as? String, from != to { lastStepWentAway = true }
                 if let missed = r["missed"] as? String { throw Failure(missed) }
                 did = "clicked \(r["name"] as? String ?? (t as? String ?? ""))"
@@ -966,6 +973,7 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 if let scope = tt["in"] { a["in"] = scope }
                 let r = try sill.run("page.type", a) as? [String: Any] ?? [:]
                 if let u = r["url"] as? String { currentURL = u }
+                if let failed = r["failedRequests"] as? [String], !failed.isEmpty { pageSaid.append("the page's requests failed: " + failed.joined(separator: "; ")) }
                 let reads = r["value"] as? String ?? ""
                 did = (r["followed"] != nil ? "typed into the field that opened, " : "typed into ") + "\(r["ref"] as? String ?? "") → “\(clip(reads.isEmpty && a["submit"] as? Bool == true ? a["text"] as? String ?? "" : reads, 60))”"
                     + (a["submit"] as? Bool == true ? " and pressed Enter" : "")
@@ -1027,8 +1035,10 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 _ = try sill.run("page.wait", tab.merging(["gone": gone, "timeout": step["timeout"] as? Double ?? 8]) { $1 })
                 did = "“\(gone)” is gone"
             } else if let text = step["wait"] as? String {
-                _ = try sill.run("page.wait", tab.merging(["text": text, "timeout": step["timeout"] as? Double ?? 6]) { $1 })
-                did = "saw “\(text)”"
+                var a = tab.merging(["text": text, "timeout": step["timeout"] as? Double ?? 6]) { $1 }
+                if let b = baseline, b.text == text { a["before"] = b.count; a["beforeURL"] = b.url }
+                let r = try sill.run("page.wait", a) as? [String: Any] ?? [:]
+                did = r["already"] as? Bool == true ? "“\(text)” was already on the page, and nothing new with it appeared: check the page changed" : "saw “\(text)”"
             } else if let dy = step["scroll"] as? Double {
                 var a = tab.merging(["dy": dy, "dx": step["dx"] as? Double ?? 0]) { $1 }
                 if let on = step["on"] { a.merge(target(on)) { $1 } }
@@ -1082,6 +1092,11 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
     for (i, raw) in steps.enumerated() {
         let t0 = Date()
         let step = fill(raw, vars) as? [String: Any] ?? raw
+        if step["wait"] == nil, i + 1 < steps.count, let next = fill(steps[i + 1], vars) as? [String: Any],
+           let text = next["wait"] as? String, text.lowercased() != "settled", next["tab"] == nil, step["open"] == nil, step["tab"] == nil,
+           let m = try? sill.run("page.wait", tab.merging(["text": text, "measure": true]) { $1 }) as? [String: Any] {
+            baseline = (text, m["count"] as? Int ?? 0, m["url"] as? String ?? "")
+        } else if step["wait"] == nil { baseline = nil }
         do {
             let wentAway = lastStepWentAway
             lastStepWentAway = false
@@ -1098,6 +1113,7 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 }
             }
             lines.append("\(i + 1). ✓ \(did) (\(Int(Date().timeIntervalSince(t0) * 1000)) ms)")
+            if !pageSaid.isEmpty { lines.append("   ⚠ " + pageSaid.joined(separator: " · ") + " (the site may be refusing this, e.g. by region)"); pageSaid = [] }
         } catch let failure as Failure {
             lines.append("\(i + 1). ✗ \(failure.message)")
             if i + 1 < steps.count { lines.append("   Stopped here; \(steps.count - i - 1) step(s) not run.") }

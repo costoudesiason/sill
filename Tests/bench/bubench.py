@@ -172,6 +172,7 @@ def main():
     ap.add_argument("--max-turns", type=int, default=150)
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--jev", action="store_true")
+    ap.add_argument("--keep-profile", action="store_true", help="reuse the bench profile (default: a fresh one per run)")
     ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     ap.add_argument("--config-dir", default=os.environ.get("BENCH_CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude-normal")))
     ap.add_argument("--keep", action="store_true")
@@ -201,6 +202,7 @@ def main():
     binary = bench.claude_bin()
     env = bench.claude_env(os.path.expanduser(args.config_dir))
     root = tempfile.mkdtemp(prefix="sill-bubench-")
+    if not args.keep_profile: bench.use_profile("bench-" + datetime.now().strftime("%m%d%H%M%S"))
     mcp_env = {"SILL_SOCKET": bench.SOCKET}
     if args.jev:
         key = os.environ.get("TYPESAFE_API_KEY") or subprocess.run(["security", "find-generic-password", "-s", "Sill TypeSafe", "-a", "api", "-w"],

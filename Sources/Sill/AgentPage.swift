@@ -40,6 +40,21 @@ final class AgentPage {
     private var dragWaiter: ((Any?) -> Void)?
     private var accessibility = false
     private var inFlight: [String: Date] = [:]
+    private var requestURLs: [String: String] = [:]
+    private var failures: [(at: Date, what: String)] = []
+    /// Data requests the page has sent, all told: an action that sent none and changed nothing did nothing.
+    private(set) var sent = 0
+
+    /// The page's data requests that failed or were refused since `since`, said briefly.
+    func failedRequests(since: Date) -> [String] {
+        failures.removeAll { Date().timeIntervalSince($0.at) > 60 }
+        return Array(failures.filter { $0.at >= since }.map(\.what).prefix(4))
+    }
+
+    private static func short(_ url: String) -> String {
+        guard let u = URL(string: url) else { return String(url.prefix(80)) }
+        return (u.host() ?? "") + String(u.path.prefix(60))
+    }
     /// Frames found to hold nothing to act on, and when: not asked again for a while.
     private var emptyFrames: [String: Date] = [:]
 
@@ -90,8 +105,23 @@ final class AgentPage {
             guard let id = params["requestId"] as? String,
                   ["XHR", "Fetch"].contains(params["type"] as? String ?? "") else { return }
             inFlight[id] = Date()
-        case "Network.loadingFinished" where session == nil, "Network.loadingFailed" where session == nil:
-            if let id = params["requestId"] as? String { inFlight[id] = nil }
+            if let url = (params["request"] as? [String: Any])?["url"] as? String { requestURLs[id] = url }
+            sent += 1
+        case "Network.responseReceived" where session == nil:
+            // The page's own data requests that came back refused (403, a geo-block, a 500): worth saying.
+            guard let id = params["requestId"] as? String, requestURLs[id] != nil,
+                  let response = params["response"] as? [String: Any], let status = response["status"] as? Int, status >= 400 else { return }
+            failures.append((Date(), "\(status) from \(Self.short(requestURLs[id] ?? ""))"))
+        case "Network.loadingFinished" where session == nil:
+            if let id = params["requestId"] as? String { inFlight[id] = nil; requestURLs[id] = nil }
+        case "Network.loadingFailed" where session == nil:
+            if let id = params["requestId"] as? String {
+                inFlight[id] = nil
+                // Ours to block (an ad, a tracker) or the page giving up on purpose isn't news; anything else is.
+                if let url = requestURLs.removeValue(forKey: id), params["blockedReason"] == nil, params["canceled"] as? Bool != true {
+                    failures.append((Date(), "failed (\(params["errorText"] as? String ?? "network error")) from \(Self.short(url))"))
+                }
+            }
         case "Input.dragIntercepted":
             dragWaiter?(params["data"])
             dragWaiter = nil

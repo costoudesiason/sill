@@ -665,12 +665,12 @@ extension Tab: SEWebViewDelegate {
         // A link the agent's click opened is the agent's too, and stays behind yours.
         let byAgent = AgentActivity.shared.isWorking(on: self)
         let opened = host?.open(from: self, url: url, configuration: nil, background: background || byAgent)
-        if byAgent, let opened { AgentCommands.adopt(opened) }
+        if byAgent, let opened { AgentCommands.adopt(opened, from: self) }
     }
 
     func webView(_ view: SEWebView, popupWith size: NSSize) -> SEWebView? {
         let popup = host?.openPopup(from: self, size: size)
-        if AgentActivity.shared.isWorking(on: self), let tab = popup?.tab { AgentCommands.adopt(tab) }
+        if AgentActivity.shared.isWorking(on: self), let tab = popup?.tab { AgentCommands.adopt(tab, from: self) }
         return popup
     }
 

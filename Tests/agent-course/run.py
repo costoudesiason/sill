@@ -411,6 +411,16 @@ def press_list(c):
     return c.result().get("city") == "Porto" and "No click reached" not in out
 
 @case
+def stale_wait(c):
+    # A wait for words already on the page waits for them to show again, and says when they never do.
+    t0 = time.time()
+    out = c.must("page_do", steps=[{"click": "Save"}, {"wait": "Saved"}])
+    if not c.result().get("saved"): raise Fail(f"the wait ended before the new “Saved” ({time.time() - t0:.1f} s): " + out[:300])
+    out = c.must("page_do", steps=[{"click": "Refresh"}, {"wait": "Saved"}])
+    if "already on the page" not in out: raise Fail("a wait answered by old words wasn't flagged: " + out[:300])
+    return True
+
+@case
 def pick(c):
     # Type and choose the suggestion, one step.
     c.must("page_do", steps=[{"type": "City", "text": "Pr", "pick": "Prague"}])
@@ -685,7 +695,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)
