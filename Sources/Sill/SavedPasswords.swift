@@ -31,6 +31,10 @@ enum SavedPasswords {
     /// matches google.com), exact host first. Names only: no password is read.
     static func logins(for host: String) async -> [Login] {
         let site = Domains.registrable(host)
+        if TestPasswords.on {
+            let all = TestPasswords.all().map { Login(host: $0.host, user: $0.user) }
+            return all.filter { $0.host == host || Domains.registrable($0.host) == site }.sorted { $0.user < $1.user }
+        }
         return await Task.detached(priority: .userInitiated) { () -> [Login] in
             let query: [String: Any] = [kSecClass as String: kSecClassInternetPassword,
                                         kSecAttrCreator as String: creator,
@@ -51,7 +55,8 @@ enum SavedPasswords {
 
     /// The password of one account, read only when it's being filled.
     static func password(for login: Login) async -> String? {
-        await Task.detached(priority: .userInitiated) { () -> String? in
+        if TestPasswords.on { return TestPasswords.get(login.host, login.user) }
+        return await Task.detached(priority: .userInitiated) { () -> String? in
             var query = base(login.host, login.user)
             query[kSecReturnData as String] = true
             query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -83,6 +88,7 @@ enum SavedPasswords {
     }
 
     fileprivate static func store(_ password: String, user: String, host: String) -> Saved {
+        if TestPasswords.on { return TestPasswords.set(host, user, password) }
         let data = Data(password.utf8)
         var read = base(host, user)
         read[kSecReturnData as String] = true
@@ -103,7 +109,8 @@ enum SavedPasswords {
     /// Whether `password` is already what Sill has for `user` at `host`
     /// (nothing to ask), different (asks to update), or not saved (asks to save).
     static func state(_ password: String, user: String, host: String) async -> Saved {
-        await Task.detached(priority: .userInitiated) { () -> Saved in
+        if TestPasswords.on { return TestPasswords.get(host, user).map { $0 == password ? .same : .updated } ?? .added }
+        return await Task.detached(priority: .userInitiated) { () -> Saved in
             var read = base(host, user)
             read[kSecReturnData as String] = true
             var existing: CFTypeRef?
@@ -229,7 +236,8 @@ enum DiaImport {
 extension SavedPasswords {
     /// Every account Sill keeps, by site then name. Names only.
     static func all() async -> [Login] {
-        await Task.detached(priority: .userInitiated) { () -> [Login] in
+        if TestPasswords.on { return TestPasswords.all().map { Login(host: $0.host, user: $0.user) } }
+        return await Task.detached(priority: .userInitiated) { () -> [Login] in
             let query: [String: Any] = [kSecClass as String: kSecClassInternetPassword,
                                         kSecAttrCreator as String: creator,
                                         kSecMatchLimit as String: kSecMatchLimitAll,
@@ -251,5 +259,38 @@ extension SavedPasswords {
         await Task.detached(priority: .userInitiated) { () -> Bool in
             SecItemDelete(base(login.host, login.user) as CFDictionary) == errSecSuccess
         }.value
+    }
+}
+
+
+/// A test copy of Sill (the course, the benchmarks) is re-signed on every build, and the keychain asks
+/// about every re-signed copy: its passwords are a file in its own profile instead (test values only).
+enum TestPasswords {
+    static let on = Places.testProfile != nil
+    private static let lock = NSLock()
+    private static var file: URL { Places.support.appendingPathComponent("passwords-test.json") }
+
+    private static func read() -> [String: String] {
+        (try? JSONDecoder().decode([String: String].self, from: Data(contentsOf: file))) ?? [:]
+    }
+
+    static func all() -> [(host: String, user: String)] {
+        lock.withLock { read().keys.compactMap { key in
+            let parts = key.split(separator: "\n", maxSplits: 1).map(String.init)
+            return parts.count == 2 ? (parts[0], parts[1]) : nil
+        } }
+    }
+
+    static func get(_ host: String, _ user: String) -> String? { lock.withLock { read()[host + "\n" + user] } }
+
+    static func set(_ host: String, _ user: String, _ password: String) -> SavedPasswords.Saved {
+        lock.withLock {
+            var all = read()
+            let key = host + "\n" + user
+            let before = all[key]
+            all[key] = password
+            guard let data = try? JSONEncoder().encode(all), (try? data.write(to: file, options: .atomic)) != nil else { return .failed }
+            return before == nil ? .added : before == password ? .same : .updated
+        }
     }
 }

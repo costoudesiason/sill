@@ -21,6 +21,8 @@ import Security
 enum Jev {
     static let key: String? = {
         if let env = ProcessInfo.processInfo.environment["TYPESAFE_API_KEY"], !env.isEmpty { return env }
+        // From Sill's vault, over its private socket: no Keychain prompt for this helper.
+        if let r = try? Sill().run("vault.key", ["name": "typesafe"]) as? [String: Any], let v = r["value"] as? String, !v.isEmpty { return v }
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "Sill TypeSafe",
                                     kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
         var item: CFTypeRef?

@@ -1,0 +1,7 @@
+<!doctype html><meta charset=utf-8><title>Cards</title><script src=kit.js></script>
+<h1>Results</h1>
+<div id=list></div>
+<script>
+const items = [['Lamp', 29], ['Desk', 149], ['Chair', 89], ['Shelf', 59], ['Rug', 120]];
+list.innerHTML = items.map(([n, p]) => `<div class="card c-${n.length}x"><h3><a href="/item/${n.toLowerCase()}">${n}</a></h3><span class=price>$${p}</span><p>Ships in 2 days</p></div>`).join('');
+</script>

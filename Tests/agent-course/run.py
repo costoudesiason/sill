@@ -336,6 +336,61 @@ def in_context(c):
     return c.result().get("picked") == "January 2027 26"
 
 @case
+def records(c):
+    # Repeated cards as data, and saved to a file without passing through the model.
+    ok, out = c.m.call("page_read", tab=c.tab, records=True)
+    if not ok or "Desk" not in out or "$149" not in out or "/item/desk" not in out: raise Fail(out[:300])
+    # Saved into the working folder (sill-mcp's own), as an agent's deliverables are.
+    path = os.path.join(os.getcwd(), "Tests", "agent-course", "last-records.json")
+    ok, out = c.m.call("page_read", tab=c.tab, records=True, save=path)
+    try: rows = json.load(open(path))["records"]
+    except Exception as e: raise Fail(f"no file: {out[:200]} {e}")
+    return ok and len(rows) == 5
+
+@case
+def zoom(c):
+    # A picture of just one element, larger.
+    r = c.m.rpc("tools/call", {"name": "page_screenshot", "arguments": {"tab": c.tab, "ref": ref(c.look(), "link", "Desk"), "zoom": 3}}).get("result", {})
+    kinds = [x.get("type") for x in r.get("content", [])]
+    return "image" in kinds and not r.get("isError")
+
+@case
+def site_notes(c):
+    # A search typed once teaches the site's search address: the next visit is told it.
+    c.must("page_do", steps=[{"type": "Search trips", "text": "lamp", "submit": True}])
+    ok, out = c.m.call("tabs_open", url=A + "two-months.html")
+    tab = out.splitlines()[1].split()[0] if ok else None
+    if tab: c.m.call("tabs_close", tab=tab)
+    return "search → http://127.0.0.1:8801/search?q={query}" in out
+
+@case
+def vault(c):
+    # A secret filled by Sill on its own site only; the agent's answer never shows it.
+    sock("vault.set", name="course-secret", kind="password", value="s3cret-value", sites=["127.0.0.1"])
+    sock("vault.set", name="course-elsewhere", kind="password", value="nope", sites=["example.com"])
+    out = c.must("page_do", steps=[{"fill": "course-secret", "on": "Search products"}])
+    if "s3cret-value" in out: raise Fail("the secret showed in the answer")
+    bad, why = c.do("page_do", steps=[{"fill": "course-elsewhere", "on": "Search products"}])
+    if "only for example.com" not in why: raise Fail("filled a secret on the wrong site: " + why[:200])
+    time.sleep(0.2)
+    # Anything read back from the page shows "(from the vault)" in its place, so ask the page a yes/no.
+    ok, same = c.m.call("page_eval", tab=c.tab, script="return window.__result.model === 's3cret' + '-value'")
+    return same.strip() == "true"
+
+@case
+def pdf(c):
+    # A PDF in a tab reads as a document: its text by page, and a page drawn whole.
+    ok, out = c.m.call("tabs_open", url=A + "doc.pdf", snapshot=False)
+    tab = out.splitlines()[1].split()[0]
+    try:
+        ok, text = c.m.call("page_read", tab=tab, text=True, pages="2")
+        r = c.m.rpc("tools/call", {"name": "page_screenshot", "arguments": {"tab": tab, "pdfPage": 1}}).get("result", {})
+    finally:
+        c.m.call("tabs_close", tab=tab)
+    if "Second page words" not in text or "First page words" in text: raise Fail(text[:300])
+    return "image" in [x.get("type") for x in r.get("content", [])]
+
+@case
 def pick(c):
     # Type and choose the suggestion, one step.
     c.must("page_do", steps=[{"type": "City", "text": "Pr", "pick": "Prague"}])
@@ -610,7 +665,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)

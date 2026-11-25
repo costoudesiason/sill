@@ -4,3 +4,4 @@ build/
 .swiftpm/
 .claude/
 build.log
+Tests/agent-course/last-records.json

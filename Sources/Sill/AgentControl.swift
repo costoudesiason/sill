@@ -457,7 +457,30 @@ enum AgentCommands {
         }
     }
 
+    /// Secrets Sill filled into each tab: wherever the page echoes one back, an agent sees "(from the vault)".
+    private static var secretsShown: [ObjectIdentifier: Set<String>] = [:]
+    private static func scrub(_ value: Any, for tab: Tab) -> Any {
+        guard let secrets = secretsShown[ObjectIdentifier(tab)], !secrets.isEmpty else { return value }
+        func clean(_ v: Any) -> Any {
+            if let s = v as? String { return secrets.reduce(s) { $0.replacingOccurrences(of: $1, with: "(from the vault)") } }
+            if let a = v as? [Any] { return a.map(clean) }
+            if let d = v as? [String: Any] { return d.mapValues(clean) }
+            return v
+        }
+        return clean(value)
+    }
+
     private static func perform(_ command: String, _ args: [String: Any]) async throws -> Any {
+        let result = try await performRaw(command, args)
+        // Reads of a page go back with any vault secret it shows replaced.
+        if ["page.snapshot", "page.text", "page.eval", "page.records"].contains(command), !secretsShown.isEmpty,
+           let (tab, _) = try? tab(args.merging(["remember": false]) { $1 }) {
+            return scrub(result, for: tab)
+        }
+        return result
+    }
+
+    private static func performRaw(_ command: String, _ args: [String: Any]) async throws -> Any {
         switch command {
         case "status":
             return ["app": "Sill", "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
@@ -487,6 +510,44 @@ enum AgentCommands {
                 await settle(tab, view)
             }
             return describe(tab, in: browser)
+
+        case "vault.list":
+            // What the vault holds for this page's site (or all of it): names and kinds, never values.
+            let host = (args["host"] as? String) ?? (try? tab(args.merging(["remember": false]) { $1 }).0.webView?.url?.host())
+            return ["entries": AgentVault.list(for: args["all"] as? Bool == true ? nil : host)]
+
+        case "vault.fill":
+            // A secret typed into a field by Sill, never shown to the agent, and only on its own sites.
+            guard let name = args["name"] as? String, let entry = AgentVault.entry(name) else { throw AgentError("Nothing called that in the vault (vault names: ask for the site's list).") }
+            let (view, tab, _) = try await webView(args)
+            guard let host = view.url?.host(), AgentVault.allowed(entry, on: host) else {
+                throw AgentError("“\(entry.name)” is only for \(entry.sites.isEmpty ? "Sill itself" : entry.sites.joined(separator: ", ")): not filled here.")
+            }
+            var lookup: [String: Any] = ["editable": true]
+            for (key, from) in [("ref", "ref"), ("selector", "selector"), ("text", "label")] { if let v = args[from] { lookup[key] = v } }
+            let target = try await locate(lookup, in: view)
+            let started = Date()
+            _ = try? await evaluate("return window.__sillAgent.markVaulted(ref)", in: view, world: Web.world, arguments: ["ref": target.ref])
+            let typed = try await type(entry.value, into: target, clear: true, in: view)
+            if let into = typed.into { _ = try? await evaluate("return window.__sillAgent.markVaulted(ref)", in: view, world: Web.world, arguments: ["ref": into]) }
+            if entry.value.count >= 4 { secretsShown[ObjectIdentifier(tab), default: []].insert(entry.value) }
+            await settle(tab, view, since: started)
+            return ["filled": typed.ok, "name": entry.name, "ref": typed.into ?? target.ref]
+
+        case "vault.key":
+            // A key for Sill's own helpers (TypeSafe's for page_goal): to this Mac's helpers only, never claude.ai's calls.
+            guard args["_via"] == nil, let name = args["name"] as? String, let entry = AgentVault.entry(name), entry.kind == "service" else {
+                throw AgentError("Not available.")
+            }
+            return ["value": entry.value]
+
+        case "vault.set":
+            guard args["_via"] == nil, let name = args["name"] as? String, !name.isEmpty, let value = args["value"] as? String, !value.isEmpty else {
+                throw AgentError("Only from this Mac, with a name and a value.")
+            }
+            AgentVault.set(AgentVault.Entry(name: name, kind: args["kind"] as? String ?? "password", value: value,
+                                  sites: args["sites"] as? [String] ?? [], user: args["user"] as? String))
+            return ["saved": name]
 
         case "clipboard.set":
             // The agent's own clipboard (yours is never touched): what its next ⌘V pastes.
@@ -592,6 +653,12 @@ enum AgentCommands {
         case "page.text":
             let (view, _, _) = try await webView(args)
             let limit = args["maxChars"] as? Int ?? 40_000
+            // A PDF in the tab: read as a document, page by page.
+            if PDFTabs.isPDF(view.url), let url = view.url {
+                var r = try await PDFTabs.text(url, pages: args["pages"] as? String, maxChars: limit)
+                r["url"] = url.absoluteString; r["title"] = view.title ?? url.lastPathComponent
+                return r
+            }
             // Markdown (headings, lists, table rows) through shadow roots and frames; plain innerText if that fails.
             let main = args["main"] as? Bool ?? false
             if args["raw"] as? Bool != true,
@@ -690,6 +757,7 @@ enum AgentCommands {
             if let landed, landed["hit"] as? Bool == false {
                 answer["missed"] = "The click landed on “\(landed["on"] as? String ?? "something else")”, not on “\(target.name)”: the page moved. Look again before going on."
             }
+            if answer["missed"] == nil, target.backend == nil, !target.ref.contains(",") { SiteNotes.shared.did(tab, url: URL(string: answerURL ?? ""), click: target.name) }
             return outcome(answer, view, since: started)
 
         case "page.hover":
@@ -710,6 +778,10 @@ enum AgentCommands {
             let clear = args["clear"] as? Bool ?? true
             let typingStarted = Date()
             let typed = try await type(text, into: target, clear: clear, in: view)
+            if typed.ok, !(typed.value ?? "").isEmpty, (try? await evaluate("return window.__sillAgent.valueKind(ref)", in: view, world: Web.world, arguments: ["ref": typed.into ?? target.ref])) as? String != "password" {
+                SiteNotes.shared.did(tab, url: view.url, typeInto: target.name)
+                SiteNotes.shared.agentTyped(text, in: tab)
+            }
             // Suggestions, validation: what the typing set off, before answering.
             await settle(tab, view, since: typingStarted)
             if args["submit"] as? Bool ?? false {
@@ -791,8 +863,38 @@ enum AgentCommands {
             let value = try await evaluate(script, in: view, world: .page, timeout: 30)
             return ["value": sanitize(value)]
 
+        case "page.records":
+            let (view, _, _) = try await webView(args)
+            let rows = try await evaluate("return window.__sillAgent.records(max)", in: view, world: Web.world, arguments: ["max": args["max"] as? Int ?? 200])
+            return ["url": view.url?.absoluteString ?? "", "records": sanitize(rows)]
+
         case "page.screenshot":
             let (view, _, _) = try await webView(args)
+            // A page of a PDF in the tab, drawn whole at full size.
+            if let n = args["pdfPage"] as? Int, let url = view.url, PDFTabs.isPDF(url) {
+                return try await PDFTabs.picture(url, page: n, width: min(max(args["maxWidth"] as? Double ?? 1600, 600), 2400))
+            }
+            // Just a part, larger: an element (ref) or a region, at zoom times its size.
+            if args["ref"] != nil || args["w"] != nil {
+                var region: [String: Double] = [:]
+                if let ref = args["ref"] as? String {
+                    guard let r = try await evaluate("return window.__sillAgent.rect(ref)", in: view, world: Web.world, arguments: ["ref": ref]) as? [String: Any] else {
+                        throw AgentError("\(ref) isn't on the page now: look again for its ref.")
+                    }
+                    for k in ["x", "y", "w", "h"] { region[k] = (r[k] as? Double) ?? Double(r[k] as? Int ?? 0) }
+                } else {
+                    for k in ["x", "y", "w", "h"] { region[k] = args[k] as? Double ?? Double(args[k] as? Int ?? 0) }
+                }
+                guard (region["w"] ?? 0) >= 4, (region["h"] ?? 0) >= 4 else { throw AgentError("That region is too small to picture.") }
+                let scroll = try await evaluate("return [scrollX, scrollY]", in: view, world: Web.world) as? [Double] ?? [0, 0]
+                let zoom = min(max(args["zoom"] as? Double ?? 2, 1), 4)
+                if view.pageHidden { view.insistShown() }
+                let shot = try await devtools(view, "Page.captureScreenshot", ["format": "jpeg", "quality": 90,
+                    "clip": ["x": (region["x"] ?? 0) + scroll[0], "y": (region["y"] ?? 0) + scroll[1], "width": region["w"] ?? 0, "height": region["h"] ?? 0, "scale": zoom]], timeout: 8)
+                guard let data = shot["data"] as? String else { throw AgentError("The page couldn't be captured.") }
+                return ["data": data, "mimeType": "image/jpeg",
+                        "note": "That part at \(String(format: "%.1f", zoom))× (the box \(Int(region["x"] ?? 0)),\(Int(region["y"] ?? 0)) \(Int(region["w"] ?? 0))×\(Int(region["h"] ?? 0)) in CSS pixels)."]
+            }
             var marks: [[String: Any]] = []
             if args["marks"] as? Bool == true {
                 marks = (try? await evaluate("return window.__sillAgent.snapshot(false)", in: view, world: Web.world)) as? [[String: Any]] ?? []
@@ -813,11 +915,16 @@ enum AgentCommands {
 
         case "habits.site":
             // Where you go on a site and what you click there (Habits.swift).
-            guard Habits.shared.enabled else { return ["pages": [], "clicks": [], "off": true] }
+            guard Habits.shared.enabled else {
+                let host = (args["host"] as? String) ?? ""
+                return ["pages": [], "clicks": [], "off": true, "notes": SiteNotes.shared.brief(for: host)]
+            }
             let host = (args["host"] as? String) ?? (try? tab(args.merging(["remember": false]) { $1 }).0.webView?.url?.host()) ?? ""
             guard !host.isEmpty else { throw AgentError("Give a \"host\".") }
             let page = (args["url"] as? String).flatMap(URL.init(string:))
-            return Habits.shared.site(host, page: page, limit: args["limit"] as? Int ?? 6)
+            var site = Habits.shared.site(host, page: page, limit: args["limit"] as? Int ?? 6)
+            site["notes"] = SiteNotes.shared.brief(for: host)
+            return site
 
         case "habits.search":
             guard Habits.shared.enabled else {
@@ -1434,6 +1541,14 @@ enum AgentCommands {
     /// change: style, class, svg and canvas are left out. At most 2.5 s beyond
     /// a page's arrival (10 s).
     private static func settle(_ tab: Tab, _ view: SillWebView, since: Date = Date()) async {
+        let start = Date()
+        await settleOnce(tab, view, since: since)
+        // What this site's pace is, and whether a search went into the address: for the next plan.
+        SiteNotes.shared.settled(tab, url: view.url, ms: Int(Date().timeIntervalSince(since) * 1000))
+        _ = start
+    }
+
+    private static func settleOnce(_ tab: Tab, _ view: SillWebView, since: Date) async {
         let page = AgentPage.of(view)
         let start = Date()
         var deadline = start.addingTimeInterval(2.5)
@@ -1865,6 +1980,7 @@ enum AgentScript {
         }
       };
       const offsets = new WeakMap();   // element → its frame's offset, from the last walk
+      const vaulted = new WeakSet();   // fields Sill filled from the vault: their value is never shown
       const metas = new Map();         // ref → its role and name when last listed, to find it again after a re-render
       const describe = (el, f, dx, dy) => {
         const r = f.getBoundingClientRect();
@@ -1877,7 +1993,7 @@ enum AgentScript {
           if (reg && !reg.closest('main,[role=main],article')) item.region = reg.matches('footer,[role=contentinfo]') ? 'footer' : 'nav';
         }
         if (el.type) item.type = el.type;
-        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) && el.type !== 'password' && !['checkbox', 'radio', 'submit', 'button', 'reset'].includes(el.type)) item.value = String(el.value).slice(0, 200);
+        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) && el.type !== 'password' && !['checkbox', 'radio', 'submit', 'button', 'reset'].includes(el.type)) item.value = vaulted.has(el) ? '(filled from the vault)' : String(el.value).slice(0, 200);
         if (el.type === 'password') item.value = el.value ? '(hidden)' : '';
         if ('checked' in el && (el.type === 'checkbox' || el.type === 'radio')) item.checked = el.checked;
         const ac = el.getAttribute('aria-checked'); if (ac === 'true' || ac === 'false') item.checked = ac === 'true';
@@ -1908,6 +2024,7 @@ enum AgentScript {
       const matches = (el) => { try { return el.matches(interactive) || clickables.has(el); } catch (_) { return false; } };
       const deepQuery = (selector) => { let hit = null; walk(document.documentElement, 0, 0, (el, dx, dy) => { offsets.set(el, [dx, dy]); try { if (el.matches(selector)) { hit = el; return false; } } catch (_) { return false; } }); return hit; };
       let lastAmbiguous = null, lastScore = 0, lastClicked = null;
+      const skipRec = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'SELECT', 'NAV', 'FOOTER']);
       // A frame, or 50 ms if the page isn't drawing (a tab in the background can stop drawing): never a wait for ever.
       const frame = () => new Promise((r) => { let done = false; const go = () => { if (!done) { done = true; r(); } };
         requestAnimationFrame(go); setTimeout(go, 50); });
@@ -2486,6 +2603,50 @@ enum AgentScript {
           return found;
         },
         mark(ref, token) { const el = find(ref); if (!el) return false; el.setAttribute('data-sill-pick', token); return true; },
+        markVaulted(ref) { const el = find(ref); if (el) vaulted.add(el); return !!el; },
+        // Where an element is now (viewport CSS pixels), for a picture of just that part.
+        rect(ref) {
+          const el = find(ref); if (!el) return null;
+          const f = face(el) || el; f.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+          const r = f.getBoundingClientRect(), off = offsets.get(el) || [0, 0];
+          return { x: r.left + off[0], y: r.top + off[1], w: r.width, h: r.height };
+        },
+        // The page's repeated records (result cards, table rows, list items) as data: the biggest set of
+        // siblings that look alike and carry text, each as its title, link and lines of text.
+        records(max) {
+          let best = null, bestScore = 0;
+          walk(document.body || document.documentElement, 0, 0, (el) => {
+            if (el.childElementCount < 3 || skipRec.has(el.tagName)) return;
+            const groups = new Map();
+            // Alike = same tag and the classes most of the siblings share (one card's extra class doesn't split the set).
+            const freq = new Map();
+            for (const k of el.children) for (const c of k.classList) freq.set(c, (freq.get(c) || 0) + 1);
+            const common = (k) => [...k.classList].filter((c) => freq.get(c) * 2 >= el.childElementCount).sort().join('.');
+            for (const k of el.children) {
+              const sig = k.tagName + '.' + common(k);
+              const g = groups.get(sig); if (g) g.push(k); else groups.set(sig, [k]);
+            }
+            for (const ks of groups.values()) {
+              if (ks.length < 3) continue;
+              const sample = ks.slice(0, 6).map((k) => clean(k.innerText).length);
+              const avg = sample.reduce((a, b) => a + b, 0) / sample.length;
+              if (avg < 12) continue;
+              const score = ks.length * Math.min(avg, 400);
+              if (score > bestScore) { bestScore = score; best = ks; }
+            }
+          });
+          if (!best) return [];
+          return best.filter((k) => clean(k.innerText)).slice(0, max || 200).map((k) => {
+            const link = k.matches('a[href]') ? k : k.querySelector('a[href]');
+            const head = k.querySelector('h1,h2,h3,h4,h5,[role=heading]');
+            const lines = [...new Set((k.innerText || '').split('\n').map((l) => clean(l)).filter((l) => l))].slice(0, 15).map((l) => l.slice(0, 160));
+            const img = k.querySelector('img[alt]');
+            const out = { title: clean((head && head.innerText) || (link && link.innerText) || lines[0] || '').slice(0, 200), lines };
+            if (link && link.href && !link.href.startsWith('javascript:')) out.url = link.href;
+            if (img && img.alt) out.image = clean(img.alt).slice(0, 120);
+            return out;
+          });
+        },
         absent(text) {
           const want = String(text).toLowerCase();
           return !(document.body && document.body.innerText || '').toLowerCase().includes(want);

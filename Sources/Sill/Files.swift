@@ -112,3 +112,60 @@ enum Files {
         }
     }
 }
+
+
+/// A PDF open in a tab, as a document rather than a viewer: its text page by page, and any page as a
+/// picture at full size. Chromium's PDF viewer shows the pages but gives a page script nothing to read.
+enum PDFTabs {
+    private static var cache: [String: Data] = [:]
+
+    static func isPDF(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        return url.pathExtension.lowercased() == "pdf" || url.absoluteString.lowercased().contains(".pdf?")
+    }
+
+    static func document(_ url: URL) async throws -> PDFDocument {
+        if let data = cache[url.absoluteString], let doc = PDFDocument(data: data) { return doc }
+        var request = URLRequest(url: url, timeoutInterval: 20)
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        let (data, _) = try await URLSession.shared.data(for: request)
+        guard let doc = PDFDocument(data: data) else { throw AgentError("This tab's PDF couldn't be read (it may need you signed in): page_screenshot shows what's drawn.") }
+        if cache.count > 8 { cache.removeAll() }
+        cache[url.absoluteString] = data
+        return doc
+    }
+
+    /// Text with page markers; `pages` like "3" or "10-12" (1-based).
+    static func text(_ url: URL, pages: String?, maxChars: Int) async throws -> [String: Any] {
+        let doc = try await document(url)
+        let range = pageRange(pages, count: doc.pageCount)
+        var out = "", truncated = false
+        for i in range {
+            guard let page = doc.page(at: i) else { continue }
+            let chunk = "--- page \(i + 1) of \(doc.pageCount) ---\n" + (page.string ?? "(no text on this page: it's a picture; page_screenshot pdfPage=\(i + 1) shows it)") + "\n\n"
+            if out.count + chunk.count > maxChars { truncated = true; out += String(chunk.prefix(max(0, maxChars - out.count))); break }
+            out += chunk
+        }
+        return ["text": out, "truncated": truncated, "pages": doc.pageCount, "pdf": true]
+    }
+
+    /// One page drawn as a JPEG, about `width` pixels wide.
+    static func picture(_ url: URL, page number: Int, width: Double) async throws -> [String: Any] {
+        let doc = try await document(url)
+        guard number >= 1, number <= doc.pageCount, let page = doc.page(at: number - 1) else { throw AgentError("This PDF has \(doc.pageCount) pages.") }
+        let box = page.bounds(for: .mediaBox)
+        let scale = width / max(box.width, 1)
+        let image = page.thumbnail(of: NSSize(width: box.width * scale, height: box.height * scale), for: .mediaBox)
+        guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+              let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85]) else { throw AgentError("The page couldn't be drawn.") }
+        return ["data": jpeg.base64EncodedString(), "mimeType": "image/jpeg",
+                "note": "Page \(number) of \(doc.pageCount), drawn at \(Int(image.size.width)) px wide."]
+    }
+
+    private static func pageRange(_ pages: String?, count: Int) -> [Int] {
+        guard let pages, !pages.isEmpty else { return Array(0..<count) }
+        let parts = pages.split(separator: "-").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        let lo = max(1, parts.first ?? 1), hi = min(count, parts.count > 1 ? parts[1] : lo)
+        return lo <= hi ? Array((lo - 1)..<hi) : []
+    }
+}

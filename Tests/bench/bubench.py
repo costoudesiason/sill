@@ -94,7 +94,7 @@ def trajectory(events):
                 if b.get("type") == "tool_result":
                     c = b.get("content")
                     t = c if isinstance(c, str) else " ".join(x.get("text", "") for x in c or [] if isinstance(x, dict))
-                    out.append(f"   result: {clip_middle(t, 4000)}")
+                    out.append(f"   result: {clip_middle(t, 12000)}")
     return "\n".join(out)
 
 
