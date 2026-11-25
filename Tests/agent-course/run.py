@@ -232,6 +232,25 @@ def confirm(c):
     return c.result(2).get("answer") is True
 
 @case
+def animated(c):
+    # Three clicks on a page that never stops moving: each done as soon as the page has answered it.
+    c.look()
+    t0 = time.time()
+    c.must("page_do", steps=[{"click": "Add one"}, {"click": "Add one"}, {"click": "Add one"}])
+    took = time.time() - t0
+    if took > 1.5: raise Fail(f"three clicks took {took:.1f} s on an animated page")
+    return c.result().get("count") == 3
+
+@case
+def read_script(c):
+    # The listed tools are the short set; page_read pulls data with a script, and reads text.
+    names = [t["name"] for t in c.m.rpc("tools/list", {})["result"]["tools"]]
+    if "page_click" in names or "page_read" not in names or len(names) > 15: raise Fail(f"tools listed: {names}")
+    out = c.must("page_read", script="return [...document.querySelectorAll('button')].map(b => b.textContent)")
+    text = c.must("page_read", text=True)
+    return "Add one" in out and "Live" in text
+
+@case
 def popup(c):
     ok, out = c.do("page_click", ref=ref(c.look(), "link", "Open help"))
     ok2, tabs = c.m.call("tabs_list")
@@ -465,7 +484,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)
@@ -503,7 +522,6 @@ def start_copy():
     """Sill's test copy, in the background, with agent control on in its own settings."""
     prepare_copy()
     subprocess.run(["defaults", "write", DOMAIN, "agentControl", "-bool", "true"])
-    subprocess.run(["defaults", "write", DOMAIN, "agentAsk", "never"])
     subprocess.run(["defaults", "write", DOMAIN, "restoresTabs", "-bool", "false"])
     if owner_of_socket(): return
     subprocess.run(["open", "-n", "-g", "--env", f"SILL_PROFILE={PROFILE}", COPY])

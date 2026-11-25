@@ -97,7 +97,22 @@ const pending = new Map();  // id → { resolve, reject, timer }
 let toolsCache = null;      // last tools/list answer, for when the Mac drops off briefly
 let notBefore = 0;          // sign-ins issued before this (seconds) are refused: Sill's "Sign out claude.ai"
 
-function toBridge(message, timeout) {
+// A Mac that dropped off a moment ago (Wi-Fi changed, it woke from sleep) is
+// usually back within seconds: a call that arrives meanwhile waits up to 10 s
+// for it instead of failing.
+const RECONNECT_GRACE = Number(process.env.RECONNECT_GRACE_MS) || 10_000;
+const bridgeWaiters = new Set();
+function bridgeReady(timeout) {
+  if (bridge && bridge.readyState === 1) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const done = (ok) => { clearTimeout(timer); bridgeWaiters.delete(done); resolve(ok); };
+    const timer = setTimeout(() => done(false), timeout);
+    bridgeWaiters.add(done);
+  });
+}
+
+async function toBridge(message, timeout) {
+  await bridgeReady(RECONNECT_GRACE);
   return new Promise((resolve, reject) => {
     if (!bridge || bridge.readyState !== 1) return reject(new Offline());
     const id = nextId++;
@@ -122,6 +137,7 @@ wss.on("connection", (socket) => {
   bridgeSince = new Date();
   socket.isAlive = true;
   console.log("bridge: connected");
+  for (const done of [...bridgeWaiters]) done(true);
 
   socket.on("pong", () => { socket.isAlive = true; });
   socket.on("message", (data) => {

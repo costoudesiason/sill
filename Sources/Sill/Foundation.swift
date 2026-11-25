@@ -183,8 +183,6 @@ final class Preferences: ObservableObject {
     @Published var remoteConnector: Bool { didSet { store.set(remoteConnector, forKey: "remoteConnector") } }
     /// The relay's address, e.g. https://sill-relay.up.railway.app.
     @Published var connectorRelay: String { didSet { store.set(connectorRelay, forKey: "connectorRelay") } }
-    /// When agents ask first: "auto" (risky steps, judged on device), "always", "never" (AgentJudge).
-    @Published var agentAsk: String { didSet { store.set(agentAsk, forKey: "agentAsk") } }
     /// claude.ai may run scripts in pages (page_eval): off unless you turn it on.
     @Published var remoteScripts: Bool { didSet { store.set(remoteScripts, forKey: "remoteScripts") } }
     /// claude.ai sign-ins made before this moment no longer work (Sign out claude.ai).
@@ -225,7 +223,6 @@ final class Preferences: ObservableObject {
         agentControl = store.bool(forKey: "agentControl")
         remoteConnector = store.bool(forKey: "remoteConnector")
         connectorRelay = store.string(forKey: "connectorRelay") ?? ""
-        agentAsk = store.string(forKey: "agentAsk") ?? "auto"
         remoteScripts = store.bool(forKey: "remoteScripts")
         connectorNotBefore = store.double(forKey: "connectorNotBefore")
         blocksAds = store.bool(forKey: "blocksAds")

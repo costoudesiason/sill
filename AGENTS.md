@@ -41,25 +41,27 @@ Sill then listens on a Unix socket:
   can't close your window), the keyboard stays in your tab, and an agent closing the last
   tab of your last window leaves an empty tab rather than no window.
 
-`Tests/agent-course/` is the proof: 46 cases taken from what breaks agents on real sites
+`Tests/agent-course/` is the proof: 48 cases taken from what breaks agents on real sites
 (shadow DOM, cross-origin card frames, covered buttons, re-rendering lists, custom
 dropdowns, two-step sign-in, dialogs, popups, drag and drop, infinite lists, a full
 checkout, right-click menus, long press, drawing, sortable lists, touch, keystroke-driven
 suggestions, custom sliders, shortcuts, copy and paste, virtual lists, popovers, nested
-frames, prompt and leave-page dialogs, popup windows, validation). It runs its own copy of
+frames, prompt and leave-page dialogs, popup windows, validation, a page that never stops moving). It runs its own copy of
 Sill (own identity, profile and settings) in the background; yours is never touched:
 
     python3 Tests/agent-course/run.py
 
 ## Asking first
 
-Settings › Agents › **Ask before**: *Risky steps* (default), *Every change*, or *Never*.
-On *Risky steps*, a click or Enter whose words suggest paying, ordering, sending,
-posting, deleting or account changes is judged by Apple's on-device model, and Sill
-asks only when it says so. Everything else goes straight through. Uploads always ask.
-CAPTCHAs and human checks are never solved by the agent: it calls `wait_for_user`.
-Card details always ask. Questions appear in a small card in the corner of the screen;
-they don't cover your window or take the keyboard.
+The agent asks you in its own chat, not in Sill: its instructions tell it to stop before
+a step that pays, orders, books, sends or posts in your name, submits a form that commits
+you, deletes or cancels, or changes account settings, say exactly what will happen, and
+go ahead only on your yes. Browsing, searching, filling in forms, signing in and saving
+passwords need no OK. Sill shows no cards for agents, with two exceptions: an upload of a
+file from outside Desktop, Documents, Downloads, Pictures, Movies or Music (or a hidden
+one), and the **Allow** for a new claude.ai sign-in. CAPTCHAs and human checks are never
+solved by the agent: it calls `wait_for_user`. A tab an agent hasn't touched for a minute
+is handed back to you (a chat stopped in claude.ai doesn't tell Sill it's done).
 
 Settings › Agents › **Agent activity** shows everything agents did (never what they
 typed). From claude.ai, `page_eval` is off unless you turn on **Let claude.ai run
@@ -105,6 +107,14 @@ Any client (JSON config):
 
 ## Tools
 
+A model is shown fourteen tools that cover everything: `tabs_open`, `tabs_list`,
+`tabs_close` (`keep_open=true` hands a tab back), `page_navigate` (also back, forward,
+reload), `page_do` (every action: click, type, press, select, hover, scroll, drag, touch,
+pinch, wait, dialogs, sign-in), `page_read` (elements, `text=true`, or a `script` whose
+answer comes back), `page_screenshot`, `page_sign_in`, `passwords_save`, `page_upload`,
+`wait_for_user`, `web_search`, `read_url`, `history_search`. The single-action tools below
+still answer when called (older clients, the test course), but aren't listed.
+
 | Tool | What it does | Arguments |
 |---|---|---|
 | `status` | App version, window and tab counts | — |
@@ -149,8 +159,10 @@ Fast by design: Sill acts in milliseconds; the time is the model's round trips. 
    pick a date, press Search. Text targets are waited for; a text matching several things
    is refused, and a partial match is flagged.
 3. Every action answers with only what changed on the page (`page_snapshot` shows it all).
-4. Actions finish when the page is quiet and its requests have come back, not after a
-   fixed pause: suggestions and results are in the answer.
+4. Actions finish when the page has answered them, not after a fixed pause: it changed and
+   held still for 60 ms (or didn't change in 100 ms), and its requests came back.
+   Animations don't count (style, class, svg, canvas), so a page that never stops moving
+   doesn't hold a click up. A new page answers once it's parsed, not when its last ad loads.
 
 Trip.com, London → Paris one-way on a chosen date, ten steps: one `page_do` call, 7 s.
 

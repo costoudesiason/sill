@@ -30,8 +30,12 @@ final class AgentActivity {
 
     /// A tab is the agent's from its first touch until it's released: closed,
     /// handed back (tabs_release), the agent gone (its connection closed), or
-    /// left untouched this long. All that time, its dots and glow show.
-    private let release: TimeInterval = 300
+    /// left untouched this long. All that time, its dots and glow show. A chat
+    /// you stop in claude.ai says nothing to Sill (the relay's line stays up),
+    /// so a minute without a touch is taken as the agent having stopped: long
+    /// enough for a model's longest pause between steps, and it takes the tab
+    /// up again with its next one.
+    private let release: TimeInterval = 60
 
     func began() { busy += 1; keepAwake() }
     func ended() { busy = max(0, busy - 1); keepAwake() }
