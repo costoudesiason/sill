@@ -350,7 +350,10 @@ def records(c):
 @case
 def zoom(c):
     # A picture of just one element, larger.
-    r = c.m.rpc("tools/call", {"name": "page_screenshot", "arguments": {"tab": c.tab, "ref": ref(c.look(), "link", "Desk"), "zoom": 3}}).get("result", {})
+    # The cards read as one line each: • “Desk” [e5] · $149 · …
+    m = re.search(r"“Desk” \[(e\d+)\]", c.look())
+    if not m: raise Fail("cards not shown as records: " + c.snap[:300])
+    r = c.m.rpc("tools/call", {"name": "page_screenshot", "arguments": {"tab": c.tab, "ref": m.group(1), "zoom": 3}}).get("result", {})
     kinds = [x.get("type") for x in r.get("content", [])]
     return "image" in kinds and not r.get("isError")
 

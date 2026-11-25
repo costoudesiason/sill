@@ -208,8 +208,8 @@ func compactSnapshot(_ result: Any, boxes: Bool = false) -> String {
     let raw = page["elements"] as? [[String: Any]] ?? []
     let namedHrefs = Set(raw.compactMap { e -> String? in
         guard let h = e["href"] as? String, !(e["name"] as? String ?? "").isEmpty else { return nil }; return h })
-    let elements = collapseRuns(raw.filter { e in
-        !((e["name"] as? String ?? "").isEmpty && e["context"] == nil && (e["href"] as? String).map(namedHrefs.contains) == true) })
+    let elements = foldRecords(collapseRuns(raw.filter { e in
+        !((e["name"] as? String ?? "").isEmpty && e["context"] == nil && (e["href"] as? String).map(namedHrefs.contains) == true) }), boxes: boxes)
     // Mostly behind something (a dialog, a cookie banner): those controls are left out, and said so.
     let covered = elements.filter { $0["covered"] as? Bool == true }.count
     let dropCovered = covered > 12
@@ -221,6 +221,7 @@ func compactSnapshot(_ result: Any, boxes: Bool = false) -> String {
             switch said {
             case "heading": lines.append(String(repeating: "#", count: max(1, element["level"] as? Int ?? 2)) + " " + clip(text, 120))
             case "alert": lines.append("! " + clip(text, 200))
+            case "record": lines.append(text)
             case "text": lines.append((text.hasPrefix("[") || text.hasPrefix("#") || text.hasPrefix("!") ? "· " : "") + text)
             case "page": pageInfo = element
             case "form": lines.insert("Form → \(text)  (fill the {…} and open it: no typing or clicking)", at: min(2, lines.count))
@@ -353,6 +354,38 @@ func collapseRuns(_ elements: [[String: Any]]) -> [[String: Any]] {
             out.append(run)
             i = j + 1
         } else { out.append(elements[i]); i += 1 }
+    }
+    return out
+}
+
+/// Each record of the page's repeated set (a result card, a row) as one line: its words and its controls
+/// with their refs, in order, instead of a line apiece. A list of 48 results reads in 48 lines.
+func foldRecords(_ elements: [[String: Any]], boxes: Bool) -> [[String: Any]] {
+    guard !boxes, elements.contains(where: { $0["rec"] != nil }) else { return elements }
+    var out: [[String: Any]] = [], i = 0
+    while i < elements.count {
+        guard let rec = elements[i]["rec"] as? Int else { out.append(elements[i]); i += 1; continue }
+        var parts: [String] = [], seenWords: [String] = []
+        while i < elements.count, elements[i]["rec"] as? Int == rec {
+            let e = elements[i]; i += 1
+            if e["covered"] as? Bool == true || e["clipped"] != nil { continue }
+            if let ref = e["ref"] as? String, e["context"] == nil {
+                let name = clip((e["name"] as? String ?? "").trimmingCharacters(in: .whitespaces), 70)
+                var piece = name.isEmpty ? "[\(ref)]" : "“\(name)” [\(ref)]"
+                if let v = e["value"] as? String, !v.isEmpty { piece += " = \"\(clip(v, 30))\"" }
+                if e["checked"] as? Bool == true { piece += " [checked]" }
+                if e["disabled"] as? Bool == true { piece += " [disabled]" }
+                if !name.isEmpty { seenWords.append(name.lowercased()) }
+                parts.append(piece)
+            } else if let t = e["text"] as? String {
+                let w = clip(t, 90), lower = w.lowercased()
+                // The title's words again as a heading or a line: once is enough.
+                if seenWords.contains(where: { $0.hasPrefix(String(lower.prefix(30))) || lower.hasPrefix(String($0.prefix(30))) }) { continue }
+                seenWords.append(lower)
+                parts.append(w)
+            }
+        }
+        if !parts.isEmpty { out.append(["context": "record", "text": "• " + clip(parts.joined(separator: " · "), 600)]) }
     }
     return out
 }

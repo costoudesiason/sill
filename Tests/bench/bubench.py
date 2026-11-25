@@ -11,7 +11,7 @@ training data: it is decrypted here in memory only, and never written into this 
 
 The agent is `claude -p` with Sill's tools and file tools inside an empty workspace
 (deliverables go to ./outputs). The judge is `claude -p` given Browser Use's own findings
-prompt, the rubric, the agent's trajectory (text only: no screenshots), its answer and its
+prompt, the rubric, the agent's trajectory, the pictures it looked at (up to 12), its answer and its
 files; it marks each rubric item met / violated / not assessable, and the score is the met
 items' share of the weights, as Browser Use computes it. A different judge model and no
 screenshots: scores are for comparing Sill builds, not with Browser Use's published ones."""
@@ -38,7 +38,7 @@ JUDGE_PROMPT = """{system}
 Reply with ONE JSON object and nothing else:
 {{"agent_task_reading": "...", "findings": [{{"item": "<item id>", "evidence": "...", "status": "met|violated|not_assessable", "not_assessable_reason": null}}], "observations": [], "infra_error": false, "pii_present": false, "reward_hacking_suspected": false, "flag_notes": null}}
 Items, in order: {items}
-There are no screenshots in this run: judge from the trajectory, the final result and the files.
+The screenshots, if any, are the pictures the agent itself took; judge from them, the trajectory, the final result and the files.
 
 <task>
 {task}
@@ -108,15 +108,40 @@ def files_text(folder):
     return "\n\n".join(out) or "(no files)"
 
 
+def run_with_input(argv, env, timeout, cwd, text):
+    """claude -p reading its one message from stdin (stream-json): words and pictures together."""
+    p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, cwd=cwd)
+    try: out, err = p.communicate(text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill(); out, err = p.communicate()
+    events = []
+    for line in out.splitlines():
+        try: events.append((time.time(), json.loads(line)))
+        except ValueError: pass
+    return events, False, err.splitlines()
+
+
 def judge(binary, env, task, system, events, final, folder, model, cwd):
     items = list(task["weights"])
     prompt = JUDGE_PROMPT.format(system=system, items=", ".join(items), task=task["task"], rubric=task["rubric"],
                                  trajectory=clip_middle(trajectory(events), 300_000), final=clip_middle(final, 60_000),
                                  files=clip_middle(files_text(folder), 200_000))
-    argv = [binary, "-p", prompt, "--output-format", "stream-json", "--verbose", "--model", model,
+    # The pictures the agent looked at go to the judge too, as Browser Use's judge sees screenshots:
+    # visual evidence (a map, a drawing, a photo) can't be judged from words alone. Up to 12, spread over the run.
+    shots = []
+    for _, e in events:
+        if e.get("type") == "user" and isinstance(e.get("message", {}).get("content"), list):
+            for b in e["message"]["content"]:
+                if b.get("type") == "tool_result" and isinstance(b.get("content"), list):
+                    shots += [x for x in b["content"] if isinstance(x, dict) and x.get("type") == "image" and x.get("source", {}).get("data")]
+    if len(shots) > 12: shots = [shots[round(i * (len(shots) - 1) / 11)] for i in range(12)]
+    content = [{"type": "text", "text": prompt + (f"\n\n<screenshots>The {len(shots)} pictures below are what the agent looked at, in order.</screenshots>" if shots else "")}]
+    content += [{"type": "image", "source": s["source"]} for s in shots]
+    argv = [binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--model", model,
             "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--disable-slash-commands", "--no-session-persistence", "--max-turns", "2"]
-    evs, _, err = bench.run_claude(argv, env, 600, cwd)
+    message = json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
+    evs, _, err = run_with_input(argv, env, 600, cwd, message)
     out = next((e.get("result") or "" for _, e in evs if e.get("type") == "result"), "")
     m = re.search(r"\{.*\}", out, re.S)
     if not m: return {"error": f"judge said: {out[:300] or (err[-1] if err else 'nothing')}"}
@@ -149,9 +174,24 @@ def main():
     ap.add_argument("--jev", action="store_true")
     ap.add_argument("--config-dir", default=os.environ.get("BENCH_CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude-normal")))
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--rejudge", default="", help="judge a saved run again (its bubench-<stamp>.json), with today's judge")
     args = ap.parse_args()
 
     tasks, system = load()
+    if args.rejudge:
+        saved = json.load(open(args.rejudge))
+        trail = args.rejudge[:-5]
+        binary, env = bench.claude_bin(), bench.claude_env(os.path.expanduser(args.config_dir))
+        by_id = {t["id"]: t for t in tasks}
+        scores = []
+        for r in saved["results"]:
+            events = [(0, e) for e in json.load(open(os.path.join(trail, r["id"], "events.json")))]
+            final = next((e.get("result") or "" for _, e in events if e.get("type") == "result"), "")
+            j = judge(binary, env, by_id[r["id"]], system, events, final, os.path.join(trail, r["id"], "outputs"), args.judge_model, tempfile.mkdtemp())
+            scores.append(j.get("score") or 0)
+            print(f"  {r['id']} {r['title'][:40]:40} was {r.get('score')}  now {j.get('score')}" + (f"  ({j['error']})" if j.get("error") else ""), flush=True)
+        print(f"\nmean now {sum(scores) / len(scores):.3f} (was {sum(r.get('score') or 0 for r in saved['results']) / len(saved['results']):.3f})")
+        return
     if args.ids:
         want = [i.strip() for i in args.ids.split(",") if i.strip()]
         chosen = [t for t in tasks if t["id"] in want]

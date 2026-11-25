@@ -2042,6 +2042,33 @@ enum AgentScript {
       const deepQuery = (selector) => { let hit = null; walk(document.documentElement, 0, 0, (el, dx, dy) => { offsets.set(el, [dx, dy]); try { if (el.matches(selector)) { hit = el; return false; } } catch (_) { return false; } }); return hit; };
       let lastAmbiguous = null, lastScore = 0, lastClicked = null;
       const skipRec = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'SELECT', 'NAV', 'FOOTER']);
+      // The page's repeated records (result cards, rows): the biggest set of siblings that look alike and carry text.
+      const recordSet = () => {
+        let best = null, bestScore = 0;
+          walk(document.body || document.documentElement, 0, 0, (el) => {
+          if (el.childElementCount < 3 || skipRec.has(el.tagName)) return;
+          const groups = new Map();
+          // Alike = same tag and the classes most of the siblings share (one card's extra class doesn't split the set).
+          const freq = new Map();
+          for (const k of el.children) for (const c of k.classList) freq.set(c, (freq.get(c) || 0) + 1);
+          const common = (k) => [...k.classList].filter((c) => freq.get(c) * 2 >= el.childElementCount).sort().join('.');
+          for (const k of el.children) {
+            const sig = k.tagName + '.' + common(k);
+            const g = groups.get(sig); if (g) g.push(k); else groups.set(sig, [k]);
+          }
+          for (const ks of groups.values()) {
+            if (ks.length < 3) continue;
+            // A form's rows aren't records: fields to fill stay fields.
+            if (ks.slice(0, 6).some((k) => k.querySelector('input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio]), textarea, select'))) continue;
+            const sample = ks.slice(0, 6).map((k) => clean(k.innerText).length);
+            const avg = sample.reduce((a, b) => a + b, 0) / sample.length;
+            if (avg < 12) continue;
+            const score = ks.length * Math.min(avg, 400);
+            if (score > bestScore) { bestScore = score; best = ks; }
+          }
+        });
+        return best;
+      };
       // A frame, or 50 ms if the page isn't drawing (a tab in the background can stop drawing): never a wait for ever.
       const frame = () => new Promise((r) => { let done = false; const go = () => { if (!done) { done = true; r(); } };
         requestAnimationFrame(go); setTimeout(go, 50); });
@@ -2195,6 +2222,10 @@ enum AgentScript {
           let lastText = null, lastControl = null, texts = 0, styled = 0;
           const recentNames = [];
           const scrollers = [];   // boxes that clip what's inside them: what's scrolled out of them isn't visible now
+          // Which record (result card, row) each thing is in: the view shows each record as one line.
+          const recs = performance.now() - t0 < 100 ? (recordSet() || []) : [];
+          const recIndex = new Map(recs.map((r, i) => [r, i]));
+          const recOf = (el) => { if (!recIndex.size) return undefined; for (let n = el, d = 0; n && d < 12; n = n.parentElement, d++) if (recIndex.has(n)) return recIndex.get(n); return undefined; };
           const textBudget = all_ ? 400 : 70;
           const ownText = (el) => { for (const n of el.childNodes) if (n.nodeType === 3 && n.textContent.trim()) return true; return false; };
           const skip = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'svg', 'SVG', 'PATH', 'OPTION']);
@@ -2206,7 +2237,8 @@ enum AgentScript {
               const text = clean(el.innerText || el.textContent).slice(0, 200);
               const r = el.getBoundingClientRect();
               if (text && seen(el) && near(r.top + dy, r.height, 1200)) {
-                out.push({ context: said, text, level: said === 'heading' ? Number((el.tagName.match(/\d/) || [el.getAttribute('aria-level') || 2])[0]) : 0, box: box(r, dx, dy) });
+                const hr = recOf(el);
+                out.push({ context: said, text, level: said === 'heading' ? Number((el.tagName.match(/\d/) || [el.getAttribute('aria-level') || 2])[0]) : 0, box: box(r, dx, dy), ...(hr !== undefined ? { rec: hr } : {}) });
                 lastText = el;
               }
               if (said === 'alert') return;
@@ -2259,6 +2291,7 @@ enum AgentScript {
                   if (!(hr.width * hr.height < fr.width * fr.height * 0.3)) item.covered = true;   // a small badge on it isn't cover
                 }
               }
+              const ri = recOf(el); if (ri !== undefined) item.rec = ri;
               out.push(item);
               lastControl = el;
               recentNames.push(String(item.name || '').toLowerCase(), String(item.value || '').toLowerCase());
@@ -2282,7 +2315,8 @@ enum AgentScript {
             const bare = text.replace(/[\u200b-\u200f\u2060\ufeff]/g, '').toLowerCase();
             if (recentNames.some((n) => n && (n === bare || (bare.length < 40 && n.includes(bare))))) return;
             lastText = block; texts++;
-            out.push({ context: 'text', text: text.length > 180 ? text.slice(0, 177) + '…' : text, box: box(br, dx, dy) });
+            const tr = recOf(block);
+            out.push({ context: 'text', text: text.length > 180 ? text.slice(0, 177) + '…' : text, box: box(br, dx, dy), ...(tr !== undefined ? { rec: tr } : {}) });
           });
           // Names shared by several controls, or too short to say anything: where each one is.
           const counts = new Map();
@@ -2631,27 +2665,7 @@ enum AgentScript {
         // The page's repeated records (result cards, table rows, list items) as data: the biggest set of
         // siblings that look alike and carry text, each as its title, link and lines of text.
         records(max) {
-          let best = null, bestScore = 0;
-          walk(document.body || document.documentElement, 0, 0, (el) => {
-            if (el.childElementCount < 3 || skipRec.has(el.tagName)) return;
-            const groups = new Map();
-            // Alike = same tag and the classes most of the siblings share (one card's extra class doesn't split the set).
-            const freq = new Map();
-            for (const k of el.children) for (const c of k.classList) freq.set(c, (freq.get(c) || 0) + 1);
-            const common = (k) => [...k.classList].filter((c) => freq.get(c) * 2 >= el.childElementCount).sort().join('.');
-            for (const k of el.children) {
-              const sig = k.tagName + '.' + common(k);
-              const g = groups.get(sig); if (g) g.push(k); else groups.set(sig, [k]);
-            }
-            for (const ks of groups.values()) {
-              if (ks.length < 3) continue;
-              const sample = ks.slice(0, 6).map((k) => clean(k.innerText).length);
-              const avg = sample.reduce((a, b) => a + b, 0) / sample.length;
-              if (avg < 12) continue;
-              const score = ks.length * Math.min(avg, 400);
-              if (score > bestScore) { bestScore = score; best = ks; }
-            }
-          });
+          const best = recordSet();
           if (!best) return [];
           return best.filter((k) => clean(k.innerText)).slice(0, max || 200).map((k) => {
             const link = k.matches('a[href]') ? k : k.querySelector('a[href]');
