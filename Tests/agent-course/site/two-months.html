@@ -1,0 +1,17 @@
+<!doctype html><meta charset=utf-8><title>Two months</title><script src=kit.js></script>
+<form action="/search" method=get><input name=q aria-label="Search trips"><input type=hidden name=lang value=en><button>Search</button></form>
+<p id=status>Verifying…</p>
+<div class=cal><div>December 2026</div><div class=days></div></div>
+<div class=cal><div>January 2027</div><div class=days></div></div>
+<p id=results></p>
+<script>
+document.querySelectorAll('.cal').forEach((cal) => {
+  const month = cal.firstElementChild.textContent;
+  for (let d = 1; d <= 31; d++) {
+    const b = document.createElement('div'); b.textContent = d; b.style.cursor = 'pointer'; b.style.display = 'inline-block'; b.style.width = '28px';
+    b.onclick = () => done('picked', month + ' ' + d);
+    cal.querySelector('.days').appendChild(b);
+  }
+});
+setTimeout(() => { document.getElementById('status').textContent = 'Email is free'; }, 900);
+</script>

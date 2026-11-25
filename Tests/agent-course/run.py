@@ -325,6 +325,16 @@ def paste_rows(c):
     r = c.result()
     return r.get("rows") == 3 and r.get("cols") == 2 and r.get("first") == "apple"
 
+@case
+def in_context(c):
+    # "26" twice: said which with "in"; a state waited out; the page's own search form shown as an address.
+    look = c.look()
+    if "Form → " not in look or "/search?q={" not in look: raise Fail("form route not shown: " + look[:300])
+    t0 = time.time()
+    c.must("page_do", steps=[{"until_gone": "Verifying…"}, {"click": "26", "in": "January 2027"}])
+    if time.time() - t0 > 4: raise Fail("too slow")
+    return c.result().get("picked") == "January 2027 26"
+
 class FakeJev(http.server.BaseHTTPRequestHandler):
     """A stand-in for TypeSafe's Jev: an operation head and a click head; clicks "Add one" until three are done."""
     def do_POST(self):
@@ -588,7 +598,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)

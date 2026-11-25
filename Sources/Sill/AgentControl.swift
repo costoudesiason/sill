@@ -205,7 +205,7 @@ enum AgentCommands {
         }
         let session = args["_session"] as? String ?? (args["_via"] as? String).map { "via:" + $0 } ?? owner.map { "\($0.hashValue)" } ?? "local"
         do {
-            let result = try await Self.$session.withValue(session) { try await perform(command, args) }
+            let result = try await Self.$session.withValue(session) { try await bounded(command, args) }
             AgentLog.record(command: command, args: args, result: result, error: nil)
             return ["ok": true, "result": result]
         } catch let error as AgentError {
@@ -424,6 +424,39 @@ enum AgentCommands {
 
     // MARK: the commands
 
+    /// Every command answers within its limit, whatever the page does: a click on a page that never
+    /// finishes loading answers with where things stand, not after minutes. (The work isn't undone.)
+    private static func bounded(_ command: String, _ args: [String: Any]) async throws -> Any {
+        let asked = args["timeout"] as? Double
+        let limit: Double?
+        switch command {
+        case "connector.approve", "user.wait", "page.upload": limit = nil   // waits on you
+        case "tabs.open", "page.navigate", "page.back", "page.forward", "page.reload", "page.wait": limit = (asked ?? 20) + 5
+        case "page.eval": limit = 35
+        case "files.find", "files.read", "page.screenshot": limit = 25
+        default: limit = 15
+        }
+        guard let limit else { return try await perform(command, args) }
+        final class Once { var done = false }
+        let once = Once()
+        let session = Self.session
+        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<Any, Error>) in
+            Task { @MainActor in
+                do {
+                    let r = try await Self.$session.withValue(session) { try await perform(command, args) }
+                    if !once.done { once.done = true; c.resume(returning: r) }
+                } catch {
+                    if !once.done { once.done = true; c.resume(throwing: error) }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + limit) {
+                guard !once.done else { return }
+                once.done = true
+                c.resume(throwing: AgentError("Still going after \(Int(limit)) s: the page hasn't answered (it may be loading something slow). Look again (page_read) before acting; don't repeat it blindly."))
+            }
+        }
+    }
+
     private static func perform(_ command: String, _ args: [String: Any]) async throws -> Any {
         switch command {
         case "status":
@@ -530,7 +563,24 @@ enum AgentCommands {
         case "page.wait":
             let (view, tab, browser) = try await webView(args)
             let timeout = args["timeout"] as? Double ?? 20
-            if let selector = args["selector"] as? String {
+            if let gone = args["gone"] as? String {
+                // Until it's gone: a "Verifying…", a spinner's words, the old results.
+                let deadline = Date().addingTimeInterval(timeout)
+                while Date() < deadline {
+                    if (try? await evaluate("return window.__sillAgent.absent(text)", in: view, world: Web.world, arguments: ["text": gone])) as? Bool == true { return describe(tab, in: browser) }
+                    try await Task.sleep(nanoseconds: 150_000_000)
+                }
+                throw AgentError("“\(gone)” was still there after \(Int(timeout)) s.")
+            } else if args["settled"] as? Bool == true {
+                // Until the page has held still for half a second: results that arrive in parts.
+                let deadline = Date().addingTimeInterval(timeout)
+                while Date() < deadline {
+                    let state = (try? await evaluate("return window.__sillAgent.state()", in: view, world: Web.world)) as? [String: Any]
+                    if let idle = state?["idle"] as? Double, idle >= 500, !AgentPage.of(view).fetching(since: .distantPast) { return describe(tab, in: browser) }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+                return describe(tab, in: browser)
+            } else if let selector = args["selector"] as? String {
                 try await waitFor(selector: selector, text: nil, in: view, timeout: timeout)
             } else if let text = args["text"] as? String {
                 try await waitFor(selector: nil, text: text, in: view, timeout: timeout)
@@ -1563,13 +1613,13 @@ enum AgentCommands {
         let deadline = Date().addingTimeInterval(byName ? (args["wait"] as? Double ?? 1.5) : 0)
         while true {
             if let dialog = view.openDialog { throw dialogError(dialog) }
-            let found = try await evaluate("return window.__sillAgent.locate(ref, selector, text, editable)", in: view, world: Web.world, arguments: [
+            let found = try await evaluate("return window.__sillAgent.locate(ref, selector, text, editable, scope)", in: view, world: Web.world, arguments: [
                 "ref": ref ?? NSNull(), "selector": args["selector"] as? String ?? NSNull(), "text": args["text"] as? String ?? NSNull(),
-                "editable": args["editable"] as? Bool ?? false,
+                "editable": args["editable"] as? Bool ?? false, "scope": args["in"] as? String ?? NSNull(),
             ]) as? [String: Any]
             if let found, let options = found["ambiguous"] as? [[String: Any]] {
                 let list = options.map { "\($0["name"] as? String ?? "") (\($0["ref"] as? String ?? ""))" }.joined(separator: ", ")
-                throw AgentError("“\(args["text"] as? String ?? "")” matches \(options.count) things: \(list). Use a ref, or the full name.")
+                throw AgentError("“\(args["text"] as? String ?? "")” matches \(options.count) things: \(list). Use a ref, or say where with \"in\" (e.g. \"in\": \"December 2026\").")
             }
             if let found, found["gone"] != nil {
                 throw AgentError("\(ref ?? "That element") is no longer on the page: it changed after the last element list. Use the refs from the latest answer.")
@@ -1787,7 +1837,7 @@ enum AgentScript {
       const role = (el) => el.getAttribute('role') || ({ A: 'link', BUTTON: 'button', SELECT: 'combobox', TEXTAREA: 'textbox', SUMMARY: 'button' }[el.tagName])
         || (el.tagName === 'INPUT' ? (['checkbox', 'radio', 'submit', 'button', 'range', 'file', 'reset'].includes(el.type) ? (['submit', 'reset'].includes(el.type) ? 'button' : el.type)
             : ['date', 'time', 'datetime-local', 'month', 'week', 'color'].includes(el.type) ? el.type : 'textbox')
-            : (el.isContentEditable ? 'textbox' : 'generic'));
+            : (el.isContentEditable ? 'textbox' : (clickables.has(el) ? 'clickable' : 'generic')));
       // What a person sees of it: itself, or for a visually hidden checkbox or radio, its label.
       const face = (el) => {
         if (seen(el)) return el;
@@ -1898,7 +1948,37 @@ enum AgentScript {
       // Best match by name: exact; then the words as whole words ("Depart" is in "Depart: Thu",
       // not in "Departure"); then anywhere. Ties go to the first on the page.
       const escape = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // Everything that says where an element sits: its containers' labels, headings, captions, the
+      // short line that opens a container ("December 2026"), dates kept on it. For "in" scopes.
+      const placeOf = (el) => {
+        const up = (n) => n && (n.parentElement || (n.getRootNode() && n.getRootNode().host));
+        const parts = [];
+        for (let n = el, d = 0; n && n !== document.body && d < 12; n = up(n), d++) {
+          if (!n.getAttribute) continue;
+          parts.push(n.getAttribute('aria-label') || '', byIds(n, 'aria-labelledby'), n.getAttribute('title') || '');
+          for (const a of n.attributes) if (a.name.startsWith('data-') && /\d{4}-\d{2}/.test(a.value)) parts.push(a.value);
+          if (n !== el && n.querySelector) {
+            const head = n.querySelector(':scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > legend, :scope > caption, :scope > [role=heading]');
+            if (head && !contains(head, el)) parts.push(head.innerText || '');
+            const f = n.firstElementChild;
+            if (f && !contains(f, el) && n.childElementCount >= 2) { const t = clean(f.innerText); if (t.length <= 40) parts.push(t); }
+          }
+        }
+        return parts.join(' | ').toLowerCase();
+      };
+      const inScope = (el, scope) => !scope || placeOf(el).includes(clean(scope).toLowerCase());
+      // Several things share a name: the one in what's open in front (a dialog, a list of suggestions,
+      // a popover), or the one a click would reach, if that leaves one.
+      const frontmost = (els) => {
+        const front = els.filter((el) => el.closest('[role=dialog],[aria-modal=true],dialog[open],[role=listbox],[popover],[role=menu]'));
+        if (front.length === 1) return front[0];
+        const reachable = els.filter((el) => { const f = face(el); if (!f) return false; const r = f.getBoundingClientRect();
+          if (r.bottom < 0 || r.top > innerHeight) return false; const hit = hitAt(f.ownerDocument, r.left + r.width / 2, r.top + r.height / 2); return reaches(el, f, hit); });
+        return reachable.length === 1 ? reachable[0] : null;
+      };
+      let lastScope = null;
       const byText = (text, editable) => {
+        const scope = lastScope;
         const want = clean(text).toLowerCase();
         const whole = new RegExp('(^|[^\\p{L}\\p{N}])' + escape(want) + '($|[^\\p{L}\\p{N}])', 'u');
         let score = 0, focused = null, tied = [];
@@ -1906,6 +1986,7 @@ enum AgentScript {
           offsets.set(el, [dx, dy]);
           if (!matches(el) || !face(el)) return;
           if (editable && !typable(el)) return;
+          if (scope && !inScope(el, scope)) return;
           const n = name(el).toLowerCase();
           const hit = n === want ? 3 : whole.test(n) ? 2 : n.includes(want) ? 1 : 0;
           if (!hit) return;
@@ -1915,6 +1996,7 @@ enum AgentScript {
         if (focused) return focused;
         // One thing, or nested parts of one thing (a group and its field): that. Otherwise it's a guess: say so.
         const apart = tied.filter((el) => !tied.some((other) => other !== el && contains(other, el)));
+        if (apart.length > 1) { const one = frontmost(apart); if (one) { lastScore = score; return one; } }
         if (apart.length > 1) {
           lastAmbiguous = apart.slice(0, 6).map((el) => { const n = name(el).slice(0, 70), w = within(el, n); return { ref: refOf(el), role: role(el), name: w ? n + ' (in ' + w + ')' : n }; });
           return null;
@@ -1934,7 +2016,7 @@ enum AgentScript {
           offsets.set(el, [dx, dy]);
           if (!seen(el) || ['HTML', 'BODY', 'SCRIPT', 'STYLE'].includes(el.tagName)) return;
           const own = clean([...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join(' ')).toLowerCase();
-          if (own && (own === want || own.includes(want))) plain = el;
+          if (own && (own === want || own.includes(want)) && inScope(el, scope)) plain = el;
         });
         return plain;
       };
@@ -2029,7 +2111,6 @@ enum AgentScript {
               const fr = f.getBoundingClientRect();
               if (!near(fr.top + dy, fr.height, 1200)) return;
               const item = describe(el, f, dx, dy);
-              if (fresh.has(el)) { item.role = 'clickable'; item.byScript = true; }
               // Scrolled out of a box it's in (the months of a calendar after the first two, a carousel's far cards).
               for (const box of scrollers) {
                 if (!contains(box, el)) continue;
@@ -2079,6 +2160,26 @@ enum AgentScript {
               const el = find(it.ref); const w = el ? within(el, it.name) : '';
               if (w) { it.within = w; placed++; }
             }
+          }
+          // The addresses the page's own search and filter forms build: a route that skips the typing.
+          let forms = 0;
+          for (const form of document.querySelectorAll('form')) {
+            if (forms >= 3 || (form.method || 'get').toLowerCase() !== 'get' || !seen(form)) continue;
+            const fields = [...form.elements].filter((e) => e.name && !e.disabled && !['submit', 'button', 'image', 'file', 'password', 'reset'].includes(e.type));
+            if (!fields.some((e) => typable(e) && seen(e))) continue;
+            let action; try { action = new URL(form.getAttribute('action') || location.href, location.href); } catch (_) { continue; }
+            if (!/^https?:$/.test(action.protocol)) continue;
+            const params = [];
+            for (const e of fields) {
+              if (e.type === 'hidden') { if (e.value && e.value.length <= 40) params.push(e.name + '=' + encodeURIComponent(e.value)); continue; }
+              if ((e.type === 'checkbox' || e.type === 'radio') && !e.checked) continue;
+              if (e.tagName === 'SELECT') { params.push(e.name + '={' + [...e.options].slice(0, 4).map((o) => o.value).join('|') + (e.options.length > 4 ? '|…' : '') + '}'); continue; }
+              if (typable(e)) { params.push(e.name + '={' + (clean(name(e)) || e.name).slice(0, 30) + '}'); continue; }
+              if (e.value && e.value.length <= 40) params.push(e.name + '=' + encodeURIComponent(e.value));
+            }
+            if (!params.length) continue;
+            forms++;
+            items.push({ context: 'form', text: (action.origin + action.pathname + '?' + params.join('&')).slice(0, 300) });
           }
           const se = document.scrollingElement || document.documentElement;
           items.push({ context: 'page', below: Math.max(0, Math.round(se.scrollHeight - se.scrollTop - innerHeight)), above: Math.round(se.scrollTop),
@@ -2167,8 +2268,9 @@ enum AgentScript {
         },
         // Finds it, scrolls it into view, waits until it stops moving (a smooth
         // scroll, an animation), and checks a click there would reach it.
-        async locate(ref, selector, text, editable) {
+        async locate(ref, selector, text, editable, scope) {
           this.watch();   // from before the action, so its first change is seen
+          lastScope = scope || null;
           const first = this.place(ref, selector, text, false, editable);
           if (!first || first.gone || first.ambiguous) return first;
           const el = find(first.ref); if (!el) return first;
@@ -2384,6 +2486,10 @@ enum AgentScript {
           return found;
         },
         mark(ref, token) { const el = find(ref); if (!el) return false; el.setAttribute('data-sill-pick', token); return true; },
+        absent(text) {
+          const want = String(text).toLowerCase();
+          return !(document.body && document.body.innerText || '').toLowerCase().includes(want);
+        },
         present(selector, text) {
           if (selector) return !!deepQuery(selector);
           if (text) {

@@ -47,6 +47,9 @@ video draws itself: act on it by point ({"click": [x, y]}, drag) from its box, o
 more page there is. Refs come from what Sill saw, so a guess can't land on the wrong thing.
 
 Be quick: each tool call costs you seconds; Sill acts in milliseconds. Fewer calls is faster.
+- Plan the route before you act: what address you can build (a page's search and filter forms are shown as \
+"Form → …?q={…}"; a search on a site you know; a page from history_search), what to hand page_goal, and what on the \
+page will prove it's done. Then do it in as few calls as possible.
 - Know the way before you click. history_search ("onenote travel", "invoices") gives the pages the user goes to and \
 what they click to get there, learned in Sill: open that exact page instead of clicking through the site. \
 tabs_open also lists the user's usual pages on the site it opens.
@@ -210,6 +213,7 @@ func compactSnapshot(_ result: Any, boxes: Bool = false) -> String {
             case "alert": lines.append("! " + clip(text, 200))
             case "text": lines.append((text.hasPrefix("[") || text.hasPrefix("#") || text.hasPrefix("!") ? "· " : "") + text)
             case "page": pageInfo = element
+            case "form": lines.insert("Form → \(text)  (fill the {…} and open it: no typing or clicking)", at: min(2, lines.count))
             case "scroll":
                 var line = "[\(element["ref"] as? String ?? "")] scroll area"
                 if let name = element["name"] as? String, !name.isEmpty { line += " \"\(clip(name, 60))\"" }
@@ -673,12 +677,13 @@ let tools: [Tool] = [
 Act on the page: any number of steps in one call, run in order, each waiting only until the page has answered it \
 (milliseconds when nothing loads). Answers with each step's outcome and what changed on the page. T is a ref \
 ("e12", "f1:e3") or an element's full visible text or label; a text matching several things is refused, a partial \
-match flagged. Steps:
+match flagged; add "in": "December 2026" (a heading, panel, dialog or month) to say which of several. Steps:
 {"click": T} (also "double", "button": "right", "hold": seconds, "modifiers": ["Meta"]); {"click": [x, y]} a point \
 · {"type": T, "text": "…", "submit": true, "clear": false} · {"press": "Enter" | "Meta+A" | …, "on": T} \
 · {"select": T, "value": "…"} · {"hover": T} · {"scroll": 600, "on": T} (or {"scroll": T} into view) \
 · {"drag": T or [x, y], "to": T or [x, y]} or {"drag": T, "by": [[dx, dy], …]} · {"touch": T, "kind": "tap" | "longpress" | "swipe", \
-"dx": 0, "dy": -300} · {"wait": "text"} · {"navigate": "url" | "back" | "forward" | "reload"} · {"dialog": true, \
+"dx": 0, "dy": -300} · {"wait": "text"} (words to appear), {"wait": "settled"} (the page held still: results that \
+arrive in parts), {"until_gone": "Verifying…"} · {"navigate": "url" | "back" | "forward" | "reload"} · {"dialog": true, \
 "text": "…"} answers the page's alert/confirm/prompt · {"sign_in": true} \
 · {"paste": "…", "on": T} pastes like ⌘V (a list with \\n puts each line in its own row of a sheet; \\t for columns) \
 · {"read": "text" | script, "as": "x"} keeps a value; "{{x}}" in any later step puts it there \
@@ -835,6 +840,12 @@ func errandRest(_ sill: Sill, id: String, _ args: [String: Any], opened: String)
 // MARK: - Many steps in one call
 
 /// T: a ref, or an element's visible text or label (waited for).
+func target(_ value: Any?, in scope: Any? = nil) -> [String: Any] {
+    var t = target(value)
+    if let scope = scope as? String, !scope.isEmpty, t["text"] != nil { t["in"] = scope }
+    return t
+}
+
 func target(_ value: Any?) -> [String: Any] {
     guard let text = value as? String, !text.isEmpty else { return [:] }
     if text.range(of: #"^(e\d+|f\d+:e\d+|a\d+)$"#, options: .regularExpression) != nil { return ["ref": text] }
@@ -884,7 +895,7 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 if let missed = r["missed"] as? String { throw Failure(missed) }
                 did = "clicked at \(Int(point[0])), \(Int(point[1]))"
             } else if let t = step["click"] {
-                var a = tab.merging(target(t)) { $1 }
+                var a = tab.merging(target(t, in: step["in"])) { $1 }
                 for k in ["double", "button", "hold", "modifiers"] { if let v = step[k] { a[k] = v } }
                 let r = try sill.run("page.click", a) as? [String: Any] ?? [:]
                 if let missed = r["missed"] as? String { throw Failure(missed) }
@@ -895,8 +906,9 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
             } else if let t = step["type"] {
                 var a = tab.merging(["text": step["text"] as? String ?? "", "clear": step["clear"] as? Bool ?? true,
                                      "submit": step["submit"] as? Bool ?? false]) { $1 }
-                let tt = target(t)
+                let tt = target(t, in: step["in"])
                 if let r = tt["ref"] { a["ref"] = r } else if let s = tt["selector"] { a["selector"] = s } else { a["label"] = tt["text"] }
+                if let scope = tt["in"] { a["in"] = scope }
                 let r = try sill.run("page.type", a) as? [String: Any] ?? [:]
                 let reads = r["value"] as? String ?? ""
                 did = (r["followed"] != nil ? "typed into the field that opened, " : "typed into ") + "\(r["ref"] as? String ?? "") → “\(clip(reads.isEmpty && a["submit"] as? Bool == true ? a["text"] as? String ?? "" : reads, 60))”"
@@ -922,11 +934,17 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 _ = try sill.run("page.press", a)
                 did = "pressed \(key)"
             } else if let t = step["select"] {
-                _ = try sill.run("page.select", tab.merging(target(t)) { $1 }.merging(["value": step["value"] as? String ?? ""]) { $1 })
+                _ = try sill.run("page.select", tab.merging(target(t, in: step["in"])) { $1 }.merging(["value": step["value"] as? String ?? ""]) { $1 })
                 did = "chose \(step["value"] as? String ?? "")"
             } else if let t = step["hover"] {
                 _ = try sill.run("page.hover", tab.merging(target(t)) { $1 })
                 did = "hovered"
+            } else if let text = step["wait"] as? String, text.lowercased() == "settled" {
+                _ = try sill.run("page.wait", tab.merging(["settled": true, "timeout": step["timeout"] as? Double ?? 6]) { $1 })
+                did = "the page settled"
+            } else if let gone = step["until_gone"] as? String {
+                _ = try sill.run("page.wait", tab.merging(["gone": gone, "timeout": step["timeout"] as? Double ?? 8]) { $1 })
+                did = "“\(gone)” is gone"
             } else if let text = step["wait"] as? String {
                 _ = try sill.run("page.wait", tab.merging(["text": text, "timeout": step["timeout"] as? Double ?? 6]) { $1 })
                 did = "saw “\(text)”"
