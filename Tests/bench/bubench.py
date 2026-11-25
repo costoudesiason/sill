@@ -259,7 +259,9 @@ def main():
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel) as pool:
             for f in [pool.submit(one, t) for t in chosen]: f.result()
     finally:
-        if not args.keep: bench.stop_copy()
+        if not args.keep:
+            bench.stop_copy()
+            if not args.keep_profile: bench.discard_profile()
     scored = [r["score"] for r in rows if r.get("score") is not None]
     if scored:
         print(f"\nmean score {sum(scored) / len(scored):.3f} over {len(scored)} tasks · median {sorted(r['seconds'] for r in rows)[len(rows) // 2]:.0f} s"

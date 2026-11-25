@@ -165,6 +165,7 @@ def main():
             for f in [pool.submit(one, t) for t in chosen]: f.result()
     finally:
         bench.stop_copy()
+        if not args.keep_profile: bench.discard_profile()
     print()
     for level in ("easy", "medium", "hard", None):
         rs = [r for r in rows if level is None or r["level"] == level]

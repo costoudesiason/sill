@@ -145,6 +145,14 @@ def use_profile(name):
     DOMAIN = f"com.iasoncostoudes.sill.chromium.{PROFILE}"
     SOCKET = os.path.expanduser(f"~/Library/Application Support/Sill Chromium ({PROFILE})/agent.sock")
 
+def discard_profile():
+    """A run's fresh profile, once the run is over: only ones this script made (bench-<stamp>)."""
+    if not re.fullmatch(r"bench-\d{10}", PROFILE): return
+    import shutil
+    folder = os.path.expanduser(f"~/Library/Application Support/Sill Chromium ({PROFILE})")
+    if os.path.isdir(folder): shutil.rmtree(folder, ignore_errors=True)
+    subprocess.run(["defaults", "delete", DOMAIN], capture_output=True)
+
 # The benchmarks' sites are mostly American: the copy keeps US time (a date picked is the date meant).
 BENCH_TZ = os.environ.get("BENCH_TZ", "America/New_York")
 
@@ -446,7 +454,9 @@ def main():
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel) as pool:
             for f in [pool.submit(one, i, t) for i, t in enumerate(chosen, 1)]: f.result()
     finally:
-        if not args.keep: stop_copy()
+        if not args.keep:
+            stop_copy()
+            if not args.keep_profile: discard_profile()
     rows.sort(key=lambda r: [x["id"] for x in chosen].index(r["id"]))
 
     report(rows)
