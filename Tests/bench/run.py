@@ -371,6 +371,7 @@ def main():
     ap.add_argument("--config-dir", default=os.environ.get("BENCH_CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude-normal")),
                     help="CLAUDE_CONFIG_DIR for claude (default ~/.claude-normal, as the user's claude function)")
     ap.add_argument("--keep", action="store_true", help="leave the bench copy running afterwards")
+    ap.add_argument("--keep-profile", action="store_true", help="reuse the bench profile (default: a fresh one per run)")
     ap.add_argument("--list", action="store_true", help="print the chosen tasks and exit")
     args = ap.parse_args()
 
@@ -387,6 +388,7 @@ def main():
     work = tempfile.mkdtemp(prefix="sill-bench-")    # empty cwd: no project CLAUDE.md
     preflight(binary, env, work, args.model)
     version = subprocess.run([binary, "--version"], capture_output=True, text=True, env=env).stdout.strip()
+    if not args.keep_profile: use_profile("bench-" + datetime.now().strftime("%m%d%H%M%S"))
     mcp_env = {"SILL_SOCKET": SOCKET}
     if args.jev:
         # TypeSafe's Jev drives the clicking (page_goal): the key from the env, else the Keychain item Sill uses.
