@@ -231,10 +231,21 @@ func runGoal(_ sill: Sill, _ args: [String: Any]) throws -> String {
                     outcome = "Next would be clicking \(name) (\(ref)), which may pay, send, post, delete or commit. Ask the user, then do it with page_do."
                     snapshot = try sill.run("page.snapshot", tab); throw Stop()
                 }
-                let r = try sill.run("page.click", tab.merging(["ref": ref]) { $1 }) as? [String: Any] ?? [:]
-                if let missed = r["missed"] as? String { throw Failure(missed) }
+                func clickOnce() throws -> [String: Any] {
+                    let r = try sill.run("page.click", tab.merging(["ref": ref]) { $1 }) as? [String: Any] ?? [:]
+                    if let missed = r["missed"] as? String { throw Failure(missed) }
+                    return r
+                }
+                var r: [String: Any]
+                var fixed = ""
+                do { r = try clickOnce() }
+                catch let failure as Failure {
+                    // The same recalculation page_do does: what's in the way closed, a page still arriving waited out.
+                    guard let fix = recalculate(sill, failure, tab: tab, wentAway: false) else { throw failure }
+                    r = try clickOnce(); fixed = " (recalculated: \(fix))"
+                }
                 if let opened = r["opened"] as? [String: Any], let id = opened["id"] { tab["tab"] = id }
-                did = "clicked \(name)"
+                did = "clicked \(name)" + fixed
             case "TYPE_TEXT", "SELECT":
                 let target = op == "TYPE_TEXT" ? "type_text_target" : "select_target"
                 guard let ref = answers[target]?["choice"] as? String, let name = names[ref] else { throw Failure("no target") }

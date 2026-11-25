@@ -2503,14 +2503,19 @@ enum AgentScript {
           lastClicked = el;
           const doc = el.ownerDocument, win = doc.defaultView;
           window.__sillLanding = null;
+          window.__sillPressed = false;
+          const reached = (e) => e.composedPath().includes(el) || (el.labels && [...el.labels].some((l) => e.composedPath().includes(l)));
+          // The press reaching it counts: many lists choose on press and close, so the click that follows
+          // lands on what was underneath (or nowhere) though the choice was made.
+          win.addEventListener('pointerdown', (e) => { if (reached(e)) window.__sillPressed = true; }, { capture: true, once: true });
           // A right button makes contextmenu, a middle one auxclick: no click.
           win.addEventListener(button === 'right' ? 'contextmenu' : button === 'middle' ? 'auxclick' : 'click', (e) => {
-            window.__sillLanding = { hit: e.composedPath().includes(el) || (el.labels && [...el.labels].some((l) => e.composedPath().includes(l))),
+            window.__sillLanding = { hit: reached(e) || window.__sillPressed,
                                      on: name(e.composedPath()[0] instanceof Element ? e.composedPath()[0] : el).slice(0, 60) };
           }, { capture: true, once: true });
           return true;
         },
-        landed() { return window.__sillLanding; },
+        landed() { return window.__sillLanding || (window.__sillPressed ? { hit: true, on: 'pressed' } : null); },
         place(ref, selector, text, settled, editable) {
           let el = ref ? find(ref) : null;
           // Re-rendered since the last look: the one control with the same role and name is the same

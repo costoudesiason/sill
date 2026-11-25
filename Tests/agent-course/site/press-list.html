@@ -1,0 +1,14 @@
+<!doctype html><meta charset=utf-8><title>Chosen on press</title><script src=kit.js></script>
+<p>A list that chooses on press and closes at once, as many suggestion lists do: the click that follows lands on the page underneath.</p>
+<input id=city aria-label="City" value="">
+<ul id=list role=listbox style="position:absolute;top:60px;left:10px;background:#fff;border:1px solid #999;list-style:none;padding:0">
+  <li role=option>Lisbon</li><li role=option>Porto</li><li role=option>Faro</li>
+</ul>
+<script>
+for (const li of list.children) li.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  document.getElementById('city').value = li.textContent;
+  done('city', li.textContent);
+  list.remove();
+});
+</script>
