@@ -29,8 +29,9 @@ if (SECRET.length < 32) {
   process.exit(1);
 }
 const PORT = Number(process.env.PORT ?? 8787);
-const FIXED_BASE = process.env.PUBLIC_URL?.replace(/\/+$/, "")
-  ?? (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null);
+// The relay's own address: PUBLIC_URL if set, else the address each request came to,
+// so it answers correctly under every address it has (its Railway one, a custom domain).
+const FIXED_BASE = process.env.PUBLIC_URL?.replace(/\/+$/, "") || null;
 
 const ACCESS_TTL = 60 * 60;              // 1 hour
 const REFRESH_TTL = 60 * 60 * 24 * 60;   // 60 days
@@ -40,7 +41,7 @@ const CALL_TIMEOUT = 180_000;
 const SCOPE = "sill";
 
 // Sill's own icon: what claude.ai shows beside the connector (as favicon, and declared over MCP).
-const ICONS = Object.fromEntries(["icon.png", "favicon.png", "apple-touch-icon.png"].map((name) => {
+const ICONS = Object.fromEntries(["icon.png", "favicon.png", "favicon-96.png", "favicon-192.png", "apple-touch-icon.png"].map((name) => {
   try { return [name, fs.readFileSync(new URL(`./public/${name}`, import.meta.url))]; } catch { return [name, null]; }
 }));
 
@@ -163,7 +164,10 @@ setInterval(() => {
 function baseURL(req) {
   if (FIXED_BASE) return FIXED_BASE;
   const proto = (req.headers["x-forwarded-proto"] ?? "http").split(",")[0].trim();
-  return `${proto}://${req.headers["x-forwarded-host"] ?? req.headers.host}`;
+  const host = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "").split(",")[0].trim();
+  // Only well-formed host names: the address ends up in OAuth metadata and redirects.
+  if (!/^[a-z0-9.-]+(:\d+)?$/i.test(host)) return "https://sill-relay-production.up.railway.app";
+  return `${proto === "https" || !/^(localhost|127\.0\.0\.1)/.test(host) ? "https" : "http"}://${host}`;
 }
 
 const CORS = {
@@ -208,7 +212,7 @@ const escapeHTML = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", 
 function page(title, body, script = "") {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHTML(title)}</title>
-<link rel="icon" type="image/png" href="/favicon.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="96x96" href="/favicon-96.png"><link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
 :root{color-scheme:light dark}
 body{font:15px/1.45 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:Canvas;color:CanvasText}
@@ -474,11 +478,17 @@ const server = http.createServer(async (req, res) => {
     if (path === "/token" && req.method === "POST") return await token(req, res);
     if (path === "/mcp") return await mcp(req, res);
     if (path === "/health") return send(res, 200, { ok: true, mac: Boolean(bridge) });
-    const icon = { "/favicon.ico": "favicon.png", "/favicon.png": "favicon.png", "/icon.png": "icon.png",
+    // Google's favicon service (which claude.ai draws connector icons from) wants a size that's a multiple of 48.
+    const icon = { "/favicon.ico": "favicon-96.png", "/favicon.png": "favicon.png", "/favicon-96.png": "favicon-96.png",
+                   "/favicon-192.png": "favicon-192.png", "/icon.png": "icon.png",
                    "/apple-touch-icon.png": "apple-touch-icon.png" }[path];
     if (icon && ICONS[icon]) {
       res.writeHead(200, { ...CORS, "Content-Type": "image/png", "Cache-Control": "public, max-age=86400" });
       return res.end(ICONS[icon]);
+    }
+    if (path === "/robots.txt") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      return res.end("User-agent: *\nAllow: /\n");
     }
     if (path === "/") {
       const state = bridge ? `Your Mac is connected (since ${bridgeSince.toISOString().slice(11, 16)} UTC).` : "Your Mac isn't connected.";

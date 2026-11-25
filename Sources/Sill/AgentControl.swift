@@ -345,6 +345,12 @@ enum AgentCommands {
     /// Put aside again once the agent has left it alone a while.
     static func letGo(_ view: SillWebView, of tab: Tab) {
         if view.openDialog == nil { view.holdsDialogs = false }
+        // Focus emulation keeps Chromium counting the page as captured, and a
+        // captured page is "visible" even hidden: it went on drawing at 60
+        // frames a second out of sight, for good (measured). Off with the agent.
+        if prepared.remove(ObjectIdentifier(view)) != nil {
+            Task { @MainActor in _ = try? await devtools(view, "Emulation.setFocusEmulationEnabled", ["enabled": false], timeout: 3) }
+        }
         guard view.agentAtWork else { return }
         view.agentAtWork = false
         if let browser = browser(of: tab), onScreen(tab, in: browser) { return }
