@@ -352,6 +352,15 @@ enum AgentCommands {
     }
 
     /// Put aside again once the agent has left it alone a while.
+    /// An agent's tab it left behind, a while after its last touch: closed, so an agent never
+    /// spends a turn tidying up. Not one you've looked at, one it handed you, or half of a split.
+    static func tidy(_ tab: Tab) {
+        guard tab.openedByAgent, !tab.keptForUser, tab.seenAt == nil, let browser = browser(of: tab),
+              browser.split?.contains(tab) != true, browser.selected !== tab, browser.tabs.count > 1 else { return }
+        for key in Array(tabsBySession.keys) { tabsBySession[key]?.removeAll { $0.tab == nil || $0.tab === tab } }
+        browser.closeNow(tab)
+    }
+
     static func letGo(_ view: SillWebView, of tab: Tab) {
         if view.openDialog == nil { view.holdsDialogs = false }
         // Focus emulation keeps Chromium counting the page as captured, and a
@@ -433,6 +442,7 @@ enum AgentCommands {
             if existing == nil || !background { browser.showWindow(nil) }
             let tab = browser.addTab(url: url, select: !background)
             tab.openedByAgent = true
+            tab.keptForUser = !background
             if args["remember"] as? Bool ?? true { remember(tab) }
             let view = tab.materialize()
             keepDrawing(view, of: tab, in: browser)
@@ -460,17 +470,19 @@ enum AgentCommands {
             // The agent is done with it: the tab is yours again (dots and glow go).
             if args["all"] as? Bool == true {
                 let tabs = AgentActivity.shared.held
-                tabs.forEach { AgentActivity.shared.release($0) }
+                tabs.forEach { $0.keptForUser = true; AgentActivity.shared.release($0) }
                 agentTabs.removeAll()
                 return ["released": tabs.count]
             }
             let (tab, _) = try tab(args)
+            tab.keptForUser = true
             AgentActivity.shared.release(tab)
             agentTabs.removeAll { $0.tab == nil || $0.tab === tab }
             return ["released": 1]
 
         case "tabs.select":
             let (tab, browser) = try tab(args)
+            tab.keptForUser = true
             browser.select(tab)
             browser.window?.makeKeyAndOrderFront(nil)
             return describe(tab, in: browser)
@@ -807,6 +819,7 @@ enum AgentCommands {
                 partner = front
             }
             guard !browser.isPrivate else { throw AgentError("Not in a private window.") }
+            tab.keptForUser = true
             if browser.split != nil { browser.unsplit() }
             browser.select(partner)
             browser.split(tab, onLeft: args["left"] as? Bool ?? false)
@@ -1808,6 +1821,11 @@ enum AgentScript {
         const item = { ref: refOf(el), role: role(el), name: name(el), tag: el.tagName.toLowerCase(),
           box: { x: Math.round(r.left + dx), y: Math.round(r.top + dy), w: Math.round(r.width), h: Math.round(r.height) } };
         if (el.href) item.href = el.href;
+        // Site furniture: a link in the navigation or the footer (they're listed by name only).
+        if (el.tagName === 'A' || el.getAttribute('role') === 'link') {
+          const reg = el.closest('nav,[role=navigation],footer,[role=contentinfo]');
+          if (reg && !reg.closest('main,[role=main],article')) item.region = reg.matches('footer,[role=contentinfo]') ? 'footer' : 'nav';
+        }
         if (el.type) item.type = el.type;
         if (['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) && el.type !== 'password' && !['checkbox', 'radio', 'submit', 'button', 'reset'].includes(el.type)) item.value = String(el.value).slice(0, 200);
         if (el.type === 'password') item.value = el.value ? '(hidden)' : '';
@@ -1840,6 +1858,9 @@ enum AgentScript {
       const matches = (el) => { try { return el.matches(interactive) || clickables.has(el); } catch (_) { return false; } };
       const deepQuery = (selector) => { let hit = null; walk(document.documentElement, 0, 0, (el, dx, dy) => { offsets.set(el, [dx, dy]); try { if (el.matches(selector)) { hit = el; return false; } } catch (_) { return false; } }); return hit; };
       let lastAmbiguous = null, lastScore = 0, lastClicked = null;
+      // A frame, or 50 ms if the page isn't drawing (a tab in the background can stop drawing): never a wait for ever.
+      const frame = () => new Promise((r) => { let done = false; const go = () => { if (!done) { done = true; r(); } };
+        requestAnimationFrame(go); setTimeout(go, 50); });
       const deepActive = () => { let a = document.activeElement; while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement; return a; };
       // Where a control sits, for ones that can't be told apart by name ("26" in two months'
       // calendars, "Edit" on every row): the nearest container that says what it is.
@@ -1900,6 +1921,12 @@ enum AgentScript {
         }
         lastScore = score;
         if (tied.length) return apart[0] || tied[0];
+        // Named by its kind ("combobox", "search box"): the one field of that kind on the page.
+        if (/^(combobox|textbox|searchbox|search box|search field|text field|input)$/.test(want)) {
+          const kinds = []; walk(document.documentElement, 0, 0, (el, dx, dy) => { offsets.set(el, [dx, dy]); if (typable(el) && face(el) && matches(el)) kinds.push(el); });
+          const fit = kinds.filter((el) => want.startsWith('search') ? /search/i.test(role(el) + ' ' + (el.type || '') + ' ' + name(el)) : true);
+          if (fit.length === 1) return fit[0];
+        }
         if (editable) return null;
         // Not a control: the smallest visible element whose own text it is (a card, a label, a drop zone).
         let plain = null;
@@ -2032,6 +2059,10 @@ enum AgentScript {
             if (!near(br.top + dy, br.height, all_ ? 1e9 : 700) || !seen(block)) return;
             const text = clean(block.innerText);
             if (text.length < 2) return;
+            // Words that are mostly the links and buttons inside them (a menu, a directory row): the controls say it.
+            let linked = 0;
+            for (const a of block.querySelectorAll('a, button, [role=link], [role=button]')) linked += clean(a.innerText).length;
+            if (linked > text.length * 0.5) { lastText = block; return; }
             // Not the words of a control just listed again (a tooltip, a label beside it).
             const bare = text.replace(/[\u200b-\u200f\u2060\ufeff]/g, '').toLowerCase();
             if (recentNames.some((n) => n && (n === bare || (bare.length < 40 && n.includes(bare))))) return;
@@ -2144,7 +2175,7 @@ enum AgentScript {
           const f = face(el) || el;
           let last = f.getBoundingClientRect(), still = 0;
           for (let i = 0; i < 20 && still < 2; i++) {
-            await new Promise((r) => requestAnimationFrame(() => r()));
+            await frame();
             const now = f.getBoundingClientRect();
             still = Math.abs(now.left - last.left) < 0.5 && Math.abs(now.top - last.top) < 0.5 ? still + 1 : 0;
             last = now;
@@ -2153,12 +2184,12 @@ enum AgentScript {
           // Under something (a sticky header, a banner) at the edge: try it in the middle.
           if (placed && placed.coveredBy && !placed.gone) {
             f.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
-            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+            await frame(); await frame();
             if (find(first.ref)) placed = this.place(first.ref, null, null, true);
           }
           // Still covered: often a menu mid-animation (it takes clicks only once open). Up to ~0.6 s.
           for (let i = 0; i < 36 && placed && placed.coveredBy && find(first.ref); i++) {
-            await new Promise((r) => requestAnimationFrame(() => r()));
+            await frame();
             placed = this.place(first.ref, null, null, true);
           }
           return placed;

@@ -134,6 +134,8 @@ final class AgentActivity {
                 if let view = item.view { AgentCommands.letGo(view, of: tab) }
                 hide(key, now: true)
                 work[key] = nil
+                // Left behind, never shown to you nor handed over: tidied, so the agent needn't spend a turn closing it.
+                AgentCommands.tidy(tab)
             }
         }
         if work.isEmpty { timer?.invalidate(); timer = nil }

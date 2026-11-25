@@ -83,6 +83,8 @@ final class Tab: NSObject {
     var warmedUnseen = false
     /// Opened by an agent through Sill's agent socket.
     var openedByAgent = false
+    /// An agent's tab it handed to you (kept open, brought to the front, shown beside yours): never tidied away.
+    var keptForUser = false
     /// Why the page couldn't be opened, while Sill's error page stands in for it (agents read it).
     var failedWith: String?
 

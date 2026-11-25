@@ -249,7 +249,8 @@ def read_script(c):
     if "page_click" in names or "page_read" not in names or len(names) > 16: raise Fail(f"tools listed: {names}")
     out = c.must("page_read", script="return [...document.querySelectorAll('button')].map(b => b.textContent)")
     text = c.must("page_read", text=True)
-    return "Add one" in out and "Live" in text
+    bare = c.must("page_read", script="document.title")   # an expression with no return still answers
+    return "Add one" in out and "Live" in text and "Always moving" in bare
 
 def sock(cmd, **args):
     """One command straight to the test copy's socket (what no tool does: a click as if the user made it)."""
@@ -363,7 +364,8 @@ def popup(c):
 
 @case
 def spa(c):
-    c.must("page_click", ref=ref(c.look(), "link", "Orders"))
+    if "Site links: " not in c.look() or "Orders" not in c.snap: raise Fail("nav links not listed by name")
+    c.must("page_click", text="Orders")   # the site's own links are listed by name: clicked by name
     c.must("page_click", text="Order #1042")
     return c.result().get("opened") is True
 
