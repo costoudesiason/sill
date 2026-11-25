@@ -1939,11 +1939,29 @@ enum AgentScript {
       const byIds = (el, attr) => clean((el.getAttribute(attr) || '').split(/\s+/).map((id) => {
         const root = el.getRootNode(); const t = root.getElementById ? root.getElementById(id) : null; return t ? t.innerText || t.textContent : '';
       }).join(' '));
+      // The words a person sees in it: text put off the page or squeezed to a pixel (copies kept for screen
+      // readers, like a price written twice) is left out, so names read once.
+      // Its words as a screen reader hears them: what the page marked aria-hidden (a price drawn in pieces
+      // beside its spoken copy, icons) is left out, so a name reads once and whole.
+      const shownText = (el) => {
+        const all = el.innerText || el.textContent || '';
+        if (all.length > 400 || !el.querySelector || !el.querySelector('[aria-hidden=true]')) return all;
+        const parts = [];
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+          const p = n.parentElement;
+          if (!p || p.closest('[aria-hidden=true]') || ['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(p.tagName)) continue;
+          const t = n.textContent.trim(); if (t) parts.push(t);
+        }
+        // A phrase said twice in a row ("List: AED 249.00 List: AED 249.00"): once.
+        const heard = parts.join(' ').replace(/(.{6,60}?)(?:\s+\1)+/g, '$1');
+        return heard || all;
+      };
       const name = (el) => {
         const label = el.getAttribute('aria-label') || byIds(el, 'aria-labelledby')
           || (el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute('alt') || el.getAttribute('title')
           || el.getAttribute('placeholder') || (el.tagName === 'INPUT' && ['submit', 'button', 'reset'].includes(el.type) ? el.value : '')
-          || (el.tagName === 'IFRAME' ? '' : (el.innerText || el.textContent || ''));
+          || (el.tagName === 'IFRAME' ? '' : shownText(el));
         let named = clean(label).slice(0, 120);
         // Named only by its placeholder ("Any date"): the labelled group around it says which.
         if (named && named === clean(el.getAttribute('placeholder')) && !el.getAttribute('aria-label')) {
