@@ -42,6 +42,8 @@ changed. Send every step you can already see in one page_do, not one call per st
 - page_read gives the elements again, the page's text (text=true), or the answer of a script you write (script: \
 JavaScript run in the page, `return` a JSON value): one script can pull exactly the data you need from a long page.
 - page_screenshot only when the look matters (a chart, a map, a canvas).
+- page_goal, when listed, hands a routine multi-step goal ("search for X and open the first result") to a fast \
+model that drives the page on the Mac without coming back to you per step; it stops before anything risky.
 Close tabs you're done with; tabs_close keep_open=true hands a tab back to the user instead.
 
 Ask in this chat first: before a step that pays or buys, places an order or booking, sends or posts something in the \
@@ -637,13 +639,13 @@ After typing into a search box, the answer shows the suggestions: pick one by re
          properties: [:], required: [], readOnly: true, openWorld: false) { sill, _ in
         [.text(text(try sill.run("status")))]
     },
-]
+] + (Jev.key == nil ? [] : [goalTool])
 
 /// The tools a model is shown: these cover everything (page_do takes every action). The rest
 /// still answer when called (older clients, the test course), but each listed tool is tokens
 /// a model reads every turn and one more choice to weigh.
 let listed: Set<String> = ["tabs_open", "tabs_list", "tabs_close", "page_navigate", "page_do", "page_read", "page_screenshot",
-                           "page_sign_in", "passwords_save", "page_upload", "wait_for_user", "web_search", "read_url", "history_search"]
+                           "page_sign_in", "passwords_save", "page_upload", "wait_for_user", "web_search", "read_url", "history_search", "page_goal"]
 
 // MARK: - Many steps in one call
 

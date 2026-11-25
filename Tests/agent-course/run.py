@@ -37,9 +37,9 @@ def serve(folder, host, port):
     return httpd
 
 class MCP:
-    def __init__(self):
+    def __init__(self, env={}):
         self.p = subprocess.Popen([BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-                                  env={**os.environ, "SILL_SOCKET": SOCKET})
+                                  env={**os.environ, "SILL_SOCKET": SOCKET, **env})
         self.n = 0
         self.rpc("initialize", {"protocolVersion": "2025-06-18"})
     def rpc(self, method, params):
@@ -249,6 +249,34 @@ def read_script(c):
     out = c.must("page_read", script="return [...document.querySelectorAll('button')].map(b => b.textContent)")
     text = c.must("page_read", text=True)
     return "Add one" in out and "Live" in text
+
+class FakeJev(http.server.BaseHTTPRequestHandler):
+    """A stand-in for TypeSafe's Jev: clicks "Add one" until three clicks are done."""
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        q, state = body["questions"], body["state"]
+        clicks = sum("Add one" in d for d in state["done_so_far"])
+        add = next(k for k, v in q["element"]["criteria"].items() if "Add one" in v)
+        answers = {"goal_met": {"type": "noul", "noul": 1.0 if clicks >= 3 else 0.0},
+                   "action": {"type": "choice", "choice": "click", "confidence": 1.0},
+                   "element": {"type": "choice", "choice": add, "confidence": 0.9, "probabilities": {add: 0.9}}}
+        out = json.dumps({"model": "fake", "answers": answers}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(out)
+    def log_message(self, *a): pass
+
+@case
+def goal(c):
+    # page_goal's loop, with a stand-in for Jev: a goal of three clicks, met in three steps.
+    httpd = socketserver.TCPServer(("127.0.0.1", 8803), FakeJev)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    m = MCP({"TYPESAFE_API_KEY": "test", "TYPESAFE_URL": "http://127.0.0.1:8803/"})
+    try:
+        if "page_goal" not in [t["name"] for t in m.rpc("tools/list", {})["result"]["tools"]]: raise Fail("page_goal not listed with a key")
+        ok, out = m.call("page_goal", tab=c.tab, goal="Add one three times")
+        if not ok or "Goal reached" not in out: raise Fail(out[:300])
+    finally:
+        m.p.stdin.close(); httpd.shutdown(); httpd.server_close()
+    return c.result().get("count") == 3
 
 @case
 def popup(c):
@@ -484,7 +512,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)

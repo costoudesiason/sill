@@ -115,8 +115,11 @@ final class AgentActivity {
     private func tick() {
         for (key, item) in work {
             guard let tab = item.tab else { hide(key, now: true); work[key] = nil; continue }
-            show(key)   // held: dots, and the glow when you look at it
             let current = busy > 0 && key == latest
+            // Dots and glow only on the tab the agent is at work in: the one it's
+            // acting in now, or touched in the last 15 s (a model thinking between
+            // steps). Others it still holds go quiet until it comes back to them.
+            if current || Date().timeIntervalSince(item.last) < 15 { show(key) } else { hide(key) }
             if Date().timeIntervalSince(item.last) > release && !current {
                 if let view = item.view { AgentCommands.letGo(view, of: tab) }
                 hide(key, now: true)

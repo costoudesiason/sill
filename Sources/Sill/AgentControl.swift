@@ -308,9 +308,9 @@ enum AgentCommands {
         for weak in agentTabs {
             if let tab = weak.tab, let browser = browser(of: tab) { return (tab, browser) }
         }
-        guard let browser = AppDelegate.shared.current.flatMap({ $0.isPrivate ? nil : $0 }) ?? browsers.last,
-              let selected = browser.selected else { throw AgentError("No open tab. Use tabs.open first.") }
-        return (selected, browser)
+        // Never the tab you're in by default: an agent works only in tabs it opened or
+        // was given by id (tabs.list), so its clicks and glow can't land on your page.
+        throw AgentError("You have no tab of your own open. Open one with tabs_open, or name one of the user's by id (tabs_list).")
     }
 
     /// The tab's page, made if it was asleep, drawing even out of sight, and

@@ -151,7 +151,7 @@ still answer when called (older clients, the test course), but aren't listed.
 | `read_url` | Open, read and close a page in one step | `url`, `maxChars`, `keep_open` |
 
 `tab` is an id from `tabs_list`. Leave it out to use your current tab: the last one
-you opened or named (the tab in front only if you haven't opened one).
+you opened or named. Never the tab you're in: with none of its own, an agent is told to open one.
 
 Fast by design: Sill acts in milliseconds; the time is the model's round trips. So:
 1. `tabs_open` answers with the page's elements and their refs.
