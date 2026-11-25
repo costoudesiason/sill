@@ -429,6 +429,16 @@ def drawn_select(c):
     return c.result().get("sort") == "Best Selling"
 
 @case
+def month_paging(c):
+    # A date months ahead in a one-month calendar: paged to by its arrows; a day the page marks unavailable is
+    # said to be so, not "chosen"; an amount written another way ("$100" for "$100.00") still found.
+    c.must("page_do", steps=[{"select": "Amount", "value": "$100"}, {"date": "2027-02-14"}])
+    if c.result().get("date") != "2027-02-14" or c.result().get("amount") != "100": raise Fail(f"got {c.result()}")
+    ok, out = c.do("page_do", steps=[{"date": "2026-12-25"}])
+    if "unavailable" not in out: raise Fail("an unavailable day wasn't reported: " + out[:300])
+    return True
+
+@case
 def pick(c):
     # Type and choose the suggestion, one step.
     c.must("page_do", steps=[{"type": "City", "text": "Pr", "pick": "Prague"}])
@@ -703,7 +713,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)

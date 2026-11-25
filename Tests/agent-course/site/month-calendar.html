@@ -1,0 +1,26 @@
+<!doctype html><meta charset=utf-8><title>One month at a time</title><script src=kit.js></script>
+<p>A send-date calendar showing one month, paged with its arrows; Christmas Day is not available.</p>
+<label>Amount <select onchange="done('amount',this.value)"><option value="">Amount*<option value=50>$50.00<option value=100>$100.00<option value=125>$125.00</select></label>
+<div id=cal style="width:260px;border:1px solid #999;padding:6px">
+  <button id=prev aria-label="Previous Month">‹</button> <b id=title></b> <button id=next aria-label="Next Month">›</button>
+  <div id=days style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-top:6px"></div>
+</div>
+<script>
+const names = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+let y = 2026, m = 10;
+function draw() {
+  title.textContent = names[m] + ' ' + y; days.innerHTML = '';
+  const n = new Date(y, m + 1, 0).getDate();
+  for (let d = 1; d <= n; d++) {
+    const b = document.createElement('button'); b.textContent = d;
+    const off = m === 11 && d === 25;
+    b.setAttribute('aria-label', (off ? 'Not available ' : 'Choose ') + names[m] + ' ' + d + ', ' + y);
+    if (off) b.setAttribute('aria-disabled', 'true');
+    b.onclick = () => { if (!off) done('date', y + '-' + String(m + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0')); };
+    days.append(b);
+  }
+}
+prev.onclick = () => { m--; if (m < 0) { m = 11; y--; } draw(); };
+next.onclick = () => { m++; if (m > 11) { m = 0; y++; } draw(); };
+draw();
+</script>

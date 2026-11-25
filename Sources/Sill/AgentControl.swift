@@ -1958,7 +1958,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 14) return;
+      if (window.__sillAgent && window.__sillAgent.v === 15) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -2287,7 +2287,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 14,
+        v: 15,
         // The page as a person sees it, in reading order: headings, the text around the
         // controls (prices, results, messages), every control (including ones made clickable
         // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.
@@ -2684,8 +2684,15 @@ enum AgentScript {
         choose(ref, value) {
           const el = find(ref); if (!el || el.tagName !== 'SELECT') return false;
           const want = String(value).toLowerCase();
-          const option = [...el.options].find((o) => o.value === value || o.text.trim() === value)
-            || [...el.options].find((o) => o.text.trim().toLowerCase() === want || o.value.toLowerCase() === want);
+          const all = [...el.options];
+          // The same amount written another way ("$100" for "$100.00", "1,000" for "1000").
+          const amount = (t) => { const m = String(t).replace(/[,\s]/g, '').match(/^[^\d-]*(-?\d+(?:\.\d+)?)[^\d]*$/); return m ? Number(m[1]) : null; };
+          const one = (list) => list.length === 1 ? list[0] : null;
+          const option = all.find((o) => o.value === value || o.text.trim() === value)
+            || all.find((o) => o.text.trim().toLowerCase() === want || o.value.toLowerCase() === want)
+            || (amount(value) !== null ? one(all.filter((o) => amount(o.text.trim()) === amount(value))) : null)
+            || one(all.filter((o) => o.text.trim().toLowerCase().startsWith(want)))
+            || one(all.filter((o) => o.text.trim().toLowerCase().includes(want)));
           if (!option) return false;
           set(el, option.value);
           return true;

@@ -1012,14 +1012,48 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 // A day in a calendar: by the date the page keeps on it, else by its month's heading.
                 if let on = step["on"] { _ = try sill.run("page.click", tab.merging(target(on)) { $1 }) }
                 let month = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][m - 1]
-                var picked: [String: Any]?
-                for scope in [day, "\(month) \(y)", month] {
-                    if let r = try? sill.run("page.click", tab.merging(["text": "\(d)", "in": scope, "wait": 2]) { $1 }) as? [String: Any], r["missed"] == nil {
-                        picked = r; break
+                var picked: [String: Any]?, moved = 0
+                // Not in view: the calendar's own arrows, toward the month (as a person pages through it), at most two years.
+                let months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+                let shown = try! NSRegularExpression(pattern: #"\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?,? (\d{4})\b"#)
+                let forward = try! NSRegularExpression(pattern: #"\bnext\b|forward|›|»|→|^>$"#, options: [.caseInsensitive])
+                let backward = try! NSRegularExpression(pattern: #"\bprev(ious)?\b|\bback\b|‹|«|←|^<$"#, options: [.caseInsensitive])
+                let elsewhere = try! NSRegularExpression(pattern: #"slide|page|step|result|article|story|video|image|photo"#, options: [.caseInsensitive])
+                let target = y * 12 + (m - 1), started = Date()
+                while picked == nil {
+                    for scope in [day, "\(month) \(y)", month] {
+                        do {
+                            if let r = try sill.run("page.click", tab.merging(["text": "\(d)", "in": scope, "wait": moved == 0 && scope == day ? 1.5 : 0.3]) { $1 }) as? [String: Any], r["missed"] == nil {
+                                picked = r; break
+                            }
+                        } catch let failure as Failure where failure.message.contains("is disabled") {
+                            throw Failure("\(d) \(month) \(y) is unavailable on the page's calendar (it's turned off there): it can't be chosen.")
+                        } catch {}
                     }
+                    if picked != nil || moved >= 24 || Date().timeIntervalSince(started) > 15 { break }
+                    // Which months show now: the way to go.
+                    let text = ((try? sill.run("page.text", tab.merging(["maxChars": 30_000]) { $1 })) as? [String: Any])?["text"] as? String ?? ""
+                    let seen = shown.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match -> Int? in
+                        guard let a = Range(match.range(at: 1), in: text), let b = Range(match.range(at: 2), in: text), let year = Int(text[b]),
+                              let i = months.firstIndex(where: { $0.hasPrefix(String(text[a].prefix(3))) }) else { return nil }
+                        return year * 12 + i
+                    }
+                    let back = !seen.isEmpty && seen.allSatisfy { $0 > target }
+                    let items = (try? sill.run("page.snapshot", tab)) as? [String: Any]
+                    let arrow = (items?["elements"] as? [[String: Any]] ?? []).first { e in
+                        let name = e["name"] as? String ?? "", r = NSRange(name.startIndex..., in: name)
+                        return ["button", "link", "clickable", "generic"].contains(e["role"] as? String ?? "") && e["disabled"] as? Bool != true
+                            && (back ? backward : forward).firstMatch(in: name, range: r) != nil && elsewhere.firstMatch(in: name, range: r) == nil
+                    }
+                    guard let ref = arrow?["ref"] as? String, (try? sill.run("page.click", tab.merging(["ref": ref]) { $1 })) != nil else { break }
+                    moved += 1
                 }
-                guard picked != nil else { throw Failure("No day \(d) of \(month) \(y) in view: move the calendar to that month (its Next button), then try again.") }
-                did = "chose \(d) \(month) \(y)"
+                guard let picked else { throw Failure("No day \(d) of \(month) \(y) in the calendar\(moved > 0 ? " after paging \(moved) month(s) on" : ""): open it on that month, then try again.") }
+                let name = picked["name"] as? String ?? ""
+                if name.range(of: #"not available|unavailable|sold out|disabled|blocked"#, options: [.regularExpression, .caseInsensitive]) != nil {
+                    throw Failure("\(d) \(month) \(y) is marked unavailable on the page's calendar (“\(clip(name, 60))”): it can't be chosen.")
+                }
+                did = "chose \(d) \(month) \(y)" + (moved > 0 ? " (paged \(moved) month(s) on)" : "")
             } else if let secret = step["fill"] as? String {
                 // From the vault, typed by Sill: you never see it, and it goes only to its own site.
                 var a = tab.merging(["name": secret]) { $1 }
