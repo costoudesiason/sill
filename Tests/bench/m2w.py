@@ -7,14 +7,15 @@
 Online-Mind2Web (OSU NLP): 300 tasks on 136 live websites, by difficulty. The task list
 is read from Aside's public results (github.com/at-inc/aside-benchmarks, mind2web/results),
 which also gives a point of comparison: Aside reports 297/300 with GPT-5.5. The grader here
-is Claude, shown the task, the agent's steps, its answer and the pictures it took, and asked
-whether every requirement was met on the site: the same kind of check as Online-Mind2Web's
-WebJudge, not the same model, so compare with care."""
+is Online-Mind2Web's WebJudge (judges.py: its prompts word for word) on a Claude model, reading
+the pictures the harness took after every action (never shown to the agent). The paper's judge
+model is o4-mini; compare with that in mind."""
 import argparse, concurrent.futures, json, os, random, re, subprocess, sys, tempfile, threading, time
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run as bench
+import judges
 from bubench import run_with_input, trajectory
 
 ASIDE = os.environ.get("ASIDE_REPO", "/tmp/aside/aside-benchmarks")
@@ -90,8 +91,8 @@ def main():
     ap.add_argument("--per-level", type=int, default=10)
     ap.add_argument("--ids", default="")
     ap.add_argument("--seed", type=int, default=11)
-    ap.add_argument("--model", default="sonnet")
-    ap.add_argument("--judge-model", default="sonnet")
+    ap.add_argument("--model", default="claude-sonnet-5-5")
+    ap.add_argument("--judge-model", default="claude-opus-5-5")
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--jev", action="store_true")
@@ -136,11 +137,20 @@ def main():
                 "--mcp-config", mcp_config, "--strict-mcp-config", "--tools", "", "--allowedTools", "mcp__sill__*",
                 "--disallowedTools", ",".join(["WebFetch", "WebSearch", "Bash", "Task", "Agent"] + [f"mcp__sill__{d}" for d in bench.DENIED]),
                 "--disable-slash-commands", "--no-session-persistence", "--max-turns", "80"] + (["--effort", args.effort] if args.effort else [])
+        traced = os.path.join(trail, t["id"]); os.makedirs(traced, exist_ok=True)
+        config = os.path.join(work, f"mcp-{t['id']}.json")
+        with open(os.open(config, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+            json.dump({"mcpServers": {"sill": {"command": bench.MCP_BIN, "env": {**mcp_env, "SILL_TRACE_DIR": traced}}}}, fh)
+        argv[argv.index(mcp_config)] = config
         started = time.time()
         events, timed_out, err = bench.run_claude(argv, env, args.timeout, work)
         s = bench.summarize_agent(events, timed_out, err, started)
-        verdict, reason = grade(binary, env, t, events, s["answer"] or s["final_message"][-1500:], args.judge_model, work)
-        with open(os.path.join(trail, t["id"] + ".json"), "w") as fh:
+        # WebJudge, as Online-Mind2Web's paper runs it, on the pictures the harness took after every action.
+        ok, detail = judges.webjudge(judges.Claude(binary, env, args.judge_model, work), t["task"], judges.read_trace(traced), s["answer"] or s["final_message"][-1500:])
+        verdict = "SUCCESS" if ok else "FAIL"
+        reason = (detail["verdict"].split("Thoughts:")[-1].split("Status:")[0].strip() or "no verdict")[:400]
+        with open(os.path.join(traced, "judge.json"), "w") as fh: json.dump(detail, fh, indent=1)
+        with open(os.path.join(traced, "transcript.json"), "w") as fh:
             json.dump([{"at": round(at - started, 2), **e} for at, e in events], fh)
         row = {"id": t["id"], "level": t["level"], "task": t["task"], "web": t["web"], "aside": t["aside"], "verdict": verdict, "reason": reason,
                **{k: s[k] for k in ("seconds", "tool_calls", "tools", "cost_usd", "errors", "answer")}}

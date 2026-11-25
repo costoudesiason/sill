@@ -11,6 +11,7 @@ It runs its own copy of Sill (SILL_PROFILE=bench: its own bundle id, profile, se
 socket), opened in the background and quit afterwards: the Sill you're using is never touched.
 Tasks run one at a time. Each is `claude -p` with only Sill's tools; a second `claude -p`
 with no tools judges the answer against WebVoyager's reference. Results go to results/."""
+import judges
 import concurrent.futures, threading, argparse, json, os, random, re, signal, socket, statistics, subprocess, sys, tempfile, threading, time
 from datetime import date, datetime
 
@@ -361,8 +362,8 @@ def main():
     ap.add_argument("--sites", help="comma-separated web_name filter, e.g. 'Allrecipes,GitHub'")
     ap.add_argument("--ids", help="comma-separated task ids, e.g. 'Apple--3,ArXiv--7' (skips filtering)")
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--model", default="sonnet", help="agent model (default sonnet)")
-    ap.add_argument("--judge-model", default="sonnet")
+    ap.add_argument("--model", default="claude-sonnet-5-5", help="agent model")
+    ap.add_argument("--judge-model", default="claude-opus-5-5")
     ap.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], help="agent effort (default: claude's own)")
     ap.add_argument("--timeout", type=int, default=240, help="seconds per task (default 240)")
     ap.add_argument("--max-turns", type=int, default=60)
@@ -417,12 +418,22 @@ def main():
         if args.parallel == 1: tidy_tabs()
         with lock: print(f"[{i}/{len(chosen)}] {t['id']}: {t['ques'][:90]}", flush=True)
         started = time.time()
-        events, timed_out, err = run_claude(agent_argv(binary, t, args, mcp_config, today), env, args.timeout, work)
+        # Its own trace: a picture after every action, for the judge (the agent never sees it).
+        traced = os.path.join(trail, t["id"].replace("/", "_")); os.makedirs(traced, exist_ok=True)
+        config = os.path.join(work, f"mcp-{i}.json")
+        with open(os.open(config, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+            json.dump({"mcpServers": {"sill": {"command": MCP_BIN, "env": {**mcp_env, "SILL_TRACE_DIR": traced}}}}, fh)
+        events, timed_out, err = run_claude(agent_argv(binary, t, args, config, today), env, args.timeout, work)
         with open(os.path.join(trail, t["id"].replace("/", "_") + ".json"), "w") as fh:
             json.dump([{"at": round(at - started, 2), **e} for at, e in events], fh, indent=1)
         row = {"id": t["id"], "site": t["web_name"], "question": t["ques"], "reference": t["reference"],
                "reference_type": t["reference_type"], **summarize_agent(events, timed_out, err, started)}
-        row["verdict"], row["judge_reason"] = judge(binary, env, t, row["answer"], args.judge_model, work)
+        # WebVoyager's own evaluator (screenshots win over the answer); the reference check beside it.
+        ok, detail = judges.webvoyager_judge(judges.Claude(binary, env, args.judge_model, work), t["ques"], judges.read_trace(traced), row["answer"] or row.get("final_message", "")[-1500:])
+        row["verdict"] = "SUCCESS" if ok else "FAIL"
+        row["judge_reason"] = detail["verdict"].strip().splitlines()[-1][:300] if detail["verdict"] else "no verdict"
+        row["judge_detail"] = detail
+        row["ref_verdict"], row["ref_reason"] = judge(binary, env, t, row["answer"], args.judge_model, work)
         with lock:
             rows.append(row)
             print(f"    {t['id']}: {row['verdict']:7} {row['seconds']:6.1f} s  {row['tool_calls']:3} tools  {row['answer'][:100]}"
@@ -445,6 +456,7 @@ def totals(rows):
     passed = sum(r["verdict"] == "SUCCESS" for r in rows)
     return {
         "tasks": len(rows), "passed": passed,
+        "passed_both": sum(r["verdict"] == "SUCCESS" and r.get("ref_verdict") == "SUCCESS" for r in rows),
         "success_rate": round(passed / len(rows), 3) if rows else None,
         "median_seconds": round(statistics.median(secs), 1) if secs else None,
         "mean_seconds": round(statistics.mean(secs), 1) if secs else None,
@@ -458,7 +470,7 @@ def write(path, args, version, source, skipped, rows):
         json.dump({"when": datetime.now().isoformat(timespec="seconds"), "git": git_rev(), "app": APP,
                    "claude": version, "config_dir": args.config_dir, "model": args.model, "effort": args.effort, "jev": args.jev, "judge_model": args.judge_model,
                    "timeout": args.timeout, "seed": args.seed, "tasks_file": source, "left_out": skipped,
-                   "judge": "text-only (task, reference, agent answer); WebVoyager's own judge uses screenshots and GPT-4V",
+                   "judge": "WebVoyager's auto-evaluator prompt (task, answer, last 3 screenshots taken by the harness after each action) on the judge model; ref_verdict: the answer against WebVoyager's reference",
                    "totals": totals(rows), "results": rows}, fh, indent=1)
 
 def report(rows):
@@ -469,6 +481,7 @@ def report(rows):
     if not rows: return
     print(f"\n{t['passed']}/{t['tasks']} passed ({t['success_rate']:.0%}) · median {t['median_seconds']} s · mean {t['mean_seconds']} s"
           f" · mean {t['mean_tool_calls']} tool calls · {t['timeouts']} timeouts · ${t['cost_usd']}")
+    print(f"passed both WebVoyager's evaluator and the reference check: {t['passed_both']}/{t['tasks']}")
 
 if __name__ == "__main__":
     main()

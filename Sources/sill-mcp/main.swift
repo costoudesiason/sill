@@ -1113,9 +1113,11 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 }
             }
             lines.append("\(i + 1). ✓ \(did) (\(Int(Date().timeIntervalSince(t0) * 1000)) ms)")
+            if Trace.dir != nil { Trace.record(sill, tab: tab["tab"], action: Trace.describe("page_do step", step), result: did) }
             if !pageSaid.isEmpty { lines.append("   ⚠ " + pageSaid.joined(separator: " · ") + " (the site may be refusing this, e.g. by region)"); pageSaid = [] }
         } catch let failure as Failure {
             lines.append("\(i + 1). ✗ \(failure.message)")
+            if Trace.dir != nil { Trace.record(sill, tab: tab["tab"], action: Trace.describe("page_do step", step), result: "failed: " + failure.message) }
             if i + 1 < steps.count { lines.append("   Stopped here; \(steps.count - i - 1) step(s) not run.") }
             failed = true
             break
@@ -1319,8 +1321,13 @@ func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
                     return out
                 }
             }
+            if Trace.dir != nil, !Trace.quiet.contains(name) {
+                let said = content.compactMap { $0["text"] as? String }.joined(separator: "\n")
+                Trace.record(sill, tab: arguments["tab"], action: Trace.describe(name, arguments), result: said)
+            }
             return result(["content": content])
         } catch let failure as Failure {
+            if Trace.dir != nil, !Trace.quiet.contains(name) { Trace.record(sill, tab: arguments["tab"], action: Trace.describe(name, arguments), result: "failed: " + failure.message) }
             return result(["content": [["type": "text", "text": failure.message]], "isError": true])
         } catch let failure {
             return result(["content": [["type": "text", "text": failure.localizedDescription]], "isError": true])

@@ -272,6 +272,7 @@ func runGoal(_ sill: Sill, _ args: [String: Any]) throws -> String {
         snapshot = try sill.run("page.snapshot", tab)
         let after = ((snapshot as? [String: Any])?["url"] as? String ?? "") + "\n" + compactSnapshot(snapshot)
         let changed = after != before
+        if Trace.dir != nil { Trace.record(sill, tab: tab["tab"], action: "page_goal step: " + did) }
         history.append(["action": did, "kind": kind, "text": typed as Any, "page_changed": changed].compactMapValues { $0 is NSNull ? nil : $0 })
         lines.append("\(lines.count + 1). \(did) (\(took()) ms)")
         still = changed || op == "WAIT" || op == "TYPE_TEXT" ? 0 : still + 1
