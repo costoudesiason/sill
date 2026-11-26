@@ -271,10 +271,16 @@ Built in `Sources/sill-mcp/Check.swift`, tested by the `answer-check` course cas
 ## Build order
 
 1. **Done:** evidence kept from every read, and `answer_check` before the final answer.
-2. **Next, prediction:** the conditions known early make every read point at them, so Claude
+2. **Done: page state.** Every page answer carries one `State:` line read from the page itself:
+   what's ticked or switched on (in collapsed sections too), the selected tab, pressed buttons,
+   each dropdown's choice and the sort, applied-filter chips, what's typed in fields, the result
+   count and range, and the address's own settings. After an action it appears only when it
+   changed, so it costs nothing when nothing moved.
+3. **Next, how far through:** on every list, where it ends and how to get the rest.
+4. **Prediction:** the conditions known early make every read point at them, so Claude
    goes straight to the right control or line. Site notes and habits do the same for the
    route.
-3. **The persistence ladder**, as a rule `answer_check` enforces: "not on the web" only with
+5. **The persistence ladder**, as a rule `answer_check` enforces: "not on the web" only with
    the routes tried.
-4. **Evidence on disk** and resume, for jobs that run for hours.
-5. **Odysseys2** against the published scores, from a clean network.
+6. **Evidence on disk** and resume, for jobs that run for hours.
+7. **Odysseys2** against the published scores, from a clean network.

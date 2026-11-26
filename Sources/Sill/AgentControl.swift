@@ -1958,7 +1958,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 16) return;
+      if (window.__sillAgent && window.__sillAgent.v === 17) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -2292,7 +2292,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 16,
+        v: 17,
         // The page as a person sees it, in reading order: headings, the text around the
         // controls (prices, results, messages), every control (including ones made clickable
         // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.
@@ -2433,6 +2433,80 @@ enum AgentScript {
             if (!params.length) continue;
             forms++;
             items.push({ context: 'form', text: (action.origin + action.pathname + '?' + params.join('&')).slice(0, 300) });
+          }
+          // What the page is set to now, read from the page itself: what's ticked or switched on
+          // (in collapsed sections too), the tab and buttons pressed, each dropdown's choice, a sort,
+          // applied-filter chips, what's typed in its fields, how many results and which of them
+          // are shown, and the address's own settings. One line: the agent never has to guess
+          // whether a filter or sort it set actually took.
+          {
+            const on = [], tabs = [], pressed = [], picks = [], chips = [], typed = [], current = [];
+            const seenNames = new Set();
+            const add = (list, cap, t) => { t = clean(t); if (t && list.length < cap && !seenNames.has(t)) { seenNames.add(t); list.push(t); } };
+            const grouped = (el, n) => { const w = within(el); return w && !n.includes(w) && w.length <= 40 ? n + ' (' + w + ')' : n; };
+            walk(document.documentElement, 0, 0, (el) => {
+              if (/^(SCRIPT|STYLE|TEMPLATE|NOSCRIPT|SVG)$/i.test(el.tagName)) return;
+              const r = el.getAttribute('role');
+              const n = () => clean(name(el)).slice(0, 60);
+              if (el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
+                if (el.checked && !el.disabled) { const t = n(); if (t) add(on, 14, grouped(el, t)); }
+                return;
+              }
+              if ((r === 'checkbox' || r === 'switch' || r === 'menuitemcheckbox' || r === 'menuitemradio' || r === 'radio') && el.getAttribute('aria-checked') === 'true') { const t = n(); if (t) add(on, 14, grouped(el, t)); return; }
+              if (r === 'tab' && el.getAttribute('aria-selected') === 'true' && seen(el)) { add(tabs, 4, n()); return; }
+              if (el.getAttribute('aria-pressed') === 'true' && seen(el)) { add(pressed, 6, n()); return; }
+              const cur = el.getAttribute('aria-current');
+              if (cur && cur !== 'false' && seen(el) && el.closest('nav, [role=navigation], ol, ul')) { add(current, 2, n()); return; }
+              if (el.tagName === 'SELECT' && seen(el)) {
+                const o = el.selectedOptions && el.selectedOptions[0];
+                const label = clean(name(el)) || el.name || '';
+                if (o) add(picks, 6, (label && !label.includes(clean(o.text)) ? label.slice(0, 40) + ': ' : '') + clean(o.text).slice(0, 50));
+                return;
+              }
+              if ((r === 'combobox' || el.tagName === 'BUTTON' || r === 'button') && seen(el)) {
+                const t = n();
+                if (/\bsort/i.test(t)) { add(picks, 6, t); return; }
+                if (/^(remove|clear|delete)\b|[×✕✖]\s*$/i.test(t) && !/^(clear|remove|delete)( all)?( filters)?$/i.test(t)) { add(chips, 8, t.replace(/^(remove|clear|delete)\s*(filter)?:?\s*/i, '').replace(/\s*[×✕✖]\s*$/, '')); return; }
+              }
+              if (typable(el) && el.type !== 'password' && !vaulted.has(el) && seen(el)) {
+                const v = clean(el.value);
+                if (v && v.length <= 80) {
+                  // The field's label up to its first pause ("Departure date . Enter a date" → "Departure date");
+                  // none when the label already says the value (a field named by what's in it).
+                  const label = clean(name(el));
+                  const short = label.includes(v) ? '' : (label.split(/\s*[.;:,]\s+|\s+[.·]\s+/)[0] || el.name || 'field').slice(0, 30);
+                  add(typed, 5, (short ? short + ' = ' : '') + '"' + v + '"');
+                }
+              }
+            });
+            const body = (document.body && document.body.innerText || '').slice(0, 30000);
+            const counts = [];
+            const span = body.match(/(?<![\d:.,$£€])\b(\d[\d,]*)\s*[-–]\s*(\d[\d,]*)\s+of\s+(?:over\s+|about\s+)?(\d[\d,]*\+?)\b/i);
+            if (span) counts.push(span[1] + '–' + span[2] + ' of ' + span[3]);
+            const total = body.match(/(?<![\d:.,$£€])\b(\d[\d,]*\+?)\s+(results?|matches|items|listings|properties|stays|homes|products|jobs|courses|flights|hotels|rentals|places|reviews|options|vehicles|cars|events|articles|models|repositories|recipes)\b/i);
+            if (total && !(span && span[3].replace(/\D/g, '') === total[1].replace(/\D/g, ''))) counts.push(total[1] + ' ' + total[2]);
+            const pages = body.match(/\bpage\s+(\d+)\s+of\s+(\d+)\b/i);
+            if (pages) counts.push('page ' + pages[1] + ' of ' + pages[2]);
+            let address = '';
+            try {
+              const q = new URLSearchParams(location.search);
+              const kept = [];
+              // Settings, not trackers: no utm/session keys, and no values that look like random tokens.
+              const token = (v) => v.length >= 14 && /^[\w-]+$/.test(v) && /\d/.test(v) && /[a-z]/.test(v) && /[A-Z]/.test(v);
+              for (const [k, v] of q) if (v && v.length <= 60 && !token(v) && !/^(utm_|ref|_|session|token|sid|gclid|fbclid)/i.test(k) && kept.length < 10) kept.push(k + '=' + v);
+              address = kept.join('&');
+            } catch (_) {}
+            const parts = [];
+            if (on.length) parts.push('on: ' + on.join(', '));
+            if (tabs.length) parts.push('tab: ' + tabs.join(', '));
+            if (pressed.length) parts.push('pressed: ' + pressed.join(', '));
+            if (picks.length) parts.push(picks.join(' · '));
+            if (chips.length) parts.push('applied: ' + chips.join(', '));
+            if (current.length) parts.push('current: ' + current.join(', '));
+            if (typed.length) parts.push(typed.join(' · '));
+            if (counts.length) parts.push(counts.join(', '));
+            if (address) parts.push('address ?' + address);
+            if (parts.length) items.push({ context: 'state', text: parts.join(' · ').slice(0, 700) });
           }
           const se = document.scrollingElement || document.documentElement;
           items.push({ context: 'page', below: Math.max(0, Math.round(se.scrollHeight - se.scrollTop - innerHeight)), above: Math.round(se.scrollTop),

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Results with filters, a sort and tabs</title>
+<style>body{font:15px system-ui;margin:24px;display:grid;grid-template-columns:220px 1fr;gap:24px} [role=tab][aria-selected=true]{font-weight:bold}</style></head>
+<body>
+<aside>
+  <h3>Stops</h3>
+  <label><input type="checkbox" id="nonstop"> Nonstop</label><br>
+  <label><input type="checkbox" id="onestop"> 1 stop</label>
+  <h3><button id="moreHead" aria-expanded="false">More filters</button></h3>
+  <div id="more" hidden><label><input type="checkbox" id="refund" checked> Refundable</label></div>
+</aside>
+<main>
+  <form role="search"><label>From <input id="from" value="JFK"></label> <label>To <input id="to" value="LHR"></label></form>
+  <div role="tablist"><button role="tab" aria-selected="true" id="tBest">Best</button> <button role="tab" aria-selected="false" id="tCheap">Cheapest</button></div>
+  <label>Sort by <select id="sort"><option>Recommended</option><option>Price (lowest)</option><option>Duration</option></select></label>
+  <div id="chips"></div>
+  <p id="count">Showing 1–20 of 1,131 results</p>
+  <ol id="list"><li>TAP · 1 stop · $235</li><li>BA · Nonstop · $310</li></ol>
+</main>
+<script>
+const chips = document.getElementById('chips'), count = document.getElementById('count');
+function render() {
+  const non = document.getElementById('nonstop').checked;
+  chips.innerHTML = non ? '<button id="chipNon">Remove Nonstop ×</button>' : '';
+  if (non) document.getElementById('chipNon').onclick = () => { document.getElementById('nonstop').checked = false; render(); };
+  count.textContent = 'Showing 1–20 of ' + (non ? '312' : '1,131') + ' results';
+}
+document.getElementById('nonstop').onchange = render;
+document.getElementById('moreHead').onclick = (e) => { const m = document.getElementById('more'); m.hidden = !m.hidden; e.target.setAttribute('aria-expanded', String(!m.hidden)); };
+for (const t of document.querySelectorAll('[role=tab]')) t.onclick = () => { for (const u of document.querySelectorAll('[role=tab]')) u.setAttribute('aria-selected', String(u === t)); };
+</script>
+</body></html>

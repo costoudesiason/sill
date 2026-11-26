@@ -250,6 +250,7 @@ func compactSnapshot(_ result: Any, boxes: Bool = false) -> String {
             case "record": lines.append(text)
             case "text": lines.append((text.hasPrefix("[") || text.hasPrefix("#") || text.hasPrefix("!") ? "· " : "") + text)
             case "page": pageInfo = element
+            case "state": lines.insert("State: " + text, at: min(2, lines.count))
             case "form": lines.insert("Form → \(text)  (fill the {…} and open it: no typing or clicking)", at: min(2, lines.count))
             case "scroll":
                 var line = "[\(element["ref"] as? String ?? "")] scroll area"
