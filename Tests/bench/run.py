@@ -168,6 +168,8 @@ def _watch_copy():
         while _watching.is_set():
             time.sleep(2)
             if _watching.is_set() and not owner_of_socket():
+                time.sleep(3)
+                if not _watching.is_set() or owner_of_socket(): continue
                 RESTARTS.append(time.time())
                 print("warning: the bench copy of Sill died; starting it again", file=sys.stderr, flush=True)
                 try: start_copy()
@@ -175,14 +177,13 @@ def _watch_copy():
     threading.Thread(target=loop, daemon=True).start()
 
 def start_copy():
-    _watch_copy()
     prepare_copy()
     subprocess.run(["defaults", "write", DOMAIN, "agentControl", "-bool", "true"])
     subprocess.run(["defaults", "write", DOMAIN, "restoresTabs", "-bool", "false"])
-    if owner_of_socket(): return
+    if owner_of_socket(): _watch_copy(); return
     subprocess.run(["open", "-n", "-g", "--env", f"SILL_PROFILE={PROFILE}", "--env", f"TZ={BENCH_TZ}", COPY])
     for _ in range(180):
-        if owner_of_socket(): time.sleep(1.5); return
+        if owner_of_socket(): time.sleep(1.5); _watch_copy(); return
         time.sleep(0.5)
     raise SystemExit("Sill's bench copy didn't start")
 
