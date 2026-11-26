@@ -2022,7 +2022,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 29) return;
+      if (window.__sillAgent && window.__sillAgent.v === 30) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -2383,7 +2383,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 29,
+        v: 30,
         // The page as a person sees it, in reading order: headings, the text around the
         // controls (prices, results, messages), every control (including ones made clickable
         // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.
@@ -3134,8 +3134,18 @@ enum AgentScript {
           return out;
         },
         walls() {
-          const big = (f) => { const r = f.getBoundingClientRect(); return r.width > 100 && r.height > 60; };
-          const frames = [...document.querySelectorAll('iframe')].filter(big).map((f) => f.src || '');
+          // A check counts only when a person would see it: drawn, on the page, not hidden or parked off-screen.
+          // Pages that use reCAPTCHA keep its challenge frame loaded but hidden (visibility: hidden, 10,000 px up)
+          // and its invisible badge at 0×0: those aren't asking anyone anything.
+          const shown = (f) => {
+            const r = f.getBoundingClientRect();
+            if (r.width <= 100 || r.height <= 60) return false;
+            if (r.bottom < -50 || r.right < -50 || r.top > document.documentElement.scrollHeight + 50) return false;
+            if (f.checkVisibility && !f.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+            for (let n = f; n && n.nodeType === 1; n = n.parentElement) { const st = style(n); if (st.visibility === 'hidden' || st.display === 'none' || +st.opacity < 0.1) return false; }
+            return true;
+          };
+          const frames = [...document.querySelectorAll('iframe')].filter(shown).map((f) => f.src || '');
           const title = (document.title || '').toLowerCase();
           const text = (document.body && document.body.innerText || '').slice(0, 4000).toLowerCase();
           const found = [];

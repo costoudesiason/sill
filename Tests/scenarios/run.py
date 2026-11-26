@@ -181,9 +181,13 @@ def main():
     ap.add_argument("--max-turns", type=int, default=80)
     ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--jev", action="store_true")
+    ap.add_argument("--task", help="a live task in the user's words (no check: read the trail)")
+    ap.add_argument("--url", help="with --task: where to start, if anywhere")
     ap.add_argument("--config-dir", default=os.environ.get("BENCH_CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude-normal")))
     args = ap.parse_args()
     chosen = [s for s in SCENARIOS if not args.only or s["id"] in args.only]
+    if args.task:
+        chosen = [{"id": "live", "url": args.url, "task": args.task, "check": lambda r, a: (bool(a), "read the trail")}]
     a, b = serve(os.path.join(HERE, "site"), 8811), serve(os.path.join(HERE, "other"), 8812)
     work = tempfile.mkdtemp(prefix="sill-scen-")
     bench.use_profile("scen-" + datetime.now().strftime("%m%d%H%M%S"))

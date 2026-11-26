@@ -1,0 +1,7 @@
+<!doctype html><meta charset=utf-8><title>Book a flight</title><script src=kit.js></script>
+<h1>Book flights</h1><label>From <input value="Dubai"></label> <button onclick="done('searched', true)">Search</button>
+<!-- What reCAPTCHA leaves on a page that uses it quietly: the invisible badge at 0×0, the challenge frame hidden far above. -->
+<iframe title="reCAPTCHA" src="about:blank#recaptcha/api2/anchor" style="width:0;height:0;border:0"></iframe>
+<div style="visibility:hidden;position:absolute;top:-10000px"><iframe title="recaptcha challenge expires in two minutes" src="about:blank#recaptcha/api2/bframe" style="width:300px;height:150px"></iframe></div>
+<button id=show onclick="document.getElementById('wall').hidden=false">Show the check</button>
+<div id=wall hidden><iframe title="reCAPTCHA" src="about:blank#https://www.google.com/recaptcha/api2/anchor" style="width:304px;height:78px"></iframe></div>
