@@ -1,7 +1,7 @@
 {
  "drawn": "2026-11-26",
  "seed": 20261126,
- "instructions": "77a21d11e15d97d3",
+ "instructions": "b58ec46769923a1a",
  "commit": "0313309",
  "practice_ids_left_out": 91,
  "webvoyager": [
@@ -176,5 +176,17 @@
   "bu2-029",
   "bu2-028"
  ],
- "retired": []
+ "retired": [],
+ "freezes": [
+  {
+   "instructions": "77a21d11e15d97d3",
+   "tag": "instructions-frozen-1",
+   "why": "first freeze"
+  },
+  {
+   "instructions": "b58ec46769923a1a",
+   "tag": "instructions-frozen-2",
+   "why": "answer_check: call it once before the final answer"
+  }
+ ]
 }

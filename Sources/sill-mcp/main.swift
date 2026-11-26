@@ -88,7 +88,8 @@ page's own controls when the site has one (a filter or sort, not just a word in 
 not a near one); and answer with the specifics (names, numbers, prices, dates), not just where they are. If a \
 condition can't be met, say which and why rather than settling for a near one silently. Before you answer, check \
 the result against each condition in the task as the page shows it (the right kind of item, every filter and its \
-exact value, the top or cheapest one meaning the very first by that sort): fix what's off, then answer. When the site \
+exact value, the top or cheapest one meaning the very first by that sort): call answer_check once with your draft \
+and the task's conditions spelled out (what the user said and what they plainly meant), fix what it flags, then answer. When the site \
 has no control for a condition (no part-time filter, no price range), check it another way (each result's own page, a \
 keyword) rather than leaving it unchecked. When the task asks for a list, give the list. When you write what pages \
 say into a file or table, copy each field exactly as the page has it and keep your own notes in a field of their own; \
@@ -882,6 +883,7 @@ After typing into a search box, the answer shows the suggestions: pick one by re
     historyTool,
     filesTool,
     splitTool,
+    checkTool,
     Tool(name: "status", description: "Check that Sill is running and agent control is on: version, windows, tabs.",
          properties: [:], required: [], readOnly: true, openWorld: false) { sill, _ in
         [.text(text(try sill.run("status")))]
@@ -892,7 +894,7 @@ After typing into a search box, the answer shows the suggestions: pick one by re
 /// still answer when called (older clients, the test course), but each listed tool is tokens
 /// a model reads every turn and one more choice to weigh.
 let listed: Set<String> = ["tabs_open", "tabs_list", "tabs_close", "page_navigate", "page_do", "page_read", "page_screenshot",
-                           "page_sign_in", "passwords_save", "page_upload", "wait_for_user", "web_search", "read_url", "history_search", "files", "page_goal"]
+                           "page_sign_in", "passwords_save", "page_upload", "wait_for_user", "web_search", "read_url", "history_search", "files", "page_goal", "answer_check"]
 
 /// After a page is open: steps, a goal, a read, a close, as asked. One answer for the lot.
 func errandRest(_ sill: Sill, id: String, _ args: [String: Any], opened: String) throws -> String? {
@@ -1396,6 +1398,9 @@ func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
             if ["page_read", "read_url", "tabs_open", "page_do", "page_navigate", "page_text", "page_snapshot"].contains(name),
                let last = content.lastIndex(where: { $0["type"] as? String == "text" }), let said = content[last]["text"] as? String {
                 content[last]["text"] = said + "\n(read at \(readStamp()))"
+            }
+            if Evidence.readingTools.contains(name) {
+                Evidence.add(tool: name, text: content.compactMap { $0["text"] as? String }.joined(separator: "\n"))
             }
             if Trace.dir != nil, !Trace.quiet.contains(name) {
                 let said = content.compactMap { $0["text"] as? String }.joined(separator: "\n")

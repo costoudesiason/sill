@@ -221,35 +221,37 @@ few:
 - **Known routes come from site notes**, so workers go straight to the right page.
 - **The checker re-reads only what a requirement depends on**, not the whole job.
 
-## Where it runs
+## Where it runs, and what it costs in time
 
-**Claude runs the task; Sill keeps it honest and durable.** You message Claude (claude.ai or
-Claude Code) because it already knows you: your memory, your projects, how you like things.
-So Claude does the thinking: Brief, Plan, the judgment in Check, and Deliver. Sill doesn't run
-its own model loop. It gives Claude the pieces a chat can't hold by itself, as tools:
+**Claude runs the task; Sill keeps it honest.** You message Claude (claude.ai or Claude Code)
+because it already knows you, so Claude does the thinking: the brief, the plan, the judgment,
+the answer. Sill never runs a model loop of its own.
 
-| Tool | What it does |
-|---|---|
-| `task_start` | Claude writes the spec (requirements, deliverable, limits, readings chosen); Sill stores it and gives back a task id |
-| `ledger_add` | Record a fact against a requirement. Sill attaches the page, the exact text, the time and a screenshot crop itself, so evidence can't be paraphrased |
-| `ledger_read` | The spec, progress, evidence and routes tried, so a new chat or a worker can pick the task up |
-| `task_check` | Sill's mechanical check: which requirements have no evidence, whose evidence is old, and whether each quoted value is still on its page (it re-reads them). Claude then judges the rest |
-| `task_finish` | Hands back the deliverable built from the ledger. It refuses while a requirement has no evidence and no record of the ladder being climbed |
+**No added delay.** Speed is good now, so nothing here may add waiting. Each piece rides on
+calls Claude already makes:
 
-Parallel work stays in Claude's hands too:
+- **Evidence: free.** Every page Claude reads (tabs_open, page_read, page_do, read_url,
+  web_search, page_goal…) is kept by Sill as it came back: source, exact lines, time. No new
+  calls, nothing reloaded. Subagents in one Claude Code session share it.
+- **The brief: inside the check.** There's no separate step to write a spec. Claude lists the
+  task's conditions (what you said and what you plainly meant) once, in the check.
+- **`answer_check`: one call before the final answer, about 15 ms in Sill.** Claude sends its
+  draft and the conditions. Sill answers:
+  - for each condition, the lines read that speak to it, rare words first, so the line that
+    names the thing is never crowded out ("Skills: Agile Methodology" beside the module list);
+  - figures in the draft that no page showed ($97.31);
+  - for a lowest or highest claim, the range of amounts the page showed ($232 beside "$235,
+    the lowest").
 
-- **claude.ai:** `tabs_open errands=[…]` with Jev.
-- **Claude Code:** subagents, each with its own tab, all writing to the same ledger.
+  Claude fixes what's off, then answers. The only cost is one model turn.
 
-A task survives the chat ending, the Mac sleeping or Claude's context filling up: Claude reads
-the ledger and carries on.
+Built in `Sources/sill-mcp/Check.swift`, tested by the `answer-check` course case.
 
-Why this way round:
+**Later, only if they pay for themselves in accuracy:**
 
-- Claude already has your context and memory, so the Brief is right from the start.
-- You keep talking to the assistant you already use.
-- What has to outlast one chat (the spec, the evidence, the progress) lives in Sill, where it's
-  safe.
+- the evidence kept on disk, so a new chat resumes a long job;
+- a fresh-context judge (a subagent in Claude Code) for long tasks only;
+- the persistence ladder as a rule Sill enforces.
 
 ## Measuring it
 
@@ -268,12 +270,11 @@ Why this way round:
 
 ## Build order
 
-1. **`task_start`, `ledger_add`, `ledger_read`.** The spec and evidence as stored objects; everything
-   else reads and writes them.
-2. **`task_check` and `task_finish`,** plus Sill's instructions telling Claude to brief, record
-   and check. It's the biggest jump in being right, and it works in one chat before any
-   parallel work.
-3. **The persistence ladder** inside Plan.
-4. **Workers in parallel** sharing the ledger, plus resume after sleep or crash.
-5. **Learning written back** after every task.
-6. **Odysseys2** against the published scores, from a clean network.
+1. **Done:** evidence kept from every read, and `answer_check` before the final answer.
+2. **Next, prediction:** the conditions known early make every read point at them, so Claude
+   goes straight to the right control or line. Site notes and habits do the same for the
+   route.
+3. **The persistence ladder**, as a rule `answer_check` enforces: "not on the web" only with
+   the routes tried.
+4. **Evidence on disk** and resume, for jobs that run for hours.
+5. **Odysseys2** against the published scores, from a clean network.

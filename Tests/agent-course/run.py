@@ -246,7 +246,7 @@ def animated(c):
 def read_script(c):
     # The listed tools are the short set; page_read pulls data with a script, and reads text.
     names = [t["name"] for t in c.m.rpc("tools/list", {})["result"]["tools"]]
-    if "page_click" in names or "page_read" not in names or len(names) > 16: raise Fail(f"tools listed: {names}")
+    if "page_click" in names or "page_read" not in names or len(names) > 17: raise Fail(f"tools listed: {names}")
     out = c.must("page_read", script="return [...document.querySelectorAll('button')].map(b => b.textContent)")
     text = c.must("page_read", text=True)
     bare = c.must("page_read", script="document.title")   # an expression with no return still answers
@@ -526,6 +526,19 @@ def find(c):
     return c.result().get("os:w11") is True
 
 @case
+def answer_check(c):
+    # The draft against what was read: the line that speaks to a condition (a skill tag, not a module),
+    # a figure no page showed, and a "lowest" claim with the page's own range beside it.
+    c.must("page_read", text=True)
+    ok, out = c.m.call("answer_check", answer="The lowest fare is $235 on TAP Air Portugal. The course has a module on Agile and costs $97.31.",
+                       needs=["the fare is the lowest one-way fare", "the course has a module on Agile"])
+    if not ok: raise Fail(out[:300])
+    if "Agile Methodology" not in out: raise Fail("the line about Agile wasn't shown: " + out[:1500])
+    if "$97.31" not in out.split("Figures not on any page")[-1]: raise Fail("a figure no page showed wasn't flagged: " + out[:600])
+    if "$232" not in out: raise Fail("the page's lower amount wasn't set beside the lowest claim: " + out[:600])
+    return True
+
+@case
 def popup(c):
     ok, out = c.do("page_click", ref=ref(c.look(), "link", "Open help"))
     ok2, tabs = c.m.call("tabs_list")
@@ -760,7 +773,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)
