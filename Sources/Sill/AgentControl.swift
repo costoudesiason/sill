@@ -637,7 +637,8 @@ enum AgentCommands {
             } else if args["input"] as? Bool == true {
                 // Until the page asks for input again: a field that wasn't usable when the wait began is now.
                 let deadline = Date().addingTimeInterval(timeout)
-                let before = Set(((try? await evaluate("return window.__sillAgent.inputs()", in: view, world: Web.world)) as? [String: Any])?["on"] as? [String] ?? [])
+                let start = (try? await evaluate("return window.__sillAgent.inputs()", in: view, world: Web.world)) as? [String: Any] ?? [:]
+                let before = Set(start["on"] as? [String] ?? []), buttonsBefore = Set(start["buttons"] as? [String] ?? [])
                 var firstLoop = true
                 while Date() < deadline {
                     let now = (try? await evaluate("return window.__sillAgent.inputs()", in: view, world: Web.world)) as? [String: Any] ?? [:]
@@ -647,6 +648,19 @@ enum AgentCommands {
                     if !fresh.isEmpty || (before.isEmpty && !on.isEmpty && !firstLoop) {
                         let names = now["names"] as? [String] ?? []
                         return ["field": names.first ?? "", "url": view.url?.absoluteString ?? ""]
+                    }
+                    // No field coming, but a new button: the page is waiting on a click (a "Next", a "DESCEND"),
+                    // once it has held still a moment. Said at once rather than after the whole wait.
+                    let newButtons = (now["buttons"] as? [String] ?? []).filter { !buttonsBefore.contains($0) }
+                    let state = (try? await evaluate("return window.__sillAgent.state()", in: view, world: Web.world)) as? [String: Any]
+                    let still = state?["still"] as? Double ?? 0
+                    if !newButtons.isEmpty, still >= 700 {
+                        return ["waitsOn": newButtons.prefix(3).joined(separator: "”, “"), "url": view.url?.absoluteString ?? ""]
+                    }
+                    // Still for a second and nothing to type in: hand back the buttons there are, for the caller to
+                    // tell which ones are new since the agent last looked (it keeps what it was shown).
+                    if args["early"] as? Bool != false, still >= 1000, Date().timeIntervalSince(deadline.addingTimeInterval(-timeout)) >= 1.5 {
+                        return ["still": true, "buttons": now["buttons"] as? [String] ?? [], "url": view.url?.absoluteString ?? ""]
                     }
                     firstLoop = false
                     try await Task.sleep(nanoseconds: 100_000_000)
@@ -2044,7 +2058,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 33) return;
+      if (window.__sillAgent && window.__sillAgent.v === 34) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -2411,7 +2425,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 33,
+        v: 34,
         // The page as a person sees it, in reading order: headings, the text around the
         // controls (prices, results, messages), every control (including ones made clickable
         // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.
@@ -3202,7 +3216,14 @@ enum AgentScript {
             on.push(refOf(el));
           });
           const a = deepActive(); if (a && typable(a) && !a.disabled) focused = clean(name(a)) || 'a field';
-          return { on, focused, names: on.slice(0, 3).map((r) => clean(name(find(r))) ) };
+          // The buttons a person could press now: a page that waits on a click shows a new one.
+          const buttons = [];
+          walk(document.documentElement, 0, 0, (el) => {
+            if (buttons.length >= 60 || !(el.tagName === 'BUTTON' || el.getAttribute('role') === 'button' || (el.tagName === 'INPUT' && /^(button|submit)$/.test(el.type)))) return;
+            if (el.disabled || el.getAttribute('aria-disabled') === 'true' || !seen(el)) return;
+            const n = clean(name(el)).slice(0, 40); if (n) buttons.push(n);
+          });
+          return { on, focused, names: on.slice(0, 3).map((r) => clean(name(find(r))) ), buttons };
         },
         // Whether something that opens (a menu, a dropdown, a section) says it's open: "true", "false", or null.
         expanded(ref) {

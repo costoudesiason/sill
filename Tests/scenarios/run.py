@@ -107,6 +107,16 @@ def check_catalogue(r, answer):
     return ok, ("€149" if ok else f"answer: {answer[:100]!r}") + (f" (searched {r.get('searched')!r})" if r.get("searched") else f" (scrolled to {r.get('shown')})")
 
 
+def check_flights(r, answer):
+    # Larnaca searched on the 13th at some point (checking Paphos too is fine).
+    if not r.get("search_LCA_13012027"): return False, f"never searched Larnaca on 13/01/2027 (last: {r.get('search')})"
+    ok = "246.49" in (answer or "")
+    return ok, ("CY107 €246.49" if ok else f"answer: {answer[:120]!r}")
+
+def check_descend(r, answer):
+    ok, detail = check_dive(r, answer)
+    return ok, detail + " (with DESCEND between rounds)"
+
 SCENARIOS = [
     {"id": "sheet", "url": A + "sheet.html", "check": check_sheet,
      "task": "In this spreadsheet, put these voltage readings in column B next to their times, starting at B2, one value per row: " + ", ".join(VOLTS) + "."},
@@ -124,6 +134,10 @@ SCENARIOS = [
      "task": "On this board, move the card 'Fix login bug' to the Done column, at the top of it."},
     {"id": "tabs", "url": None, "check": check_tabs, "open": [A + "notes.html", A + "sheet.html?mode=totals"],
      "task": "Copy the totals from my lab notes into my spreadsheet, under its Totals heading, one per run (both are open in my tabs)."},
+    {"id": "flights", "url": A + "flights.html", "check": check_flights,
+     "task": "go and find me the flight prices for the 13th jan to go cyprus, from Dubai"},
+    {"id": "descend", "url": A + "dive.html?mode=descend", "check": check_descend,
+     "task": "Play today's dive on this page: start it and answer all 5 prompts, each before its timer runs out. Any valid answer counts; be quick."},
     {"id": "catalogue", "url": A + "catalogue.html", "check": check_catalogue,
      "task": "How much does the Nordic Oak Lamp cost in this catalogue?"},
 ]

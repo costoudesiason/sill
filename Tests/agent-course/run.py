@@ -711,7 +711,13 @@ def wait_input(c):
     ok, out = c.do("page_do", steps=[{"click": "Start"}, {"wait": "input"}])
     if "asking for input" not in out or "Name a planet" not in out: raise Fail("didn't wait for the question: " + out[-500:])
     c.must("page_do", steps=[{"type": "Your answer", "text": "Mars"}, {"click": "Send"}])
-    return c.result().get("answer") == "Mars"
+    if c.result().get("answer") != "Mars": raise Fail(f"answer {c.result()}")
+    # A page that waits on a click, not a field: the wait says so at once, naming the new button.
+    t = time.time(); ok, out = c.do("page_do", steps=[{"click": "Next round"}, {"wait": "input"}]); took = time.time() - t
+    if "waiting on a click" not in out or "Continue" not in out: raise Fail("a waiting button wasn't named: " + out[-400:])
+    if took > 5: raise Fail(f"took {took:.1f} s to notice")
+    c.must("page_do", steps=[{"wait": "text", "text": "Continue"}])
+    return True
 
 @case
 def closest_name(c):

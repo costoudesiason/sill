@@ -1,0 +1,65 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><title>Isle Air | Dubai – Cyprus from € 335</title><script src=scen.js></script>
+<style>body{font:15px system-ui;margin:0} header{position:sticky;top:0;z-index:5;background:#123;color:#fff;padding:18px 24px;height:28px} #book{background:#e9eef3;padding:20px 24px;display:flex;gap:10px;align-items:end;flex-wrap:wrap}
+#book>div{position:relative} .pop{position:absolute;top:100%;left:0;background:#fff;border:1px solid #bbb;z-index:4;list-style:none;margin:0;padding:4px 0;min-width:220px} .pop li{padding:7px 12px;cursor:pointer}
+#cal{position:absolute;top:100%;left:0;background:#fff;border:1px solid #bbb;padding:10px;z-index:4} .grid{display:grid;grid-template-columns:repeat(7,64px);gap:3px} .grid [role=gridcell]{border:1px solid #ddd;padding:4px;font-size:12px;cursor:pointer;height:34px}
+.deal{display:inline-block;width:230px;border:1px solid #ccc;margin:8px;padding:10px;vertical-align:top} #results .f{border:1px solid #ccc;padding:12px;margin:8px 24px;display:flex;justify-content:space-between}</style></head><body>
+<header>Isle Air · Flights · Destinations · Manage booking</header>
+<h1 style="margin:16px 24px">Book flights from Dubai to Cyprus from € 335*</h1>
+<div id=book>
+  <div><button id=trip aria-label="trip-type-label, Round Trip" aria-haspopup=listbox aria-expanded=false>Round Trip ▾</button><ul id=triplist class=pop role=listbox hidden><li role=option>Round Trip</li><li role=option>One way</li><li role=option>Multi-city</li></ul></div>
+  <div><label>From<br><input id=from value="Dubai (DXB)" aria-label="From"></label></div>
+  <div><label>To<br><button id=to role=combobox aria-label="booking-destination-label" aria-expanded=false>Select destination</button></label><ul id=tolist class=pop role=listbox hidden>
+    <li role=option>Athens (Greece) ATH</li><li role=option>Larnaca (Cyprus) LCA</li><li role=option>Paphos (Cyprus) PFO</li><li role=option>Tel Aviv (Israel) TLV</li></ul></div>
+  <div><button id=dep aria-label="departure-date-label DD/MM/YYYY" aria-expanded=false>Departure DD/MM/YYYY</button><div id=cal hidden></div></div>
+  <div id=retbox><button id=ret aria-label="return-date-label DD/MM/YYYY">Return DD/MM/YYYY</button></div>
+  <button id=search>Search</button><div id=err role=alert style="color:#b00;width:100%"></div>
+</div>
+<!-- reCAPTCHA loaded quietly, as booking sites do: never shown. -->
+<iframe title="reCAPTCHA" src="about:blank#recaptcha/api2/anchor" style="width:0;height:0;border:0"></iframe>
+<div style="visibility:hidden;position:absolute;top:-10000px"><iframe title="recaptcha challenge expires in two minutes" src="about:blank#recaptcha/api2/bframe" style="width:300px;height:150px"></iframe></div>
+<section id=results></section>
+<h2 style="margin:16px 24px">Popular Flight Deals from Dubai</h2>
+<div style="margin:0 16px">
+  <div class=deal>Dubai (DXB) to Larnaca (LCA)<br>18/02/2027 – 20/02/2027<br>From € 335* · Round Trip / Economy<br><button>Book Now</button></div>
+  <div class=deal>Dubai (DXB) to Larnaca (LCA)<br>23/02/2027 – 25/02/2027<br>From € 335* · Round Trip / Economy<br><button>Book Now</button></div>
+  <div class=deal>Dubai (DXB) to Athens (ATH)<br>03/12/2026 – 14/12/2026<br>From € 299* · Round Trip / Economy<br><button>Book Now</button></div>
+</div>
+<div style="height:900px"></div>
+<script>
+const $ = (id) => document.getElementById(id);
+let trip = 'Round Trip', to = '', dep = '', month = new Date(2026, 10, 1);
+const toggle = (btn, pop) => { const open = pop.hidden; pop.hidden = !open; btn.setAttribute('aria-expanded', open); };
+$('trip').onclick = () => toggle($('trip'), $('triplist'));
+$('triplist').onclick = (e) => { const li = e.target.closest('li'); if (!li) return; trip = li.textContent; $('trip').textContent = trip + ' ▾'; $('trip').setAttribute('aria-label', 'trip-type-label, ' + trip); toggle($('trip'), $('triplist')); $('retbox').hidden = trip !== 'Round Trip'; };
+$('to').onclick = (e) => { e.preventDefault(); toggle($('to'), $('tolist')); };
+$('tolist').onclick = (e) => { const li = e.target.closest('li'); if (!li) return; to = li.textContent; $('to').textContent = to; toggle($('to'), $('tolist')); };
+const fare = (d) => { const day = d.getDate(), m = d.getMonth(); return 180 + ((day * 37 + m * 11) % 140) + (m === 0 && day === 13 ? 0 : 0); };
+const drawCal = () => {
+  const name = month.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  let h = `<div style="display:flex;justify-content:space-between"><button id=prevm aria-label="date-selector-prev-month">‹</button><b>${name}</b><button id=nextm aria-label="date-selector-next-month">›</button></div><div class=grid role=grid aria-label="${name}">`;
+  const first = new Date(month); h += '<span></span>'.repeat((first.getDay() + 6) % 7);
+  for (let d = new Date(first); d.getMonth() === first.getMonth(); d.setDate(d.getDate() + 1)) {
+    const dd = String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear(), f = d.getMonth() === 0 && d.getDate() === 13 && d.getFullYear() === 2027 ? 246 : fare(d);
+    h += `<div role=gridcell aria-label="${dd}, , , ${f} €" data-d="${dd}">${d.getDate()}<br>${f} €</div>`;
+  }
+  $('cal').innerHTML = h + '</div>';
+};
+$('dep').onclick = () => { $('cal').hidden = !$('cal').hidden; $('dep').setAttribute('aria-expanded', !$('cal').hidden); drawCal(); };
+$('cal').onclick = (e) => {
+  if (e.target.id === 'nextm') { month.setMonth(month.getMonth() + 1); return drawCal(); }
+  if (e.target.id === 'prevm') { month.setMonth(month.getMonth() - 1); return drawCal(); }
+  const c = e.target.closest('[role=gridcell]'); if (!c) return; dep = c.dataset.d; $('dep').textContent = 'Departure ' + dep; $('cal').hidden = true;
+};
+$('search').onclick = () => {
+  $('err').textContent = '';
+  if (!to) return $('err').textContent = 'Choose a destination';
+  if (!dep) return $('err').textContent = 'Choose a departure date';
+  if (trip === 'Round Trip') return $('err').textContent = 'Choose a return date, or switch to One way';
+  report('search_' + to.slice(-3) + '_' + dep.replace(/\//g, ''), { trip, to, dep }); report('search', { trip, to, dep });
+  const lca = to.includes('LCA'), on13 = dep === '13/01/2027';
+  $('results').innerHTML = `<h2 style="margin:16px 24px">Dubai – ${to.split(' (')[0]} · ${trip} · ${dep} · 1 traveler</h2>` + (!lca ? '<p style="margin:0 24px">No flights on this date. Try Larnaca.</p>'
+    : `<div class=f><div><b>CY107</b> · Non-stop · 18:00 – 20:10</div><div>Economy from € ${on13 ? '246.49' : '289.49'} · Business from € ${on13 ? '963.49' : '1,011.49'}</div><button>Select</button></div>`);
+  $('results').scrollIntoView();
+};
+report('loaded', true);
+</script></body></html>

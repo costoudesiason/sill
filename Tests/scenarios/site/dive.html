@@ -16,7 +16,11 @@ const ROUNDS = [
 const $ = (id) => document.getElementById(id);
 let i = -1, deadline = 0, tick = null, shownAt = 0;
 const results = [];
-const next = () => {
+const descend = new URLSearchParams(location.search).get('mode') === 'descend';
+const between = (go) => { if (!descend || i < 0) return go(); $('label').textContent = 'DEPTH ' + ((i + 1) * 100) + 'm'; $('prompt').textContent = 'Nice dive.'; $('answer').disabled = true; $('dive').disabled = true;
+  const b = document.createElement('button'); b.textContent = 'DESCEND ▼'; b.id = 'descend'; $('card').appendChild(b); b.onclick = () => { b.remove(); go(); }; };
+const next = () => between(nextNow);
+const nextNow = () => {
   i++; $('msg').textContent = '';
   if (i >= ROUNDS.length) { $('bar').hidden = true; $('label').textContent = 'DIVE COMPLETE'; $('prompt').textContent = 'Score: ' + results.filter((r) => r.valid).length * 100; $('count').textContent = ''; report('done', results); return; }
   $('label').textContent = 'PROMPT ' + (i + 1) + ' OF ' + ROUNDS.length; $('prompt').textContent = 'Get ready…'; $('answer').disabled = true; $('dive').disabled = true;

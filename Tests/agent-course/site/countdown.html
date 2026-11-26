@@ -2,3 +2,4 @@
 <h1 id=q>Ready?</h1><p id=c></p><label>Your answer <input id=a disabled></label> <button onclick="done('answer', a.value)">Send</button>
 <button id=start onclick="go()">Start</button>
 <script>function go(){ let n = 3; c.textContent = 'Get ready… ' + n; const t = setInterval(() => { n--; if (n > 0) { c.textContent = 'Get ready… ' + n; return; } clearInterval(t); c.textContent = ''; q.textContent = 'Name a planet'; a.disabled = false; }, 700); }</script>
+<button onclick="setTimeout(() => { const b = document.createElement('button'); b.textContent = 'Continue'; document.body.appendChild(b); }, 300)">Next round</button>

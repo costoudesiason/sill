@@ -1133,15 +1133,31 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
             } else if let text = step["wait"] as? String, text.lowercased() == "input" {
                 // Until the page asks for input again: an answer box switched back on, a new field (a quiz's next
                 // question after its countdown, a chat's reply box, a form's next step). The field it was is said.
-                let r = try sill.run("page.wait", tab.merging(["input": true, "timeout": step["timeout"] as? Double ?? 20]) { $1 }) as? [String: Any] ?? [:]
-                did = "the page is asking for input" + ((r["field"] as? String).map { " (“\($0)”)" } ?? "")
+                let limit = step["timeout"] as? Double ?? 20
+                let began = Date()
+                var r = try sill.run("page.wait", tab.merging(["input": true, "timeout": limit]) { $1 }) as? [String: Any] ?? [:]
+                // The page went still with nothing to type in: a button the agent wasn't shown before this step is what
+                // it's waiting on. If there's none, keep waiting for the field (no more early answers).
+                if r["still"] as? Bool == true {
+                    let shown = seen.lines((tab["tab"] as? String) ?? seen.last ?? "")?.joined(separator: "\n") ?? ""
+                    let fresh = (r["buttons"] as? [String] ?? []).filter { !shown.contains("\"\($0)\"") && !shown.contains("“\($0)”") }
+                    if !fresh.isEmpty { r = ["waitsOn": fresh.prefix(3).joined(separator: "”, “")] }
+                    else { r = try sill.run("page.wait", tab.merging(["input": true, "early": false, "timeout": max(1, limit - Date().timeIntervalSince(began))]) { $1 }) as? [String: Any] ?? [:] }
+                }
+                if let on = r["waitsOn"] as? String {
+                    did = "no field to type in yet: the page is waiting on a click (“\(on)” appeared); click it, then wait for input"
+                } else {
+                    did = "the page is asking for input" + ((r["field"] as? String).map { " (“\($0)”)" } ?? "")
+                }
             } else if let text = step["wait"] as? String, text.lowercased() == "settled" {
                 _ = try sill.run("page.wait", tab.merging(["settled": true, "timeout": step["timeout"] as? Double ?? 6]) { $1 })
                 did = "the page settled"
             } else if let gone = step["until_gone"] as? String {
                 _ = try sill.run("page.wait", tab.merging(["gone": gone, "timeout": step["timeout"] as? Double ?? 8]) { $1 })
                 did = "“\(gone)” is gone"
-            } else if let text = step["wait"] as? String {
+            } else if let given = step["wait"] as? String {
+                // {"wait": "text", "text": "DESCEND"} means the words in "text", as {"wait": "DESCEND"} does.
+                let text = given.lowercased() == "text" ? (step["text"] as? String ?? given) : given
                 var a = tab.merging(["text": text, "timeout": step["timeout"] as? Double ?? 6]) { $1 }
                 if let b = baseline, b.text == text { a["before"] = b.count; a["beforeURL"] = b.url }
                 let r = try sill.run("page.wait", a) as? [String: Any] ?? [:]
