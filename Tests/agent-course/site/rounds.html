@@ -1,0 +1,4 @@
+<!doctype html><meta charset=utf-8><title>Rounds</title><script src=kit.js></script>
+<h1 id=q>Press Next for a question</h1><button id=next onclick="n++;q.textContent='Question '+n">Next</button>
+<label>Answer <input id=a></label><button id=go onclick="done('answers', (window.__result.answers||0)+1)">Submit</button>
+<script>let n = 0;</script>

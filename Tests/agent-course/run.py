@@ -691,6 +691,29 @@ def hidden_captcha(c):
     return True
 
 @case
+def rounds(c):
+    # The same round over several calls is noticed, and said to be sendable as one call a round;
+    # a CSS selector written as a target is used as one.
+    out = ""
+    for i in range(2):
+        c.must("page_click", text="Next")
+        c.must("page_type", label="Answer", text=f"answer {i}")
+        out = c.must("page_click", text="Submit")
+    if "same round again" not in out: raise Fail("a repeated round wasn't noticed: " + out[-400:])
+    c.must("page_do", steps=[{"click": "#go"}])
+    return c.result().get("answers") == 3
+
+@case
+def wait_input(c):
+    # A switched-off answer box is said to be off; one call starts, waits out the countdown until the page
+    # asks for input, and comes back with the question.
+    look = c.look()
+    ok, out = c.do("page_do", steps=[{"click": "Start"}, {"wait": "input"}])
+    if "asking for input" not in out or "Name a planet" not in out: raise Fail("didn't wait for the question: " + out[-500:])
+    c.must("page_do", steps=[{"type": "Your answer", "text": "Mars"}, {"click": "Send"}])
+    return c.result().get("answer") == "Mars"
+
+@case
 def popup(c):
     ok, out = c.do("page_click", ref=ref(c.look(), "link", "Open help"))
     ok2, tabs = c.m.call("tabs_list")
@@ -925,7 +948,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups", "needs": "state", "reroute": "empty", "page-map": "check", "ticking": "ticker", "grid-cells": "sheet", "stale-refs": "reloading-filters", "hidden-captcha": "hidden-captcha"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups", "needs": "state", "reroute": "empty", "page-map": "check", "ticking": "ticker", "grid-cells": "sheet", "stale-refs": "reloading-filters", "hidden-captcha": "hidden-captcha", "rounds": "rounds", "wait-input": "countdown"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)

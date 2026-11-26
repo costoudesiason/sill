@@ -634,6 +634,24 @@ enum AgentCommands {
                     try await Task.sleep(nanoseconds: 150_000_000)
                 }
                 throw AgentError("“\(gone)” was still there after \(Int(timeout)) s.")
+            } else if args["input"] as? Bool == true {
+                // Until the page asks for input again: a field that wasn't usable when the wait began is now.
+                let deadline = Date().addingTimeInterval(timeout)
+                let before = Set(((try? await evaluate("return window.__sillAgent.inputs()", in: view, world: Web.world)) as? [String: Any])?["on"] as? [String] ?? [])
+                var firstLoop = true
+                while Date() < deadline {
+                    let now = (try? await evaluate("return window.__sillAgent.inputs()", in: view, world: Web.world)) as? [String: Any] ?? [:]
+                    let on = now["on"] as? [String] ?? []
+                    let fresh = on.filter { !before.contains($0) }
+                    // A field newly switched on, or (on a page that had none usable) any usable one.
+                    if !fresh.isEmpty || (before.isEmpty && !on.isEmpty && !firstLoop) {
+                        let names = now["names"] as? [String] ?? []
+                        return ["field": names.first ?? "", "url": view.url?.absoluteString ?? ""]
+                    }
+                    firstLoop = false
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+                throw AgentError("The page didn't ask for input within \(Int(timeout)) s.")
             } else if args["settled"] as? Bool == true {
                 // Until the page has held still for half a second: results that arrive in parts.
                 let deadline = Date().addingTimeInterval(timeout)
@@ -2022,7 +2040,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 30) return;
+      if (window.__sillAgent && window.__sillAgent.v === 31) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -2383,7 +2401,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 30,
+        v: 31,
         // The page as a person sees it, in reading order: headings, the text around the
         // controls (prices, results, messages), every control (including ones made clickable
         // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.
@@ -2661,6 +2679,9 @@ enum AgentScript {
                   return;
                 }
               }
+              if (typable(el) && el.type !== 'password' && !vaulted.has(el) && seen(el) && (el.disabled || el.getAttribute('aria-disabled') === 'true')) {
+                add(typed, 5, '“' + (clean(name(el)).slice(0, 30) || 'a field') + '” is off for now ({"wait": "input"} waits for it)'); return;
+              }
               if (typable(el) && el.type !== 'password' && !vaulted.has(el) && seen(el)) {
                 const v = clean(el.value);
                 if (v && v.length <= 80) {
@@ -2931,7 +2952,8 @@ enum AgentScript {
                 clipped = r0.top < pr.top || r0.bottom > pr.bottom || r0.left < pr.left || r0.right > pr.right;
               }
             }
-            if (!inside || clipped) f.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+            // To the middle of the view, not its edge: a sticky top bar or bottom banner covers the edges.
+            if (!inside || clipped) f.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
           }
           const off = offsets.get(el) || [0, 0];
           const r = f.getBoundingClientRect();
@@ -3156,6 +3178,18 @@ enum AgentScript {
           // A refusal no person can clear from here: a security block, or not offered where the browser is.
           if (/you have been blocked|access (is )?denied|request (was )?blocked|this (site|service|content|product) is (not available|unavailable) in your (country|region)|not available in your (country|region)|geo ?location/.test(title + ' ' + text.slice(0, 1500))) found.push('blocked by the site');
           return found;
+        },
+        // The text fields a person could type in now (shown and switched on), and which one has the caret.
+        inputs() {
+          const on = [];
+          let focused = '';
+          walk(document.documentElement, 0, 0, (el) => {
+            if (!typable(el) || el.type === 'password' || !seen(el)) return;
+            if (el.disabled || el.readOnly || el.getAttribute('aria-disabled') === 'true') return;
+            on.push(refOf(el));
+          });
+          const a = deepActive(); if (a && typable(a) && !a.disabled) focused = clean(name(a)) || 'a field';
+          return { on, focused, names: on.slice(0, 3).map((r) => clean(name(find(r))) ) };
         },
         // Whether something that opens (a menu, a dropdown, a section) says it's open: "true", "false", or null.
         expanded(ref) {

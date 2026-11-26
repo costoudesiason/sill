@@ -786,7 +786,7 @@ match flagged; add "in": "December 2026" (a heading, panel, dialog or month) to 
 {"date": "2026-12-26", "on": T} opens a date field and picks that day in its calendar · {"select": T, "value": "…"} · {"hover": T} · {"scroll": 600, "on": T} (or {"scroll": T} into view) \
 · {"drag": T or [x, y], "to": T or [x, y]} or {"drag": T, "by": [[dx, dy], …]} · {"touch": T, "kind": "tap" | "longpress" | "swipe", \
 "dx": 0, "dy": -300} · {"wait": "text"} (words to appear), {"wait": "settled"} (the page held still: results that \
-arrive in parts), {"until_gone": "Verifying…"} · {"navigate": "url" | "back" | "forward" | "reload"} · {"dialog": true, \
+arrive in parts), {"wait": "input"} (until the page asks for input again: a quiz's next question after its countdown, a reply box), {"until_gone": "Verifying…"} · {"navigate": "url" | "back" | "forward" | "reload"} · {"dialog": true, \
 "text": "…"} answers the page's alert/confirm/prompt · {"sign_in": true} \
 · {"paste": "…", "on": T} pastes like ⌘V (a list with \\n puts each line in its own row of a sheet; \\t for columns) \
 · {"fill": "<vault name>", "on": T} types a password or key from the user's vault (you never see it; only on its own site) \
@@ -958,6 +958,8 @@ func target(_ value: Any?) -> [String: Any] {
     guard let text = value as? String, !text.isEmpty else { return [:] }
     if text.range(of: #"^(e\d+|f\d+:e\d+|a\d+)$"#, options: .regularExpression) != nil { return ["ref": text] }
     if text.hasPrefix("css:") { return ["selector": String(text.dropFirst(4))] }
+    // Written as a CSS selector (#add-to-cart-button, input[name=q]): used as one, not looked for as words.
+    if text.range(of: #"^#[A-Za-z_][\w-]*$|^[a-z]*\[[\w-]+([~|^$*]?=[^\]]+)?\]$|^[a-z]+#[A-Za-z_][\w-]*$"#, options: .regularExpression) != nil { return ["selector": text] }
     return ["text": text]
 }
 
@@ -1128,6 +1130,11 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
             } else if let t = step["hover"] {
                 _ = try sill.run("page.hover", tab.merging(target(t)) { $1 })
                 did = "hovered"
+            } else if let text = step["wait"] as? String, text.lowercased() == "input" {
+                // Until the page asks for input again: an answer box switched back on, a new field (a quiz's next
+                // question after its countdown, a chat's reply box, a form's next step). The field it was is said.
+                let r = try sill.run("page.wait", tab.merging(["input": true, "timeout": step["timeout"] as? Double ?? 20]) { $1 }) as? [String: Any] ?? [:]
+                did = "the page is asking for input" + ((r["field"] as? String).map { " (“\($0)”)" } ?? "")
             } else if let text = step["wait"] as? String, text.lowercased() == "settled" {
                 _ = try sill.run("page.wait", tab.merging(["settled": true, "timeout": step["timeout"] as? Double ?? 6]) { $1 })
                 did = "the page settled"
@@ -1195,7 +1202,7 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
         let t0 = Date()
         let step = fill(raw, vars) as? [String: Any] ?? raw
         if step["wait"] == nil, i + 1 < steps.count, let next = fill(steps[i + 1], vars) as? [String: Any],
-           let text = next["wait"] as? String, text.lowercased() != "settled", next["tab"] == nil, step["open"] == nil, step["tab"] == nil,
+           let text = next["wait"] as? String, !["settled", "input"].contains(text.lowercased()), next["tab"] == nil, step["open"] == nil, step["tab"] == nil,
            let m = try? sill.run("page.wait", tab.merging(["text": text, "measure": true]) { $1 }) as? [String: Any] {
             baseline = (text, m["count"] as? Int ?? 0, m["url"] as? String ?? "")
         } else if step["wait"] == nil { baseline = nil }
@@ -1484,6 +1491,13 @@ func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
                let last = content.lastIndex(where: { $0["type"] as? String == "text" }), let said = content[last]["text"] as? String {
                 content[last]["text"] = said + "\n(read at \(readStamp()))"
             }
+            // The same round repeated over several calls: say so, and how to make it one call a round.
+            if ["page_do", "page_click", "page_type", "page_press", "page_select"].contains(name),
+               let tab = (arguments["tab"] as? String) ?? seen.last,
+               let hint = Rounds.note(tool: name, args: arguments, tab: tab),
+               let last = content.lastIndex(where: { $0["type"] as? String == "text" }), let said = content[last]["text"] as? String {
+                content[last]["text"] = said + "\n\n" + hint
+            }
             if actingTools.contains(name), wentWrong(content.compactMap { $0["text"] as? String }.joined(separator: "\n")),
                let picture = glance(sill, tab: arguments["tab"]) {
                 content.append(picture)
@@ -1513,7 +1527,14 @@ func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
             return result(["content": content])
         } catch let failure as Failure {
             if Trace.dir != nil, !Trace.quiet.contains(name) { Trace.record(sill, tab: arguments["tab"], action: Trace.describe(name, arguments), result: "failed: " + failure.message) }
-            var said: [[String: Any]] = [["type": "text", "text": failure.message]]
+            var message = failure.message
+            // A tab that's gone (closed, or from an earlier chat): the tabs there are now, so no separate call is needed.
+            if message.hasPrefix("No tab with id"), let list = try? sill.run("tabs.list", ["remember": false]) as? [[String: Any]] {
+                let tabs = list.prefix(12).map { t in
+                    "\(t["id"] as? String ?? "") \(t["openedByAgent"] as? Bool == true ? "(yours) " : "")\(clip(t["title"] as? String ?? "", 50)) · \(clip(t["url"] as? String ?? "", 70))" }
+                message += "\nThe tabs open now:\n" + tabs.joined(separator: "\n")
+            }
+            var said: [[String: Any]] = [["type": "text", "text": message]]
             if actingTools.contains(name), let picture = glance(sill, tab: arguments["tab"]) {
                 said.append(picture)
                 said.append(["type": "text", "text": "(the tab as it is now)"])
