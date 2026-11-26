@@ -1,0 +1,25 @@
+<!doctype html><meta charset=utf-8><title>Filters in a panel</title><script src=kit.js></script>
+<h1>Laptops</h1>
+<p>Filters in a panel of their own that scrolls, sections opening and closing, as shops draw them.</p>
+<aside id=panel style="height:180px;overflow:auto;border:1px solid #999;width:260px">
+  <h3><button id=colorHead aria-expanded=false>Color</button></h3>
+  <div id=colors hidden>
+    <label><input type=checkbox name=color value=gold> Gold</label><br><label><input type=checkbox name=color value=silver> Silver</label>
+  </div>
+  <h3>Brand</h3>
+  <label><input type=checkbox name=brand value=hp> HP</label><br><label><input type=checkbox name=brand value=dell> Dell</label><br>
+  <h3>System Memory</h3>
+  <label><input type=checkbox name=ram value=8> 8 GB</label><br><label><input type=checkbox name=ram value=16> 16 GB</label><br>
+  <label><input type=checkbox name=ram value=32> 32 GB</label><br>
+  <h3>Screen</h3>
+  <label><input type=checkbox name=res value=fhd> 1920 x 1080 (Full HD)</label><br><label><input type=checkbox name=res value=qhd> 2560 x 1440</label><br>
+  <h3>Operating System</h3>
+  <label><input type=checkbox name=os value=chrome> Chrome OS</label><br><label><input type=checkbox name=os value=w10> Windows 10</label><br>
+  <label><input type=checkbox name=os value=w11> Windows 11</label><br>
+</aside>
+<div style="height:1600px"></div>
+<p>End of results.</p>
+<script>
+colorHead.onclick = () => { colors.hidden = !colors.hidden; colorHead.setAttribute('aria-expanded', String(!colors.hidden)); done('colorClicks', (window.__result.colorClicks || 0) + 1); };
+for (const box of document.querySelectorAll('input[type=checkbox]')) box.onchange = () => done(box.name + ':' + box.value, box.checked);
+</script>

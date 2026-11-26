@@ -1958,7 +1958,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 15) return;
+      if (window.__sillAgent && window.__sillAgent.v === 16) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -2156,8 +2156,13 @@ enum AgentScript {
           const label = n.getAttribute('aria-label') || byIds(n, 'aria-labelledby');
           if (label && clean(label) !== own) return clean(label).slice(0, 60);
           // A heading, caption or legend inside it, before the control.
-          const head = n.querySelector(':scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6, :scope > caption, :scope > legend, :scope > [role=heading], :scope h2, :scope h3, :scope [role=heading], :scope caption');
-          if (head && !contains(head, el) && (head.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+          // The nearest one before it: a panel of filters is often flat, a heading then its options, then the next.
+          let head = null;
+          for (const h of n.querySelectorAll(':scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6, :scope > caption, :scope > legend, :scope > [role=heading], :scope h2, :scope h3, :scope [role=heading], :scope caption')) {
+            if (contains(h, el) || !(h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+            if (!head || (head.compareDocumentPosition(h) & Node.DOCUMENT_POSITION_FOLLOWING)) head = h;
+          }
+          if (head) {
             const t = clean(head.innerText); if (t && t !== own) return t.slice(0, 60);
           }
           // A short line of text that opens the container ("December 2026").
@@ -2287,7 +2292,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 15,
+        v: 16,
         // The page as a person sees it, in reading order: headings, the text around the
         // controls (prices, results, messages), every control (including ones made clickable
         // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.

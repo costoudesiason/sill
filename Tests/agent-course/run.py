@@ -478,6 +478,53 @@ def goal(c):
         m.p.stdin.close(); httpd.shutdown(); httpd.server_close()
     return c.result().get("count") == 3
 
+class LoopingJev(http.server.BaseHTTPRequestHandler):
+    """A stand-in for Jev that keeps clicking a section's header: open, closed, open. It notes whether it was told
+    what each click made appear."""
+    seen = []
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        q, state = body["questions"], body["state"]
+        LoopingJev.seen += [a for a in state["recent_actions"] if a.get("controls_appeared")]
+        head = next(k for k, v in q["click_target"]["criteria"].items() if v["element"].endswith("button Color"))
+        answers = {"operation": {"type": "choice", "choice": "CLICK", "confidence": 0.9, "probabilities": {"CLICK": 0.9}},
+                   "click_target": {"type": "choice", "choice": head, "confidence": 0.9, "probabilities": {head: 0.9}}}
+        out = json.dumps({"model": "fake", "answers": answers}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(out)
+    def log_message(self, *a): pass
+
+@case
+def goal_repeat(c):
+    # page_goal hands back when the fast model clicks the same header over and over (it opens and closes, so the
+    # page "changes" each time), and each step tells it what appeared: the options a section opened onto.
+    httpd = socketserver.TCPServer(("127.0.0.1", 8804), LoopingJev)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    m = MCP({"TYPESAFE_API_KEY": "test", "TYPESAFE_URL": "http://127.0.0.1:8804/"})
+    try:
+        ok, out = m.call("page_goal", tab=c.tab, goal="Show gold laptops", max_steps=20)
+        if "went back to how it was" not in out: raise Fail("not handed back on a repeat: " + out[:300])
+        n = len(re.findall(r"(?m)^\d+\. clicked", out))
+        if n > 3: open("/tmp/goal-out.txt", "w").write(out); raise Fail(f"{n} clicks before handing back")
+        if not any("Gold" in " ".join(a["controls_appeared"]) for a in LoopingJev.seen): raise Fail("never told the options appeared")
+    finally:
+        m.p.stdin.close(); httpd.shutdown(); httpd.server_close()
+    return True
+
+@case
+def find(c):
+    # Words found anywhere on the page, in a panel's scrolled-out part too, with refs that act as they are.
+    ok, out = c.do("page_read", find="Windows 11|16 GB")
+    if not ok or "Windows 11" not in out or "16 GB" not in out: raise Fail("not found: " + out[:400])
+    if 'checkbox "Chrome OS"' in out: raise Fail("listed a control that doesn't match: " + out[:400])
+    ok, hp = c.do("page_read", find="HP")
+    if 'checkbox "HP" (in "Brand")' not in hp: raise Fail("a short option's group isn't the heading just above it: " + hp[:500])
+    r = re.search(r"\[(\w+)\] checkbox \"Windows 11\"", out)
+    if not r: raise Fail("no ref for Windows 11: " + out[:400])
+    c.must("page_do", steps=[{"click": r.group(1)}])
+    ok, none = c.do("page_read", find="Purple")
+    if "Nothing on the whole page" not in none: raise Fail("a missing word wasn't said to be missing: " + none[:200])
+    return c.result().get("os:w11") is True
+
 @case
 def popup(c):
     ok, out = c.do("page_click", ref=ref(c.look(), "link", "Open help"))
@@ -713,7 +760,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)
