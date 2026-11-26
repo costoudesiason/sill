@@ -2040,7 +2040,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 31) return;
+      if (window.__sillAgent && window.__sillAgent.v === 32) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -2341,6 +2341,12 @@ enum AgentScript {
         // One thing, or nested parts of one thing (a group and its field): that. Otherwise it's a guess: say so.
         const apart = tied.filter((el) => !tied.some((other) => other !== el && contains(other, el)));
         if (apart.length > 1) { const one = frontmost(apart); if (one) { lastScore = score; return one; } }
+        // Several hold the words, but one is mostly those words ("…, Round Trip" beside deal cards that mention
+        // "Round Trip" among much else): that one is what a person means. Close ones stay a question.
+        if (apart.length > 1 && score < 3) {
+          const cover = apart.map((el) => ({ el, c: want.length / Math.max(want.length, name(el).length) })).sort((a, b) => b.c - a.c);
+          if (cover[0].c >= 0.3 && cover[0].c >= 2 * cover[1].c) { lastScore = score; return cover[0].el; }
+        }
         if (apart.length > 1) {
           lastAmbiguous = apart.slice(0, 6).map((el) => { const n = name(el).slice(0, 70), w = within(el, n); return { ref: refOf(el), role: role(el), name: w ? n + ' (in ' + w + ')' : n }; });
           return null;
@@ -2401,7 +2407,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 31,
+        v: 32,
         // The page as a person sees it, in reading order: headings, the text around the
         // controls (prices, results, messages), every control (including ones made clickable
         // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.
