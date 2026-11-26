@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>A long list</title>
+<style>body{font:15px system-ui;margin:24px;max-width:700px} .card{border:1px solid #ccc;padding:10px;margin:8px 0}</style></head>
+<body>
+<h1>Leaderboard</h1>
+<p id="count"></p>
+<div id="list"></div>
+<nav id="pager" aria-label="Pagination"></nav>
+<script>
+const mode = new URLSearchParams(location.search).get('mode') || 'pages';
+const page = +(new URLSearchParams(location.search).get('page') || 1);
+const list = document.getElementById('list');
+let shown = 0;
+function add(k) { for (let i = 0; i < k; i++) { shown++; const d = document.createElement('div'); d.className = 'card'; d.textContent = 'Rank ' + shown + ' · Maker number ' + shown + ' · ' + (1000 - shown) + ' points'; list.appendChild(d); } }
+if (mode === 'pages') {
+  shown = (page - 1) * 20; add(20);
+  document.getElementById('count').textContent = 'Showing ' + ((page - 1) * 20 + 1) + '–' + page * 20 + ' of 1,000 makers';
+  const nav = document.getElementById('pager');
+  nav.innerHTML = [1, 2, 3].map((p) => '<a href="?mode=pages&page=' + p + '"' + (p === page ? ' aria-current="page"' : '') + '>' + p + '</a>').join(' ') + ' … <a href="?mode=pages&page=50">50</a> <a rel="next" href="?mode=pages&page=' + (page + 1) + '">Next</a>';
+} else if (mode === 'more') {
+  add(20);
+  const b = document.createElement('button'); b.textContent = 'Load more'; b.onclick = () => add(20); document.body.appendChild(b);
+} else if (mode === 'scroll') {
+  add(40);
+  addEventListener('scroll', () => { if (innerHeight + scrollY > document.body.scrollHeight - 400 && shown < 200) add(20); });
+} else {
+  add(12);
+  document.getElementById('count').textContent = '12 makers';
+}
+</script>
+</body></html>

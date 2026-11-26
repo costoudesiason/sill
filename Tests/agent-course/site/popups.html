@@ -1,0 +1,19 @@
+<!doctype html><meta charset=utf-8><title>Pop-ups</title><script src=kit.js></script>
+<style>.modal{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);background:#fff;border:1px solid #333;padding:24px;width:360px;box-shadow:0 4px 30px #0005}</style>
+<h1>Shop</h1>
+<button onclick="done('bought', true)">Add to basket</button>
+<button onclick="openSignIn()">Sign in</button>
+<script>
+setTimeout(() => {
+  const m = document.createElement('div'); m.className = 'modal'; m.id = 'news'; m.setAttribute('role', 'dialog');
+  m.innerHTML = '<h2>Get 10% off your first order</h2><p>Join our newsletter.</p><label>Email <input type=email></label> <button id=sub>Subscribe</button> <button id=no>No thanks</button>';
+  document.body.appendChild(m);
+  m.querySelector('#no').onclick = () => { m.remove(); done('newsletter', 'dismissed'); };
+  m.querySelector('#sub').onclick = () => done('newsletter', 'subscribed');
+}, 1200);
+function openSignIn() {
+  const m = document.createElement('div'); m.className = 'modal'; m.id = 'signin'; m.setAttribute('role', 'dialog'); m.style.top = '75%';
+  m.innerHTML = '<h2>Sign in</h2><p>Subscribe to our newsletter after signing in.</p><label>Email <input type=email></label> <label>Password <input type=password></label> <button onclick="this.closest(\'.modal\').remove()">Close</button>';
+  document.body.appendChild(m);
+}
+</script>

@@ -276,11 +276,18 @@ Built in `Sources/sill-mcp/Check.swift`, tested by the `answer-check` course cas
    each dropdown's choice and the sort, applied-filter chips, what's typed in fields, the result
    count and range, and the address's own settings. After an action it appears only when it
    changed, so it costs nothing when nothing moved.
-3. **Next, how far through:** on every list, where it ends and how to get the rest.
-4. **Prediction:** the conditions known early make every read point at them, so Claude
+3. **Done: how far through.** A `List:` line on pages with a list: how many alike items, which
+   are in view, the total the page states, and the way to the rest (next page, load more,
+   numbered pages) or that the page ends there.
+4. **Done: pop-ups cleared on sight.** Every page read first turns down a cookie banner the
+   privacy-keeping way (never accepts) and closes newsletter, discount, app and notification
+   pop-ups, and says so. It never touches a sign-in or anything Claude just opened.
+5. **Done: a picture when a step fails.** A small screenshot comes back with any failed step
+   or misplaced click, so Claude sees the page instead of guessing.
+6. **Prediction:** the conditions known early make every read point at them, so Claude
    goes straight to the right control or line. Site notes and habits do the same for the
    route.
-5. **The persistence ladder**, as a rule `answer_check` enforces: "not on the web" only with
+7. **The persistence ladder**, as a rule `answer_check` enforces: "not on the web" only with
    the routes tried.
-6. **Evidence on disk** and resume, for jobs that run for hours.
-7. **Odysseys2** against the published scores, from a clean network.
+8. **Evidence on disk** and resume, for jobs that run for hours.
+9. **Odysseys2** against the published scores, from a clean network.

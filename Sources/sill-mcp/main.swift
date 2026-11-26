@@ -251,6 +251,9 @@ func compactSnapshot(_ result: Any, boxes: Bool = false) -> String {
             case "text": lines.append((text.hasPrefix("[") || text.hasPrefix("#") || text.hasPrefix("!") ? "· " : "") + text)
             case "page": pageInfo = element
             case "state": lines.insert("State: " + text, at: min(2, lines.count))
+            case "list":
+                let at = lines.firstIndex(where: { $0.hasPrefix("State: ") }).map { $0 + 1 } ?? min(2, lines.count)
+                lines.insert("List: " + text, at: at)
             case "form": lines.insert("Form → \(text)  (fill the {…} and open it: no typing or clicking)", at: min(2, lines.count))
             case "scroll":
                 var line = "[\(element["ref"] as? String ?? "")] scroll area"
@@ -333,6 +336,9 @@ func compactSnapshot(_ result: Any, boxes: Bool = false) -> String {
     if let dialog = page["dialog"] as? [String: Any] {
         lines.insert("⚠ The page is showing a \(dialog["kind"] ?? "dialog"): “\(dialog["message"] ?? "")”. Nothing else works until it's answered: page_dialog accept=true or false.", at: 2)
         return lines.joined(separator: "\n")
+    }
+    if let cleared = page["cleared"] as? [String], !cleared.isEmpty {
+        lines.insert("Out of the way first: " + cleared.joined(separator: "; ") + ".", at: min(2, lines.count))
     }
     if let walls = page["walls"] as? [String], walls.contains("blocked by the site") {
         lines.insert("⚠ The site is refusing this browser here (a security block, or not offered in this region). Nobody can clear it from this page: use another source for the same thing, or tell the user what blocked it.", at: 2)
@@ -1360,6 +1366,20 @@ func listing(_ tool: Tool) -> [String: Any] {
                      "idempotentHint": tool.readOnly, "openWorldHint": tool.openWorld]]
 }
 
+/// A small picture of the tab, for when words weren't enough: a step that failed, a click that
+/// landed elsewhere or reached nothing. The agent sees what's actually there instead of guessing.
+let actingTools: Set<String> = ["page_do", "page_click", "page_type", "page_select", "page_press", "page_hover", "page_drag",
+                                "page_touch", "page_scroll", "page_goal", "page_navigate", "tabs_open"]
+func glance(_ sill: Sill, tab: Any?) -> [String: Any]? {
+    var args: [String: Any] = ["maxWidth": 900, "quality": 0.6, "remember": false]
+    if let tab { args["tab"] = tab }
+    guard let r = (try? sill.run("page.screenshot", args)) as? [String: Any], let data = (r["data"] ?? r["png"]) as? String else { return nil }
+    return ["type": "image", "data": data, "mimeType": r["mimeType"] as? String ?? "image/jpeg"]
+}
+func wentWrong(_ said: String) -> Bool {
+    said.contains("⚠ No click reached") || said.contains("⚠ The click landed on") || said.contains("Stopped at step") || said.contains("✗ ")
+}
+
 /// The answer to one JSON-RPC message, or nil for a notification.
 func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
     let method = message["method"] as? String ?? ""
@@ -1400,6 +1420,11 @@ func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
                let last = content.lastIndex(where: { $0["type"] as? String == "text" }), let said = content[last]["text"] as? String {
                 content[last]["text"] = said + "\n(read at \(readStamp()))"
             }
+            if actingTools.contains(name), wentWrong(content.compactMap { $0["text"] as? String }.joined(separator: "\n")),
+               let picture = glance(sill, tab: arguments["tab"]) {
+                content.append(picture)
+                content.append(["type": "text", "text": "(the tab as it is now, since a step didn't go as planned)"])
+            }
             if Evidence.readingTools.contains(name) {
                 Evidence.add(tool: name, text: content.compactMap { $0["text"] as? String }.joined(separator: "\n"))
             }
@@ -1410,7 +1435,12 @@ func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
             return result(["content": content])
         } catch let failure as Failure {
             if Trace.dir != nil, !Trace.quiet.contains(name) { Trace.record(sill, tab: arguments["tab"], action: Trace.describe(name, arguments), result: "failed: " + failure.message) }
-            return result(["content": [["type": "text", "text": failure.message]], "isError": true])
+            var said: [[String: Any]] = [["type": "text", "text": failure.message]]
+            if actingTools.contains(name), let picture = glance(sill, tab: arguments["tab"]) {
+                said.append(picture)
+                said.append(["type": "text", "text": "(the tab as it is now)"])
+            }
+            return result(["content": said, "isError": true])
         } catch let failure {
             return result(["content": [["type": "text", "text": failure.localizedDescription]], "isError": true])
         }

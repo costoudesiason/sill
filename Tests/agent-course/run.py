@@ -397,9 +397,10 @@ def pdf(c):
 def recalculate(c):
     # Off course and back without a turn: a consent banner in the way is turned down (never accepted),
     # and a click that went to another page is undone when the next target was on this one.
-    out = c.must("page_do", steps=[{"click": "Download report"}])
-    if "recalculated" not in out: raise Fail("no recalculation: " + out[:300])
+    # The banner is turned down as soon as the page is read, before any click needs it gone.
     if c.result().get("choice") != "rejected": raise Fail(f"banner: {c.result()}")
+    out = c.must("page_do", steps=[{"click": "Download report"}])
+    if c.result().get("clickedTarget") is not True: raise Fail("the click under the banner didn't land: " + out[:300])
     out = c.must("page_do", steps=[{"click": "Open details"}, {"click": "Add to list"}])
     if "went back" not in out: raise Fail("no way back: " + out[:300])
     return c.result().get("added") is True
@@ -432,8 +433,8 @@ def drawn_select(c):
 def month_paging(c):
     # A date months ahead in a one-month calendar: paged to by its arrows; a day the page marks unavailable is
     # said to be so, not "chosen"; an amount written another way ("$100" for "$100.00") still found.
-    c.must("page_do", steps=[{"select": "Amount", "value": "$100"}, {"date": "2027-02-14"}])
-    if c.result().get("date") != "2027-02-14" or c.result().get("amount") != "100": raise Fail(f"got {c.result()}")
+    first = c.must("page_do", steps=[{"select": "Amount", "value": "$100"}, {"date": "2027-02-14"}])
+    if c.result().get("date") != "2027-02-14" or c.result().get("amount") != "100": raise Fail(f"got {c.result()}: {first[:900]}")
     ok, out = c.do("page_do", steps=[{"date": "2026-12-25"}])
     if "unavailable" not in out: raise Fail("an unavailable day wasn't reported: " + out[:300])
     return True
@@ -551,6 +552,49 @@ def page_state(c):
     st = next((l for l in out.splitlines() if "State: " in l), "")
     for want in ("Nonstop", "tab: Cheapest", "Price (lowest)", "1–20 of 312", "applied: Nonstop"):
         if want not in st: raise Fail(f"state after acting misses {want!r}: {st or out[:600]}")
+    return True
+
+@case
+def list_end(c):
+    # How far through: how many items, the total the page claims, the way to the rest, or that there's none.
+    def line(out): return next((l for l in out.splitlines() if l.startswith("List: ") or l.startswith("+ List: ")), "")
+    ok, out = c.do("page_navigate", url=A + "list.html?mode=pages")
+    l = line(out)
+    for want in ("20 alike items", "1,000 in all", "Next", "numbered pages up to 50"):
+        if want not in l: raise Fail(f"pages: list line misses {want!r}: {l or out[:500]}")
+    ok, out = c.do("page_navigate", url=A + "list.html?mode=more")
+    l = line(out)
+    if "Load more" not in l: raise Fail(f"load more: {l or out[:500]}")
+    ok, out = c.do("page_navigate", url=A + "list.html?mode=scroll")
+    l = line(out)
+    if "more may load as you scroll" not in l: raise Fail(f"endless scroll: {l or out[:500]}")
+    ok, out = c.do("page_navigate", url=A + "list.html?mode=end")
+    l = line(out)
+    if "page ends here" not in l or "12 alike items" not in l: raise Fail(f"the end: {l or out[:500]}")
+    return True
+
+@case
+def popups(c):
+    # A newsletter pop-up closed ("No thanks", never Subscribe) as the page is read; a sign-in dialog
+    # the agent opened itself is left for it to use.
+    time.sleep(1.6)   # it shows up after the page has loaded, as they do
+    ok, out = c.do("page_read")
+    if c.result().get("newsletter") != "dismissed": raise Fail(f"newsletter: {c.result()} {out[:400]}")
+    if "Out of the way first: a pop-up (\"No thanks\")" not in out: raise Fail("didn't say what it closed: " + out[:400])
+    ok, out = c.do("page_do", steps=[{"click": "Sign in"}])
+    ok, out = c.do("page_read")
+    if "Password" not in out: raise Fail("the sign-in the agent opened was closed: " + out[:500])
+    c.must("page_do", steps=[{"click": "Add to basket"}])
+    return c.result().get("bought") is True
+
+@case
+def failure_picture(c):
+    # A step that fails comes back with a picture of the tab, so the agent sees what's there.
+    r = c.m.rpc("tools/call", {"name": "page_do", "arguments": {"tab": c.tab, "steps": [{"click": "A button that is not on this page"}]}}).get("result", {})
+    kinds = [x.get("type") for x in r.get("content", [])]
+    if "image" not in kinds: raise Fail(f"no picture with the failure: {kinds} {str(r)[:300]}")
+    r = c.m.rpc("tools/call", {"name": "page_read", "arguments": {"tab": c.tab}}).get("result", {})
+    if any(x.get("type") == "image" for x in r.get("content", [])): raise Fail("a picture with a plain read: pictures are only for when something went wrong")
     return True
 
 @case
@@ -788,7 +832,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)

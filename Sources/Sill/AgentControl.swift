@@ -704,6 +704,13 @@ enum AgentCommands {
                 return answer
             }
             let all = args["all"] as? Bool ?? false
+            // What's in the way first (a cookie banner, a newsletter pop-up), so the page is read as it is under them.
+            var cleared: [String] = []
+            if args["clear"] as? Bool != false, view.openDialog == nil,
+               let closed = try? await evaluate("return window.__sillAgent.clearWay()", in: view, world: Web.world) as? [String], !closed.isEmpty {
+                cleared = closed
+                if closed.contains(where: { !$0.hasPrefix("a cookie banner is up") }) { try? await Task.sleep(nanoseconds: 250_000_000) }
+            }
             // Mid-navigation (a redirect, a new document) the script answers
             // nothing: wait for the page and look again, never report an empty page.
             var listed = try? await evaluate("return window.__sillAgent.snapshot(all)", in: view, world: Web.world,
@@ -725,6 +732,7 @@ enum AgentCommands {
             elements += await page.frameElements(all: all)
             answer["elements"] = elements
             answer["walls"] = (try? await evaluate("return window.__sillAgent.walls()", in: view, world: Web.world)) as? [String] ?? []
+            if !cleared.isEmpty { answer["cleared"] = cleared }
             return answer
 
         case "page.click":
@@ -1958,7 +1966,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 17) return;
+      if (window.__sillAgent && window.__sillAgent.v === 19) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -2292,7 +2300,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 17,
+        v: 19,
         // The page as a person sees it, in reading order: headings, the text around the
         // controls (prices, results, messages), every control (including ones made clickable
         // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.
@@ -2485,6 +2493,7 @@ enum AgentScript {
             if (span) counts.push(span[1] + '–' + span[2] + ' of ' + span[3]);
             const total = body.match(/(?<![\d:.,$£€])\b(\d[\d,]*\+?)\s+(results?|matches|items|listings|properties|stays|homes|products|jobs|courses|flights|hotels|rentals|places|reviews|options|vehicles|cars|events|articles|models|repositories|recipes)\b/i);
             if (total && !(span && span[3].replace(/\D/g, '') === total[1].replace(/\D/g, ''))) counts.push(total[1] + ' ' + total[2]);
+            const total0 = total;
             const pages = body.match(/\bpage\s+(\d+)\s+of\s+(\d+)\b/i);
             if (pages) counts.push('page ' + pages[1] + ' of ' + pages[2]);
             let address = '';
@@ -2507,6 +2516,49 @@ enum AgentScript {
             if (counts.length) parts.push(counts.join(', '));
             if (address) parts.push('address ?' + address);
             if (parts.length) items.push({ context: 'state', text: parts.join(' · ').slice(0, 700) });
+
+            // How far through: how many alike items (results, rows, cards) the page holds, which are in
+            // view, the total it claims, and the way to the rest (next, load more, numbered pages) or
+            // that there is none. The agent never stops at 100 of 1,000 believing it has them all.
+            const listParts = [];
+            const n = recs.length >= 3 ? recs.length : 0;
+            let listTotal = null;
+            if (span) listTotal = span[3]; else if (total0) listTotal = total0[1];
+            const sizes = recs.slice(0, 3).map((r) => r.getAttribute('aria-setsize') || (r.parentElement && (r.parentElement.getAttribute('aria-rowcount') || r.parentElement.getAttribute('aria-setsize')))).filter((v) => v && +v > 0);
+            if (!listTotal && sizes.length) listTotal = sizes[0];
+            if (n) {
+              let first = -1, last = -1;
+              recs.forEach((r, i) => { const b = r.getBoundingClientRect(); if (b.bottom > 0 && b.top < innerHeight && b.height > 0) { if (first < 0) first = i; last = i; } });
+              listParts.push(n + ' alike items on the page' + (first >= 0 ? ' (items ' + (first + 1) + '–' + (last + 1) + ' in view)' : ''));
+            }
+            if (listTotal) listParts.push('the page says ' + listTotal + ' in all');
+            let nextEl = null, nextOff = false, more = null, maxPage = 0;
+            walk(document.body || document.documentElement, 0, 0, (el) => {
+              if (/^(SCRIPT|STYLE|TEMPLATE|NOSCRIPT|SVG)$/i.test(el.tagName)) return;   // (false would end the whole walk)
+              const tag = el.tagName, r = el.getAttribute('role');
+              if (!(tag === 'A' || tag === 'BUTTON' || r === 'link' || r === 'button' || (tag === 'INPUT' && /^(button|submit)$/.test(el.type)))) return;
+              const label = clean(el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.value || '');
+              const off = el.disabled || el.getAttribute('aria-disabled') === 'true' || /\bdisabled\b/i.test(el.className || '');
+              if (!nextEl && (el.getAttribute('rel') === 'next' || /^(next|next page|go to next page|next results|more results|older posts|older|›|»|→|>|>>)$/i.test(label) || /^next\b.{0,20}$/i.test(label))) {
+                if (off) nextOff = true; else if (seen(el) || el.getBoundingClientRect().height > 0) nextEl = el;
+                return;
+              }
+              if (!more && !off && /^(load|show|see|view)\s+(\d+\s+)?more\b|^more\s+(results|items|reviews|products)$|^show all\b|^see all results\b/i.test(label) && label.length < 50) { more = el; return; }
+              if (/^\d{1,4}$/.test(label) && el.closest('nav, [role=navigation], [class*=pagin], [class*=Pagin], [aria-label*=agination], [aria-label*=pages]')) maxPage = Math.max(maxPage, +label);
+            });
+            const said = (el) => '[' + refOf(el) + '] ' + (role(el) || 'button') + ' "' + clean(name(el)).slice(0, 40) + '"';
+            if (nextEl) listParts.push('more on the next page: ' + said(nextEl));
+            if (more) listParts.push('more here: ' + said(more));
+            if (maxPage > 1) listParts.push('numbered pages up to ' + maxPage);
+            if (nextOff && !nextEl) listParts.push('next is disabled: this is the last page');
+            const se2 = document.scrollingElement || document.documentElement;
+            const below = Math.round(se2.scrollHeight - se2.scrollTop - innerHeight);
+            if (n && !nextEl && !more && !nextOff && maxPage <= 1) {
+              listParts.push(below > 300 ? 'no next or load-more control; more may load as you scroll down (' + below + 'px below)'
+                                         : 'no next or load-more control and the page ends here');
+            }
+            // Only for a list: alike items, or a total the page states. A calendar's "Next month" isn't a next page.
+            if (listParts.length && (n || listTotal)) items.push({ context: 'list', text: listParts.join(' · ').slice(0, 400) });
           }
           const se = document.scrollingElement || document.documentElement;
           items.push({ context: 'page', below: Math.max(0, Math.round(se.scrollHeight - se.scrollTop - innerHeight)), above: Math.round(se.scrollTop),
@@ -2640,6 +2692,7 @@ enum AgentScript {
           return opener ? { ref: refOf(active), name: name(active) } : null;
         },
         arm(ref, button) {
+          window.__sillAgentClickAt = performance.now();
           const el = find(ref); if (!el) return false;
           lastClicked = el;
           const doc = el.ownerDocument, win = doc.defaultView;
@@ -2825,6 +2878,66 @@ enum AgentScript {
           const form = el.form || el.closest('form');
           const button = form && form.querySelector('button[type=submit], input[type=submit], button:not([type])');
           return [name(el), button ? name(button) || button.value || '' : ''].filter(Boolean).join(' → ');
+        },
+        // What's in the way, cleared before the page is read: a cookie or consent banner turned
+        // down the privacy-keeping way (reject, necessary only, or closed; never accepted), and a
+        // newsletter, discount, app or notifications pop-up closed. Never a dialog with a password
+        // field (a sign-in), never one with fields beyond an email. Says what it closed.
+        clearWay() {
+          const out = [];
+          // Something the agent itself just opened (Subscribe, Cookie settings) is its to use: left alone.
+          if (window.__sillAgentClickAt && performance.now() - window.__sillAgentClickAt < 5000) return out;
+          const H = innerHeight, W = innerWidth;
+          const boxes = new Set();
+          const up = (n) => n && (n.parentElement || (n.getRootNode() && n.getRootNode().host));
+          const contain = (el) => {
+            for (let n = el, d = 0; n && n !== document.body && n !== document.documentElement && d < 25; n = up(n), d++) {
+              if (n.nodeType !== 1) continue;
+              const r = n.getAttribute('role');
+              if ((n.tagName === 'DIALOG' && n.open) || r === 'dialog' || r === 'alertdialog' || n.getAttribute('aria-modal') === 'true') return n;
+              const p = style(n).position;
+              if (p === 'fixed' || p === 'sticky') return n;
+            }
+            return null;
+          };
+          for (const [fx, fy] of [[0.5, 0.5], [0.5, 0.92], [0.5, 0.08], [0.15, 0.85], [0.85, 0.85], [0.5, 0.7], [0.5, 0.3]]) {
+            for (const hit of document.elementsFromPoint(W * fx, H * fy).slice(0, 6)) { const c = contain(hit); if (c) boxes.add(c); }
+          }
+          for (const el of document.querySelectorAll('dialog[open], [role=dialog], [role=alertdialog], [aria-modal=true], [id*=cookie i], [class*=cookie i], [id*=consent i], [class*=consent i]')) {
+            if (el.tagName === 'BODY' || el.tagName === 'HTML') continue;
+            const c = contain(el) || el; boxes.add(c);
+          }
+          const buttons = (box) => [...box.querySelectorAll('button, a, [role=button], input[type=button], input[type=submit]')].filter((b) => seen(b));
+          const label = (b) => clean(b.getAttribute('aria-label') || b.innerText || b.value || b.getAttribute('title') || '');
+          const done = new Set();
+          for (const box of boxes) {
+            if (done.has(box) || !box.isConnected || !seen(box)) continue;
+            if ([...done].some((d) => d.contains(box))) continue;
+            const b = box.getBoundingClientRect();
+            if (b.width < 160 || b.height < 30) continue;
+            if (box.querySelector('input[type=password]')) continue;
+            const text = clean(box.innerText).toLowerCase().slice(0, 3000);
+            if (!text) continue;
+            const fields = [...box.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]), textarea, select')].filter(seen);
+            const consent = /cookie|consent|gdpr|personal data|privacy (settings|preferences|choices)|your (privacy )?choices|we (and our partners )?use (cookies|technologies)|tracking technologies/.test(text) && fields.length === 0;
+            const promo = /newsletter|subscribe|sign up for (our|email|emails)|\d+% off|discount code|coupon|get the app|download (the|our) app|open in (the )?app|(enable|allow|turn on) (push )?notifications|exclusive offer|join (our|the) (list|club|mailing)|your first order/.test(text)
+                          && fields.every((f) => f.type === 'email' || /e-?mail/i.test(name(f) || f.name || ''));
+            if (!consent && !promo) continue;
+            const bs = buttons(box);
+            const pick = (re) => bs.find((x) => re.test(label(x)) && label(x).length <= 60);
+            let btn = null;
+            if (consent) btn = pick(/^(reject|decline|deny|refuse|disagree)( all| cookies| all cookies| optional cookies| non-essential( cookies)?)?$/i)
+                            || pick(/^(only |use )?(strictly )?(necessary|essential|required)( cookies)?( only)?$/i)
+                            || pick(/^(continue|proceed) without (accepting|agreeing)/i)
+                            || pick(/^(reject|decline|refuse)\b/i);
+            if (!btn) btn = pick(/^(close|dismiss|×|✕|✖|x|no,? thanks|no thank you|not now|maybe later|skip|continue to (the )?(site|website)|stay on (the )?(site|web))$/i)
+                            || bs.find((x) => /^(close|dismiss)\b/i.test(x.getAttribute('aria-label') || x.getAttribute('title') || ''));
+            if (!btn) { if (consent) out.push('a cookie banner is up and offers no way to turn it down: left it (Accept is the user\'s to choose)'); continue; }
+            btn.click();
+            done.add(box);
+            out.push((consent ? 'a cookie banner, turned down' : 'a pop-up') + ' ("' + label(btn).slice(0, 40) + '")');
+          }
+          return out;
         },
         walls() {
           const big = (f) => { const r = f.getBoundingClientRect(); return r.width > 100 && r.height > 60; };
