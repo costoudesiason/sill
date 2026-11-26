@@ -88,8 +88,11 @@ page's own controls when the site has one (a filter or sort, not just a word in 
 not a near one); and answer with the specifics (names, numbers, prices, dates), not just where they are. If a \
 condition can't be met, say which and why rather than settling for a near one silently. Before you answer, check \
 the result against each condition in the task as the page shows it (the right kind of item, every filter and its \
-exact value, the top or cheapest one meaning the very first by that sort): fix what's off, then answer. When the task \
-asks for a list, give the list.
+exact value, the top or cheapest one meaning the very first by that sort): fix what's off, then answer. When the site \
+has no control for a condition (no part-time filter, no price range), check it another way (each result's own page, a \
+keyword) rather than leaving it unchecked. When the task asks for a list, give the list. When you write what pages \
+say into a file or table, copy each field exactly as the page has it and keep your own notes in a field of their own; \
+a claim about every item ("none of them…") needs each one checked.
 
 Files: `files` finds the user's files with Spotlight (Desktop, Documents, Downloads, Pictures, Movies, Music, iCloud \
 Drive) and reads PDFs, Word, text; page_upload puts files into a page's file field. A file the user drops into this \
