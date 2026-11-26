@@ -1,0 +1,4 @@
+<!doctype html><meta charset=utf-8><title>News</title><script src=kit.js></script>
+<h1>Today's news</h1><p>The article.</p><button onclick="done('read', true)">Read more</button>
+<iframe id=cmp src="http://localhost:8802/consent-frame.html" title="Privacy choices" style="position:fixed;left:0;right:0;bottom:0;width:100%;height:160px;border:0;box-shadow:0 -2px 12px #0003"></iframe>
+<script>addEventListener('message', (e) => { if (e.data && e.data.close) document.getElementById('cmp').remove(); });</script>

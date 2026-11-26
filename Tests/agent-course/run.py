@@ -723,6 +723,15 @@ def closest_name(c):
     return True
 
 @case
+def frame_consent(c):
+    # A consent banner in a frame from another site: turned down (never accepted) as the page is read.
+    c.look()
+    r = c.result()
+    if r.get("choice") != "rejected": raise Fail(f"banner in a frame: {r}")
+    c.must("page_click", text="Read more")
+    return c.result().get("read") is True
+
+@case
 def popup(c):
     ok, out = c.do("page_click", ref=ref(c.look(), "link", "Open help"))
     ok2, tabs = c.m.call("tabs_list")
@@ -957,7 +966,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups", "needs": "state", "reroute": "empty", "page-map": "check", "ticking": "ticker", "grid-cells": "sheet", "stale-refs": "reloading-filters", "hidden-captcha": "hidden-captcha", "rounds": "rounds", "wait-input": "countdown", "closest-name": "closest-name"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups", "needs": "state", "reroute": "empty", "page-map": "check", "ticking": "ticker", "grid-cells": "sheet", "stale-refs": "reloading-filters", "hidden-captcha": "hidden-captcha", "rounds": "rounds", "wait-input": "countdown", "closest-name": "closest-name", "frame-consent": "frame-consent"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)

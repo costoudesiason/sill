@@ -726,10 +726,14 @@ enum AgentCommands {
             let all = args["all"] as? Bool ?? false
             // What's in the way first (a cookie banner, a newsletter pop-up), so the page is read as it is under them.
             var cleared: [String] = []
-            if args["clear"] as? Bool != false, view.openDialog == nil,
-               let closed = try? await evaluate("return window.__sillAgent.clearWay()", in: view, world: Web.world) as? [String], !closed.isEmpty {
-                cleared = closed
-                if closed.contains(where: { !$0.hasPrefix("a cookie banner is up") }) { try? await Task.sleep(nanoseconds: 250_000_000) }
+            if args["clear"] as? Bool != false, view.openDialog == nil {
+                var closed = (try? await evaluate("return window.__sillAgent.clearWay()", in: view, world: Web.world) as? [String]) ?? []
+                // A consent service's banner in a frame of its own (another site): the same, inside it.
+                closed += await AgentPage.of(view).clearFrames()
+                if !closed.isEmpty {
+                    cleared = closed
+                    if closed.contains(where: { !$0.hasPrefix("a cookie banner is up") }) { try? await Task.sleep(nanoseconds: 250_000_000) }
+                }
             }
             // Mid-navigation (a redirect, a new document) the script answers
             // nothing: wait for the page and look again, never report an empty page.
@@ -2040,7 +2044,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 32) return;
+      if (window.__sillAgent && window.__sillAgent.v === 33) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -2407,7 +2411,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 32,
+        v: 33,
         // The page as a person sees it, in reading order: headings, the text around the
         // controls (prices, results, messages), every control (including ones made clickable
         // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.
@@ -3105,7 +3109,7 @@ enum AgentScript {
         // down the privacy-keeping way (reject, necessary only, or closed; never accepted), and a
         // newsletter, discount, app or notifications pop-up closed. Never a dialog with a password
         // field (a sign-in), never one with fields beyond an email. Says what it closed.
-        clearWay() {
+        clearWay(whole) {
           const out = [];
           // Something the agent itself just opened (Subscribe, Cookie settings) is its to use: left alone.
           if (window.__sillAgentClickAt && performance.now() - window.__sillAgentClickAt < 5000) return out;
@@ -3125,6 +3129,8 @@ enum AgentScript {
           for (const [fx, fy] of [[0.5, 0.5], [0.5, 0.92], [0.5, 0.08], [0.15, 0.85], [0.85, 0.85], [0.5, 0.7], [0.5, 0.3]]) {
             for (const hit of document.elementsFromPoint(W * fx, H * fy).slice(0, 6)) { const c = contain(hit); if (c) boxes.add(c); }
           }
+          // In a frame that is itself the banner (a consent service's own frame), the whole document is the box.
+          if (whole && document.body) boxes.add(document.body);
           for (const el of document.querySelectorAll('dialog[open], [role=dialog], [role=alertdialog], [aria-modal=true], [id*=cookie i], [class*=cookie i], [id*=consent i], [class*=consent i]')) {
             if (el.tagName === 'BODY' || el.tagName === 'HTML') continue;
             const c = contain(el) || el; boxes.add(c);
@@ -3135,6 +3141,7 @@ enum AgentScript {
           for (const box of boxes) {
             if (done.has(box) || !box.isConnected || !seen(box)) continue;
             if ([...done].some((d) => d.contains(box))) continue;
+            if (box === document.body && !whole) continue;
             const b = box.getBoundingClientRect();
             if (b.width < 160 || b.height < 30) continue;
             if (box.querySelector('input[type=password]')) continue;

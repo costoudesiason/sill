@@ -236,6 +236,19 @@ final class AgentPage {
     /// page coordinates. Fast by design: frames too small to hold a control (ad
     /// and tracking frames) are skipped, the rest asked at once, each given half
     /// a second, and a frame with nothing in it isn't asked again for a while.
+    /// Banners in frames from other sites (a consent service's own frame): turned down there, as on the page.
+    /// Only frames big enough to be a banner, each given half a second.
+    func clearFrames() async -> [String] {
+        var out: [String] = []
+        for frame in frames.values.sorted(by: { $0.index < $1.index }) {
+            guard let at = try? await offsetAndSize(of: frame), at.w >= 200, at.h >= 80 else { continue }
+            if let said = (try? await evaluate("window.__sillAgent.clearWay(true)", in: frame, timeout: 0.5)) as? [String] {
+                out += said.map { $0 + " (in a frame from \(URL(string: frame.url)?.host ?? "another site"))" }
+            }
+        }
+        return out
+    }
+
     func frameElements(all: Bool) async -> [[String: Any]] {
         let now = Date()
         emptyFrames = emptyFrames.filter { now.timeIntervalSince($0.value) < 5 }
