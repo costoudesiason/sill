@@ -76,7 +76,7 @@ silently, and nothing waits for you.
 Benchmarks grade against hidden rubrics. The brief is Sill writing its own rubric first.
 
 - **Exists:** `history_search`, habits, `files` and site notes give the context.
-- **New:** the spec as a stored object, written by the strongest model.
+- **New:** the spec as a stored object. Claude writes it, since Claude already knows you.
 
 ### 2. Plan: route
 
@@ -127,7 +127,9 @@ What it makes possible:
 
 ### 5. Check: an independent verifier
 
-A fresh model that didn't do the work reads the spec, the ledger and the deliverable. For each
+Two layers. Sill checks mechanically: it re-reads every cited page and flags requirements
+with no evidence or stale evidence. Then Claude, in a fresh pass (a subagent in Claude Code),
+judges each requirement against the ledger. Together they read the spec, the ledger and the deliverable. For each
 requirement it decides whether it is met, unmet or unproven:
 
 - **Evidence that matters is re-checked:** the price, the date, the filter actually applied.
@@ -221,21 +223,33 @@ few:
 
 ## Where it runs
 
-**Recommendation: Sill owns the task runtime.** Its loop calls models directly:
+**Claude runs the task; Sill keeps it honest and durable.** You message Claude (claude.ai or
+Claude Code) because it already knows you: your memory, your projects, how you like things.
+So Claude does the thinking: Brief, Plan, the judgment in Check, and Deliver. Sill doesn't run
+its own model loop. It gives Claude the pieces a chat can't hold by itself, as tools:
 
-- the strongest model for Brief, Plan and Check;
-- Sonnet 5.5 for workers;
-- Jev for mechanical steps.
+| Tool | What it does |
+|---|---|
+| `task_start` | Claude writes the spec (requirements, deliverable, limits, readings chosen); Sill stores it and gives back a task id |
+| `ledger_add` | Record a fact against a requirement. Sill attaches the page, the exact text, the time and a screenshot crop itself, so evidence can't be paraphrased |
+| `ledger_read` | The spec, progress, evidence and routes tried, so a new chat or a worker can pick the task up |
+| `task_check` | Sill's mechanical check: which requirements have no evidence, whose evidence is old, and whether each quoted value is still on its page (it re-reads them). Claude then judges the rest |
+| `task_finish` | Hands back the deliverable built from the ledger. It refuses while a requirement has no evidence and no record of the ladder being climbed |
 
-Outside agents get one `delegate` tool that returns the result with its ledger. Today's
-fine-grained tools stay for clients that want to drive themselves.
+Parallel work stays in Claude's hands too:
 
-Why Sill rather than the client:
+- **claude.ai:** `tabs_open errands=[…]` with Jev.
+- **Claude Code:** subagents, each with its own tab, all writing to the same ledger.
 
-- The ledger, the resume after sleep and the parallel workers have to live somewhere that
-  outlasts one chat.
-- It keeps behaviour the same no matter which client asked: Claude Code, claude.ai or a
-  script.
+A task survives the chat ending, the Mac sleeping or Claude's context filling up: Claude reads
+the ledger and carries on.
+
+Why this way round:
+
+- Claude already has your context and memory, so the Brief is right from the start.
+- You keep talking to the assistant you already use.
+- What has to outlast one chat (the spec, the evidence, the progress) lives in Sill, where it's
+  safe.
 
 ## Measuring it
 
@@ -254,10 +268,12 @@ Why Sill rather than the client:
 
 ## Build order
 
-1. **Ledger and spec as stored objects.** Everything else reads and writes them.
-2. **Checker**, run against the spec and ledger. It's the biggest jump in being right, and it
-   works with today's single loop before workers exist.
+1. **`task_start`, `ledger_add`, `ledger_read`.** The spec and evidence as stored objects; everything
+   else reads and writes them.
+2. **`task_check` and `task_finish`,** plus Sill's instructions telling Claude to brief, record
+   and check. It's the biggest jump in being right, and it works in one chat before any
+   parallel work.
 3. **The persistence ladder** inside Plan.
 4. **Workers in parallel** sharing the ledger, plus resume after sleep or crash.
 5. **Learning written back** after every task.
-6. **The `delegate` tool**, then Odysseys2 against the published scores.
+6. **Odysseys2** against the published scores, from a clean network.
