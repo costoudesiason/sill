@@ -251,9 +251,13 @@ func compactSnapshot(_ result: Any, boxes: Bool = false) -> String {
             case "record": lines.append(text)
             case "text": lines.append((text.hasPrefix("[") || text.hasPrefix("#") || text.hasPrefix("!") ? "· " : "") + text)
             case "page": pageInfo = element
-            case "state": lines.insert("State: " + text, at: min(2, lines.count))
+            // The page's map first, then what it's set to, then how far through its list.
+            case "map": lines.insert("Page: " + text, at: min(2, lines.count))
+            case "state":
+                let at = lines.firstIndex(where: { $0.hasPrefix("Page: ") }).map { $0 + 1 } ?? min(2, lines.count)
+                lines.insert("State: " + text, at: at)
             case "list":
-                let at = lines.firstIndex(where: { $0.hasPrefix("State: ") }).map { $0 + 1 } ?? min(2, lines.count)
+                let at = lines.lastIndex(where: { $0.hasPrefix("State: ") || $0.hasPrefix("Page: ") }).map { $0 + 1 } ?? min(2, lines.count)
                 lines.insert("List: " + text, at: at)
             case "form": lines.insert("Form → \(text)  (fill the {…} and open it: no typing or clicking)", at: min(2, lines.count))
             case "scroll":
@@ -1238,6 +1242,20 @@ func recalculate(_ sill: Sill, _ failure: Failure, tab: [String: Any], wentAway:
             return "pressed Escape to close what was in the way"
         }
         return nil
+    }
+    // The page went blank or is arriving again (a bot check reloading it, a redirect by script): not a wrong
+    // turn. Wait for the target itself to show, up to 10 s, then the same step again.
+    if lower.hasPrefix("nothing on the page matches"), lower.contains("nothing to act on in view"),
+       let r = failure.message.range(of: #"“[^”]+”"#, options: .regularExpression) {
+        let target = String(failure.message[r]).trimmingCharacters(in: CharacterSet(charactersIn: "“”"))
+        if (try? sill.run("page.wait", tab.merging(["text": target, "timeout": 6]) { $1 })) != nil {
+            return "waited for the page to come back (“\(clip(target, 40))” showed)"
+        }
+        // Still blank: what a person does, reload once, and wait for it again.
+        _ = try? sill.run("page.reload", tab)
+        if (try? sill.run("page.wait", tab.merging(["text": target, "timeout": 8]) { $1 })) != nil {
+            return "the page stayed blank, so reloaded it (“\(clip(target, 40))” showed)"
+        }
     }
     if lower.hasPrefix("nothing on the page matches") && wentAway {
         _ = try? sill.run("page.back", tab)

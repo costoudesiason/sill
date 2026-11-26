@@ -632,6 +632,23 @@ def reroute(c):
     return True
 
 @case
+def page_map(c):
+    # What kind of page it is and where its parts are, as a person sees at a glance.
+    def page(url):
+        ok, out = c.do("page_navigate", url=A + url)
+        return next((l for l in out.splitlines() if l.startswith("Page: ")), "") or out[:400]
+    p = page("shop.html")
+    for want in ("results", "search [", '= "laptop"', "Brand (3)", "Price (2)", "Customer rating (2)", "sort ["):
+        if want not in p: raise Fail(f"results page misses {want!r}: {p}")
+    p = page("item.html")
+    if not p.startswith("Page: item") or "Add to cart [" not in p: raise Fail("item page: " + p)
+    p = page("signin.html")
+    if not p.startswith("Page: sign-in") or "password [" not in p: raise Fail("sign-in page: " + p)
+    p = page("pay.html")
+    if not p.startswith("Page: checkout") or "card number [" not in p: raise Fail("checkout page: " + p)
+    return True
+
+@case
 def popup(c):
     ok, out = c.do("page_click", ref=ref(c.look(), "link", "Open help"))
     ok2, tabs = c.m.call("tabs_list")
@@ -866,7 +883,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups", "needs": "state", "reroute": "empty"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups", "needs": "state", "reroute": "empty", "page-map": "check"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)

@@ -720,6 +720,21 @@ enum AgentCommands {
                 listed = try? await evaluate("return window.__sillAgent.snapshot(all)", in: view, world: Web.world,
                                              arguments: ["all": all]) as? [[String: Any]]
             }
+            // Nothing at all on a page that says it's loaded: an interstitial (a bot check that clears itself,
+            // a redirect by script) or a page still drawing itself. Give it up to 4 s to move on or fill in.
+            let substance: ([[String: Any]]?) -> Bool = { list in
+                (list ?? []).contains { e in (e["context"] as? String).map { !["page", "state", "list", "map"].contains($0) } ?? true }
+            }
+            if listed != nil, !substance(listed) {
+                let start = Date(), from = view.url
+                while Date().timeIntervalSince(start) < 4 {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    if view.isLoading || view.url != from { try? await waitForReadable(tab, timeout: 6) }
+                    let again = try? await evaluate("return window.__sillAgent.snapshot(all)", in: view, world: Web.world,
+                                                    arguments: ["all": all]) as? [[String: Any]]
+                    if substance(again) { listed = again; break }
+                }
+            }
             var elements = listed ?? []
             // Still arriving with nothing to act on yet: say so. A parsed page still fetching images is ready.
             if listed == nil || (elements.isEmpty && view.isLoading) { answer["loading"] = true }
@@ -757,6 +772,12 @@ enum AgentCommands {
                 armed = (try? await evaluate("return window.__sillAgent.arm(ref, button)", in: view, world: Web.world,
                                              arguments: ["ref": armRef, "button": args["button"] as? String ?? "left"])) as? Bool == true
             } else { armed = false }
+            // Something that opens, closed now: if the click leaves it closed, the page wasn't ready (a page
+            // drawn on the server whose script hadn't taken over yet): once more after a moment, as a person would.
+            var opens = false
+            if !double, (args["button"] as? String ?? "left") == "left", target.frame == nil, target.backend == nil, target.ref.hasPrefix("e") {
+                opens = (try? await evaluate("return window.__sillAgent.expanded(ref)", in: view, world: Web.world, arguments: ["ref": target.ref])) as? String == "false"
+            }
             do {
                 try await click(at: target.x, target.y, in: view, count: double ? 2 : 1,
                                 button: args["button"] as? String ?? "left", hold: args["hold"] as? Double ?? 0,
@@ -773,6 +794,17 @@ enum AgentCommands {
                 }
             }
             await settle(tab, view, since: started)
+            if opens, view.openDialog == nil {
+                let js = "return window.__sillAgent.expanded(ref)"
+                if (try? await evaluate(js, in: view, world: Web.world, arguments: ["ref": target.ref])) as? String == "false" {
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                    if (try? await evaluate(js, in: view, world: Web.world, arguments: ["ref": target.ref])) as? String == "false", let r = try? await evaluate("return window.__sillAgent.rect(ref)", in: view, world: Web.world, arguments: ["ref": target.ref]) as? [String: Any],
+                       let x = r["x"] as? Double, let y = r["y"] as? Double, let w = r["w"] as? Double, let h = r["h"] as? Double {
+                        try? await click(at: x + w / 2, y + h / 2, in: view, count: 1, button: "left", hold: 0, modifiers: modifierMask(nil))
+                        await settle(tab, view, since: Date())
+                    }
+                }
+            }
             // A link may open a tab: Chromium makes it a moment after the click.
             if target.name.hasPrefix("link"), adoptedFrom[ObjectIdentifier(tab)].map({ $0.at < started }) ?? true {
                 for _ in 0..<15 where adoptedFrom[ObjectIdentifier(tab)].map({ $0.at < started }) ?? true { try? await Task.sleep(nanoseconds: 10_000_000) }
@@ -1664,7 +1696,18 @@ enum AgentCommands {
                 once.done = true
                 switch result {
                 case .success(let value): continuation.resume(returning: value)
-                case .failure(let error): continuation.resume(throwing: AgentError("Script failed: \(error.localizedDescription)"))
+                case .failure(let error):
+                    // Sill's own "Can't open this page" (or a page between documents) has no agent script: say
+                    // what the tab shows, not a script error.
+                    let said = error.localizedDescription
+                    if said.contains("reading 'locate'") || said.contains("__sillAgent") || said.contains("reading 'snapshot'") || said.contains("reading 'records'") {
+                        let failed = view.tab?.displayTitle == "Can’t open this page"
+                        continuation.resume(throwing: AgentError(failed
+                            ? "This tab shows Sill's “Can’t open this page” (\(view.tab?.failedWith ?? "the site couldn't be reached")): nothing on it to act on. Open the address again, or another source."
+                            : "The page is between documents (loading or reloading itself): look again in a moment."))
+                    } else {
+                        continuation.resume(throwing: AgentError("Script failed: \(said)"))
+                    }
                 }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
@@ -1966,7 +2009,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 19) return;
+      if (window.__sillAgent && window.__sillAgent.v === 26) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -2130,6 +2173,8 @@ enum AgentScript {
           for (const k of el.children) for (const c of k.classList) freq.set(c, (freq.get(c) || 0) + 1);
           const common = (k) => [...k.classList].filter((c) => freq.get(c) * 2 >= el.childElementCount).sort().join('.');
           for (const k of el.children) {
+            // Only what's drawn: scripts holding data, styles and hidden templates are never records.
+            if (skipRec.has(k.tagName) || k.tagName === 'LINK' || k.tagName === 'META' || !k.getClientRects().length) continue;
             const sig = k.tagName + '.' + common(k);
             const g = groups.get(sig); if (g) g.push(k); else groups.set(sig, [k]);
           }
@@ -2300,7 +2345,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 19,
+        v: 26,
         // The page as a person sees it, in reading order: headings, the text around the
         // controls (prices, results, messages), every control (including ones made clickable
         // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.
@@ -2442,6 +2487,73 @@ enum AgentScript {
             forms++;
             items.push({ context: 'form', text: (action.origin + action.pathname + '?' + params.join('&')).slice(0, 300) });
           }
+          let pageKind = '';
+          // What kind of page this is and where its parts are, as an experienced person sees at a glance:
+          // results with a search box, filter groups and a sort; an item with its buy button; a sign-in;
+          // a checkout; a form; an article. The agent starts from the map instead of reading every control.
+          {
+            let searchEl = null, buy = null, pw = null, card = null, sortEl = null, fields = 0;
+            const groups = new Map();
+            const shownIn = new Set();
+            const option = (el) => {
+              const w = within(el);
+              if (!w || w.length > 40 || /^\d{4}-\d{2}-\d{2}/.test(w) || /consent|cookie|privacy|legitimate interest|leg\.? ?interest|vendors?|partners?/i.test(w)) return;
+              groups.set(w, (groups.get(w) || 0) + 1);
+              const face = el.labels && el.labels[0] || el;
+              if (seen(face) || seen(el)) shownIn.add(w);
+            };
+            walk(document.body || document.documentElement, 0, 0, (el) => {
+              if (/^(SCRIPT|STYLE|TEMPLATE|NOSCRIPT|SVG)$/i.test(el.tagName)) return;
+              const tag = el.tagName, r = el.getAttribute('role');
+              if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+                if (el.type === 'hidden' || el.disabled) return;
+                const said = [el.name, el.id, el.getAttribute('autocomplete'), el.getAttribute('placeholder'), el.getAttribute('aria-label')].join(' ');
+                if (el.type === 'checkbox' || el.type === 'radio') { option(el); return; }
+                if (!seen(el)) return;
+                if (el.type === 'password') { pw = pw || el; return; }
+                if (/cc-number|card.?num|cardnumber|credit.?card/i.test(said)) { card = card || el; return; }
+                if (!searchEl && (el.type === 'search' || r === 'searchbox' || /\b(search|query|keywords?)\b|^q$|\bq\b/i.test(said) || el.closest('form[role=search], [role=search]'))) { searchEl = el; return; }
+                if (tag === 'SELECT' && /sort/i.test(name(el) + ' ' + said)) { sortEl = sortEl || el; return; }
+                if (typable(el) || tag === 'SELECT') fields++;
+                return;
+              }
+              if (r === 'checkbox' || r === 'radio' || r === 'switch' || r === 'menuitemcheckbox') { option(el); return; }
+              if ((tag === 'BUTTON' || tag === 'A' || r === 'button' || r === 'link') && seen(el)) {
+                const t = clean(name(el)).slice(0, 60);
+                if (!buy && /^(add to (cart|bag|basket|trolley)|buy( it)? now|add to order|reserve|book( now)?|select (this )?(room|seat|flight|fare)|proceed to checkout|checkout|place (your )?order)\b/i.test(t)) buy = el;
+                else if (!sortEl && /^sort( by)?\b/i.test(t)) sortEl = el;
+              }
+            });
+            const filterGroups = [...groups].filter(([g, n]) => n >= 2 && shownIn.has(g));
+            const textLen = (document.body && document.body.innerText || '').length;
+            let kind = '';
+            if (card) kind = 'checkout (payment details)';
+            else if (pw) kind = fields >= 3 ? 'sign-up or account form' : 'sign-in';
+            else {
+              // Results answer a query: words in a search box, a query in the address, or a stated count.
+              const asked = (searchEl && clean(searchEl.value)) || /[?&][^=&]+=[^&]/.test(location.search)
+                || /(?<![\d:.,$£€])\b\d[\d,]*\+?\s+(results?|matches|items|products|listings|properties)\b/i.test((document.body && document.body.innerText || '').slice(0, 20000));
+              // An article reads as long paragraphs; a grid or a front page as short blurbs.
+              const longParas = [...document.querySelectorAll('p')].filter((x) => (x.innerText || '').length > 200
+                && !x.closest('footer, nav, aside, header, [role=contentinfo], [role=dialog], [aria-modal=true], [role=navigation], [role=complementary]')).length;
+              if (recs.length >= 3 && asked && (filterGroups.length || sortEl || searchEl)) kind = 'results';
+              else if (buy && recs.length < 6) kind = 'item';
+              else if (fields >= 3) kind = 'form (' + fields + ' fields)';
+              else if (longParas >= 4) kind = 'article';
+              else if (recs.length >= 3) kind = asked ? 'results' : 'list';
+            }
+            pageKind = kind;
+            const at = (el) => '[' + refOf(el) + ']';
+            const mapParts = [];
+            if (kind) mapParts.push(kind);
+            if (searchEl) mapParts.push('search ' + at(searchEl) + (clean(searchEl.value) ? ' = "' + clean(searchEl.value).slice(0, 40) + '"' : ''));
+            if (filterGroups.length && kind !== 'article') mapParts.push('filters: ' + filterGroups.slice(0, 8).map(([g, n]) => g + ' (' + n + ')').join(', ') + (filterGroups.length > 8 ? ' +' + (filterGroups.length - 8) + ' more groups' : ''));
+            if (sortEl) mapParts.push('sort ' + at(sortEl));
+            if (buy) mapParts.push(clean(name(buy)).slice(0, 30) + ' ' + at(buy));
+            if (pw) mapParts.push('password ' + at(pw));
+            if (card) mapParts.push('card number ' + at(card));
+            if (mapParts.length && (kind || mapParts.length >= 2)) items.push({ context: 'map', text: mapParts.join(' · ').slice(0, 500) });
+          }
           // What the page is set to now, read from the page itself: what's ticked or switched on
           // (in collapsed sections too), the tab and buttons pressed, each dropdown's choice, a sort,
           // applied-filter chips, what's typed in its fields, how many results and which of them
@@ -2473,8 +2585,12 @@ enum AgentScript {
               }
               if ((r === 'combobox' || el.tagName === 'BUTTON' || r === 'button') && seen(el)) {
                 const t = n();
-                if (/\bsort/i.test(t)) { add(picks, 6, t); return; }
-                if (/^(remove|clear|delete)\b|[×✕✖]\s*$/i.test(t) && !/^(clear|remove|delete)( all)?( filters)?$/i.test(t)) { add(chips, 8, t.replace(/^(remove|clear|delete)\s*(filter)?:?\s*/i, '').replace(/\s*[×✕✖]\s*$/, '')); return; }
+                if (/\bsort(ed)?( by)?\s*[:\-–]\s*\S|\bsort(ed)? by \S/i.test(t)) { add(picks, 6, t); return; }
+                if (/^(remove|clear|delete)\b|[×✕✖]\s*$/i.test(t) && !/^(clear|remove|delete)( all)?( filters)?$/i.test(t)) {
+                  const chip = t.replace(/^(remove|clear|delete)\s*(filter)?:?\s*/i, '').replace(/\s*[×✕✖]\s*$/, '');
+                  if (!/^(the )?(search|text|input|query|field|all|filters?|selection|form)( box| field| text)?$/i.test(chip)) add(chips, 8, chip);
+                  return;
+                }
               }
               if (typable(el) && el.type !== 'password' && !vaulted.has(el) && seen(el)) {
                 const v = clean(el.value);
@@ -2482,8 +2598,9 @@ enum AgentScript {
                   // The field's label up to its first pause ("Departure date . Enter a date" → "Departure date");
                   // none when the label already says the value (a field named by what's in it).
                   const label = clean(name(el));
-                  const short = label.includes(v) ? '' : (label.split(/\s*[.;:,]\s+|\s+[.·]\s+/)[0] || el.name || 'field').slice(0, 30);
-                  add(typed, 5, (short ? short + ' = ' : '') + '"' + v + '"');
+                  const short = label.includes(v) ? '' : (label.split(/\s*[.;:,]\s+|\s+[.·]\s+/)[0] || el.name || '').slice(0, 30);
+                  // A field with no name of its own, or named only by its value, says nothing (a slider's "0", "10").
+                  if (short || (label && label !== v && v.length > 2 && !/^\d+$/.test(v))) add(typed, 5, (short ? short + ' = ' : '') + '"' + v + '"');
                 }
               }
             });
@@ -2491,7 +2608,7 @@ enum AgentScript {
             const counts = [];
             const span = body.match(/(?<![\d:.,$£€])\b(\d[\d,]*)\s*[-–]\s*(\d[\d,]*)\s+of\s+(?:over\s+|about\s+)?(\d[\d,]*\+?)\b/i);
             if (span) counts.push(span[1] + '–' + span[2] + ' of ' + span[3]);
-            const total = body.match(/(?<![\d:.,$£€])\b(\d[\d,]*\+?)\s+(results?|matches|items|listings|properties|stays|homes|products|jobs|courses|flights|hotels|rentals|places|reviews|options|vehicles|cars|events|articles|models|repositories|recipes)\b/i);
+            const total = body.match(/(?<![\d:.,$£€])\b(\d[\d,]*\+?)\s+(results?|matches|search results)\b/i) || body.match(/(?<![\d:.,$£€])\b(\d[\d,]*\+?)\s+(results?|matches|items|listings|properties|stays|homes|products|jobs|courses|flights|hotels|rentals|places|options|vehicles|cars|events|articles|models|repositories|recipes)\b/i);
             if (total && !(span && span[3].replace(/\D/g, '') === total[1].replace(/\D/g, ''))) counts.push(total[1] + ' ' + total[2]);
             const total0 = total;
             const pages = body.match(/\bpage\s+(\d+)\s+of\s+(\d+)\b/i);
@@ -2501,7 +2618,7 @@ enum AgentScript {
               const q = new URLSearchParams(location.search);
               const kept = [];
               // Settings, not trackers: no utm/session keys, and no values that look like random tokens.
-              const token = (v) => v.length >= 14 && /^[\w-]+$/.test(v) && /\d/.test(v) && /[a-z]/.test(v) && /[A-Z]/.test(v);
+              const token = (v) => (v.length >= 14 && /^[\w-]+$/.test(v) && /\d/.test(v) && /[a-z]/.test(v) && /[A-Z]/.test(v)) || /^\d{10,}$/.test(v);
               for (const [k, v] of q) if (v && v.length <= 60 && !token(v) && !/^(utm_|ref|_|session|token|sid|gclid|fbclid)/i.test(k) && kept.length < 10) kept.push(k + '=' + v);
               address = kept.join('&');
             } catch (_) {}
@@ -2539,11 +2656,13 @@ enum AgentScript {
               if (!(tag === 'A' || tag === 'BUTTON' || r === 'link' || r === 'button' || (tag === 'INPUT' && /^(button|submit)$/.test(el.type)))) return;
               const label = clean(el.getAttribute('aria-label') || el.getAttribute('title') || el.innerText || el.value || '');
               const off = el.disabled || el.getAttribute('aria-disabled') === 'true' || /\bdisabled\b/i.test(el.className || '');
-              if (!nextEl && (el.getAttribute('rel') === 'next' || /^(next|next page|go to next page|next results|more results|older posts|older|›|»|→|>|>>)$/i.test(label) || /^next\b.{0,20}$/i.test(label))) {
+              // A list's next page, not a calendar's next month or a carousel's next slide.
+              const elsewhere = /\b(month|week|day|year|slide|image|photo|picture|video|story|stories|step|tab|question|chapter|article|post)s?\b/i.test(label);
+              if (!nextEl && !elsewhere && (el.getAttribute('rel') === 'next' || /^(next|next page|go to next page|next results|more results|older posts|older|›|»|→|>|>>)$/i.test(label) || /^next\b.{0,20}$/i.test(label))) {
                 if (off) nextOff = true; else if (seen(el) || el.getBoundingClientRect().height > 0) nextEl = el;
                 return;
               }
-              if (!more && !off && /^(load|show|see|view)\s+(\d+\s+)?more\b|^more\s+(results|items|reviews|products)$|^show all\b|^see all results\b/i.test(label) && label.length < 50) { more = el; return; }
+              if (!more && !off && !elsewhere && !/filters?|options|categories|brands|amenities|facilities/i.test(label) && /^(load|show|see|view)\s+(\d+\s+)?more\b|^more\s+(results|items|reviews|products)$|^show all\b|^see all results\b/i.test(label) && label.length < 50) { more = el; return; }
               if (/^\d{1,4}$/.test(label) && el.closest('nav, [role=navigation], [class*=pagin], [class*=Pagin], [aria-label*=agination], [aria-label*=pages]')) maxPage = Math.max(maxPage, +label);
             });
             const said = (el) => '[' + refOf(el) + '] ' + (role(el) || 'button') + ' "' + clean(name(el)).slice(0, 40) + '"';
@@ -2558,7 +2677,7 @@ enum AgentScript {
                                          : 'no next or load-more control and the page ends here');
             }
             // Only for a list: alike items, or a total the page states. A calendar's "Next month" isn't a next page.
-            if (listParts.length && (n || listTotal)) items.push({ context: 'list', text: listParts.join(' · ').slice(0, 400) });
+            if (listParts.length && (n || listTotal) && !/^(sign-in|sign-up|checkout|item|form)/.test(pageKind)) items.push({ context: 'list', text: listParts.join(' · ').slice(0, 400) });
           }
           const se = document.scrollingElement || document.documentElement;
           items.push({ context: 'page', below: Math.max(0, Math.round(se.scrollHeight - se.scrollTop - innerHeight)), above: Math.round(se.scrollTop),
@@ -2953,6 +3072,12 @@ enum AgentScript {
           if (/you have been blocked|access (is )?denied|request (was )?blocked|this (site|service|content|product) is (not available|unavailable) in your (country|region)|not available in your (country|region)|geo ?location/.test(title + ' ' + text.slice(0, 1500))) found.push('blocked by the site');
           return found;
         },
+        // Whether something that opens (a menu, a dropdown, a section) says it's open: "true", "false", or null.
+        expanded(ref) {
+          const el = find(ref); if (!el) return null;
+          for (let n = el, d = 0; n && d < 3; n = n.parentElement, d++) { const v = n.getAttribute && n.getAttribute('aria-expanded'); if (v != null) return v; }
+          return null;
+        },
         mark(ref, token) { const el = find(ref); if (!el) return false; el.setAttribute('data-sill-pick', token); return true; },
         markVaulted(ref) { const el = find(ref); if (el) vaulted.add(el); return !!el; },
         // Where an element is now (viewport CSS pixels), for a picture of just that part.
@@ -2970,7 +3095,10 @@ enum AgentScript {
           return best.filter((k) => clean(k.innerText)).slice(0, max || 200).map((k) => {
             const link = k.matches('a[href]') ? k : k.querySelector('a[href]');
             const head = k.querySelector('h1,h2,h3,h4,h5,[role=heading]');
-            const lines = [...new Set((k.innerText || '').split('\n').map((l) => clean(l)).filter((l) => l))].slice(0, 15).map((l) => l.slice(0, 160));
+            // The first lines, and any later one with a price or a total: a card's price often sits at its foot.
+            const all = [...new Set((k.innerText || '').split('\n').map((l) => clean(l)).filter((l) => l))];
+            const money = /[$€£¥₹]|\b(USD|EUR|GBP|AED|CAD|AUD|JPY|INR)\b|\b(total|per night|price)\b/i;
+            const lines = all.slice(0, 15).concat(all.slice(15).filter((l) => money.test(l)).slice(0, 8)).map((l) => l.slice(0, 160));
             const img = k.querySelector('img[alt]');
             const out = { title: clean((head && head.innerText) || (link && link.innerText) || lines[0] || '').slice(0, 200), lines };
             if (link && link.href && !link.href.startsWith('javascript:')) out.url = link.href;

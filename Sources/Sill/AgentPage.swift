@@ -68,6 +68,14 @@ final class AgentPage {
 
     private init(_ view: SillWebView) { self.view = view }
 
+    /// A request that only reports (analytics, logs, beacons, error and performance reporting).
+    static func telemetry(_ url: String) -> Bool {
+        guard let u = URL(string: url) else { return false }
+        let host = (u.host() ?? "").lowercased(), path = u.path.lowercased()
+        if host.range(of: #"(^|\.)(analytics|telemetry|metrics|stats|log|logs|logging|events?|track(ing)?|beacon|collect|rum|sentry|bat|px|pixel|sink)[.-]"#, options: .regularExpression) != nil { return true }
+        return path.range(of: #"/(log|logs|logging|track|tracking|tracker|beacon|beacons|collect|collector|analytics|telemetry|metrics|stats|events?|pixel|impression|impressions|rum|perf|performance|error-?report|csp-report|ping|heartbeat|fe_?log|clientlog|js_?tracking|gen_204|generate_204|sink)(/|$|\.|_|-)"#, options: .regularExpression) != nil
+    }
+
     /// Follows the page's frames from now on. Cheap: Chromium only says when frames come and go.
     func start() async {
         guard !started, let view else { return }
@@ -104,8 +112,12 @@ final class AgentPage {
         case "Network.requestWillBeSent" where session == nil:
             guard let id = params["requestId"] as? String,
                   ["XHR", "Fetch"].contains(params["type"] as? String ?? "") else { return }
+            let url = (params["request"] as? [String: Any])?["url"] as? String ?? ""
+            // Telemetry (logging, tracking, beacons, metrics) brings nothing to the page: an action isn't
+            // waiting on it. Only requests that can bring content hold an action until they're back.
+            if AgentPage.telemetry(url) { return }
             inFlight[id] = Date()
-            if let url = (params["request"] as? [String: Any])?["url"] as? String { requestURLs[id] = url }
+            requestURLs[id] = url
             sent += 1
         case "Network.responseReceived" where session == nil:
             // The page's own data requests that came back refused (403, a geo-block, a 500): worth saying.
