@@ -617,6 +617,21 @@ def needs(c):
         c.m.call("page_read", tab=c.tab, needs=[])
 
 @case
+def reroute(c):
+    # A dead end comes back with the way around: no results says what's narrowing it; a missing page
+    # and a site that won't connect come back with a search already done (results depend on the web).
+    ok, out = c.do("page_navigate", url=A + "empty.html?again=1")
+    if "↪ No results here" not in out or "Narrowing it now" not in out or "Blue" not in out.split("↪ No results here")[-1]:
+        raise Fail("no results: " + out[-500:])
+    ok, out = c.do("page_navigate", url=A + "no-such-page.html")
+    if "↪ Not found here" not in out: raise Fail("missing page: " + out[-500:])
+    ok, out = c.do("page_navigate", url="http://127.0.0.1:9/catalog/blue-iphone-14-pro")
+    if "↪ Dead end" not in out: raise Fail("refused connection: " + out[-600:])
+    ok, again = c.do("page_read")
+    if "↪ Dead end" in again: raise Fail("searched again for the same dead end")
+    return True
+
+@case
 def popup(c):
     ok, out = c.do("page_click", ref=ref(c.look(), "link", "Open help"))
     ok2, tabs = c.m.call("tabs_list")
@@ -851,7 +866,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups", "needs": "state"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups", "needs": "state", "reroute": "empty"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)

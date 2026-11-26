@@ -293,7 +293,14 @@ Built in `Sources/sill-mcp/Check.swift`, tested by the `answer-check` course cas
 7. **Prediction from routes:** the conditions known early make every read point at them, so Claude
    goes straight to the right control or line. Site notes and habits do the same for the
    route.
-8. **The persistence ladder**, as a rule `answer_check` enforces: "not on the web" only with
-   the routes tried.
+8. **Done: the way around a dead end.** When a page is a dead end, its answer already holds
+   the way around, searched only there, once per address:
+   - blocked (refused, certificate swapped, unreachable, failing): the same thing elsewhere,
+     searched with the site's name and the task's words, the blocked address left out, so the
+     seller's other storefronts and other sources come up;
+   - not found: where it lives now on the same site;
+   - no results: what's narrowing it (the filters on, the words typed), to loosen one at a time.
+
+   Still to do: `answer_check` refusing "not on the web" without the routes tried.
 9. **Evidence on disk** and resume, for jobs that run for hours.
 10. **Odysseys2** against the published scores, from a clean network.

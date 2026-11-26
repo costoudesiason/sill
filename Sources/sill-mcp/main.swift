@@ -1438,6 +1438,13 @@ func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
                let last = content.lastIndex(where: { $0["type"] as? String == "text" }), let said = content[last]["text"] as? String {
                 content[last]["text"] = said + "\n\n" + block
             }
+            // A dead end: the way around, found already (only there, once per address).
+            if ["tabs_open", "page_read", "page_do", "page_navigate", "page_snapshot"].contains(name),
+               let tab = (arguments["tab"] as? String) ?? seen.last, let lines = seen.lines(tab),
+               let note = Reroute.note(sill, lines: lines, said: content.compactMap { $0["text"] as? String }.joined(separator: "\n")),
+               let last = content.lastIndex(where: { $0["type"] as? String == "text" }), let said = content[last]["text"] as? String {
+                content[last]["text"] = said + "\n\n" + note
+            }
             if Evidence.readingTools.contains(name) {
                 Evidence.add(tool: name, text: content.compactMap { $0["text"] as? String }.joined(separator: "\n"))
             }
