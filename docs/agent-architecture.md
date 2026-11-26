@@ -284,10 +284,16 @@ Built in `Sources/sill-mcp/Check.swift`, tested by the `answer-check` course cas
    pop-ups, and says so. It never touches a sign-in or anything Claude just opened.
 5. **Done: a picture when a step fails.** A small screenshot comes back with any failed step
    or misplaced click, so Claude sees the page instead of guessing.
-6. **Prediction:** the conditions known early make every read point at them, so Claude
+6. **Done: task-aware reading.** Claude gives the task's conditions once (`needs=[…]` on its first
+   call). Every page answer then carries a "For your conditions" block: for each condition, the
+   controls (with refs) and lines on that page that speak to it, every word of it covered so the
+   rare one isn't crowded out; for a price or rating limit, how many on the page pass ("1 of 3
+   prices here meet it: TAP … $235"); or that nothing here speaks to it. Shown only when it
+   changed; `answer_check` uses the same conditions.
+7. **Prediction from routes:** the conditions known early make every read point at them, so Claude
    goes straight to the right control or line. Site notes and habits do the same for the
    route.
-7. **The persistence ladder**, as a rule `answer_check` enforces: "not on the web" only with
+8. **The persistence ladder**, as a rule `answer_check` enforces: "not on the web" only with
    the routes tried.
-8. **Evidence on disk** and resume, for jobs that run for hours.
-9. **Odysseys2** against the published scores, from a clean network.
+9. **Evidence on disk** and resume, for jobs that run for hours.
+10. **Odysseys2** against the published scores, from a clean network.

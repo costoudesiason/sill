@@ -181,7 +181,9 @@ enum AnswerCheck {
 let checkTool = Tool(name: "answer_check",
     description: "Before your final answer: your draft and the task's conditions (each one spelled out, including what the user implied), checked in milliseconds against everything you read from pages. Says which lines back each condition (or that nothing you read does), which figures in your draft no page showed, and for a lowest/highest claim the range the page showed.",
     properties: ["answer": ["type": "string", "description": "Your draft final answer."],
-                 "needs": ["type": "array", "items": ["type": "string"], "description": "The task's conditions, one per item: what the result must be or have."]],
+                 "needs": ["type": "array", "items": ["type": "string"], "description": "The task's conditions, one per item (if not given, the needs from your first call)."]],
     required: ["answer"], readOnly: true, openWorld: false) { _, args in
-    [.text(AnswerCheck.run(answer: args["answer"] as? String ?? "", needs: (args["needs"] as? [String]) ?? []))]
+    let given = (args["needs"] as? [String]) ?? []
+    if !given.isEmpty { Needs.set(given) }
+    return [.text(AnswerCheck.run(answer: args["answer"] as? String ?? "", needs: given.isEmpty ? Needs.current() : given))]
 }

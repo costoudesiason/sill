@@ -1,7 +1,7 @@
 {
  "drawn": "2026-11-26",
  "seed": 20261126,
- "instructions": "b58ec46769923a1a",
+ "instructions": "d549200cf17c9fc1",
  "commit": "0313309",
  "practice_ids_left_out": 91,
  "webvoyager": [
@@ -187,6 +187,11 @@
    "instructions": "b58ec46769923a1a",
    "tag": "instructions-frozen-2",
    "why": "answer_check: call it once before the final answer"
+  },
+  {
+   "instructions": "d549200cf17c9fc1",
+   "tag": "instructions-frozen-3",
+   "why": "needs=[\u2026] on the first tabs_open: every page points at what meets each condition"
   }
  ]
 }

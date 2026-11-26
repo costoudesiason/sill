@@ -88,8 +88,9 @@ page's own controls when the site has one (a filter or sort, not just a word in 
 not a near one); and answer with the specifics (names, numbers, prices, dates), not just where they are. If a \
 condition can't be met, say which and why rather than settling for a near one silently. Before you answer, check \
 the result against each condition in the task as the page shows it (the right kind of item, every filter and its \
-exact value, the top or cheapest one meaning the very first by that sort): call answer_check once with your draft \
-and the task's conditions spelled out (what the user said and what they plainly meant), fix what it flags, then answer. When the site \
+exact value, the top or cheapest one meaning the very first by that sort): call answer_check once with your draft, \
+fix what it flags, then answer. Give the task's conditions once, as needs=[…] on your first tabs_open (each spelled out: \
+what the user said and what they plainly meant): every page then points at what on it meets each, with refs. When the site \
 has no control for a condition (no part-time filter, no price range), check it another way (each result's own page, a \
 keyword) rather than leaving it unchecked. When the task asks for a list, give the list. When you write what pages \
 say into a file or table, copy each field exactly as the page has it and keep your own notes in a field of their own; \
@@ -474,10 +475,13 @@ func props(_ base: [String: [String: Any]], _ more: [String: [String: Any]]) -> 
 /// a faster model). A new page, or a mostly changed one, gets the full list.
 final class Seen: @unchecked Sendable {
     private var lists: [String: [String]] = [:]
+    private(set) var lastTab: String?
     private let lock = NSLock()
     func swap(_ tab: String, _ lines: [String]) -> [String]? {
-        lock.withLock { defer { lists[tab] = lines }; return lists[tab] }
+        lock.withLock { defer { lists[tab] = lines; lastTab = tab }; return lists[tab] }
     }
+    func lines(_ tab: String) -> [String]? { lock.withLock { lists[tab] } }
+    var last: String? { lock.withLock { lastTab } }
 }
 let seen = Seen()
 
@@ -540,7 +544,8 @@ let tools: [Tool] = [
                       "read": ["type": "string", "description": "At the end: \"text\" for the page's text, or a JavaScript function body whose `return` value comes back."],
                       "close": ["type": "boolean", "description": "Close the tab at the end (with read: an errand that leaves nothing behind)."],
                       "front": ["type": "boolean", "description": "Bring the tab to the front for the user to see. Default false."],
-                      "timeout": ["type": "number", "description": "Seconds to wait for the page. Default 20."]],
+                      "timeout": ["type": "number", "description": "Seconds to wait for the page. Default 20."],
+                      "needs": needsProperty],
          required: []) { sill, args in
         if let errands = args["errands"] as? [[String: Any]], !errands.isEmpty { return [.text(runErrands(sill, errands))] }
         guard let url = args["url"] as? String, !url.isEmpty else { throw Failure("Give a \"url\" (or \"errands\").") }
@@ -637,7 +642,7 @@ let tools: [Tool] = [
     },
     Tool(name: "page_read",
          description: "Read without acting. Default: the page as it looks, in order: headings, its text, and its controls with refs (all=true for the whole page, not just near the view). find=\"Windows 11|16 GB\": just the controls and lines anywhere on the page that have those words, refs ready to act on. text=true: the whole page as clean Markdown (headings, lists, table rows), main=true for just the main content; a PDF in the tab reads as its text, page by page (pages \"3-5\"; page_screenshot pdfPage draws a page). tabs=[ids] (or \"all\"): the text of several tabs at once, the user's open tabs too (ids from tabs_list). records=true: the page's repeated records (cards, rows) as data, or saved to a file with save. script: JavaScript run in the page as an async function body; `return` a JSON value, for a precise slice.",
-         properties: ["tab": tabProperty, "text": ["type": "boolean"], "main": ["type": "boolean"], "all": ["type": "boolean"],
+         properties: ["tab": tabProperty, "text": ["type": "boolean"], "main": ["type": "boolean"], "all": ["type": "boolean"], "needs": needsProperty,
                       "tabs": ["description": "Tab ids, or \"all\" for every open tab: read their text together.", "anyOf": [["type": "array", "items": ["type": "string"]], ["type": "string"]]],
                       "pages": ["type": "string", "description": "With text, in a tab showing a PDF: which pages, \"3\" or \"10-12\"."],
                       "records": ["type": "boolean", "description": "The page's repeated records (result cards, rows, list items) as data: title, link, lines. With save, written to a file (.json or .csv) instead of read back."],
@@ -784,7 +789,7 @@ arrive in parts), {"until_gone": "Verifying…"} · {"navigate": "url" | "back" 
 · {"open": "url", "as": "b"} opens another tab and acts there next; "tab": "b" (or an id) on any step acts in that tab.
 After typing into a search box, the answer shows the suggestions: pick one by ref or full name in the next call.
 """,
-         properties: ["tab": tabProperty,
+         properties: ["tab": tabProperty, "needs": needsProperty,
                       "steps": ["type": "array", "items": ["type": "object"], "description": "The steps, in order."],
                       "full": ["type": "boolean", "description": "Answer with the full element list, not the changes."],
                       "read": ["type": "string", "description": "At the end, instead of the elements: \"text\", or a JavaScript function body whose `return` value comes back."]],
@@ -1404,7 +1409,8 @@ func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
         let params = message["params"] as? [String: Any] ?? [:]
         let name = params["name"] as? String ?? ""
         guard let tool = tools.first(where: { $0.name == name }) else { return error(-32602, "Unknown tool \(name)") }
-        let arguments = params["arguments"] as? [String: Any] ?? [:]
+        var arguments = params["arguments"] as? [String: Any] ?? [:]
+        if name != "answer_check", let needs = arguments.removeValue(forKey: "needs") as? [String] { Needs.set(needs) }
         do {
             var content = try tool.run(sill, arguments).flatMap { piece -> [[String: Any]] in
                 switch piece {
@@ -1424,6 +1430,13 @@ func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
                let picture = glance(sill, tab: arguments["tab"]) {
                 content.append(picture)
                 content.append(["type": "text", "text": "(the tab as it is now, since a step didn't go as planned)"])
+            }
+            // The task's conditions, pointed at on this page (only when that says something new here).
+            if ["tabs_open", "page_read", "page_do", "page_navigate", "page_snapshot", "page_goal"].contains(name),
+               let tab = (arguments["tab"] as? String) ?? seen.last, let lines = seen.lines(tab),
+               let block = Needs.block(tab: tab, lines: lines),
+               let last = content.lastIndex(where: { $0["type"] as? String == "text" }), let said = content[last]["text"] as? String {
+                content[last]["text"] = said + "\n\n" + block
             }
             if Evidence.readingTools.contains(name) {
                 Evidence.add(tool: name, text: content.compactMap { $0["text"] as? String }.joined(separator: "\n"))

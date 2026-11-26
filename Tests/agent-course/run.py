@@ -598,6 +598,25 @@ def failure_picture(c):
     return True
 
 @case
+def needs(c):
+    # The task's conditions, given once: each page points at what meets each (a control with its ref,
+    # how many items pass a price limit, the line that names a thing), and doesn't repeat itself.
+    try:
+        ok, out = c.do("page_read", needs=["nonstop flights only", "price under $300", "a course with a module on Agile"])
+        block = out[out.find("For your conditions:"):] if "For your conditions:" in out else ""
+        if not block: raise Fail("no block for the conditions: " + out[-600:])
+        if 'checkbox "Nonstop"' not in block: raise Fail("the Nonstop control wasn't pointed at: " + block[:600])
+        if "1 of 2 prices here meet it" not in block or "$235" not in block: raise Fail("the price limit wasn't counted: " + block[:600])
+        ok, again = c.do("page_read")
+        if "For your conditions:" in again: raise Fail("the same block again on an unchanged page")
+        ok, out = c.do("page_navigate", url=A + "check.html")
+        block = out[out.find("For your conditions:"):] if "For your conditions:" in out else ""
+        if "Agile Methodology" not in block: raise Fail("the Agile line wasn't pointed at: " + (block or out[-600:])[:600])
+        return True
+    finally:
+        c.m.call("page_read", tab=c.tab, needs=[])
+
+@case
 def popup(c):
     ok, out = c.do("page_click", ref=ref(c.look(), "link", "Open help"))
     ok2, tabs = c.m.call("tabs_list")
@@ -832,7 +851,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups", "needs": "state"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)
