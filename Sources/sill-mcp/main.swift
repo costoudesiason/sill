@@ -1373,7 +1373,7 @@ func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
         guard let tool = tools.first(where: { $0.name == name }) else { return error(-32602, "Unknown tool \(name)") }
         let arguments = params["arguments"] as? [String: Any] ?? [:]
         do {
-            let content = try tool.run(sill, arguments).flatMap { piece -> [[String: Any]] in
+            var content = try tool.run(sill, arguments).flatMap { piece -> [[String: Any]] in
                 switch piece {
                 case .text(let string): return [["type": "text", "text": string]]
                 case .image(let data, let mimeType, let note):
@@ -1381,6 +1381,11 @@ func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
                     if let note { out.append(["type": "text", "text": note]) }
                     return out
                 }
+            }
+            // When the page was read: provenance for anything taken from it (prices, counts, rankings change).
+            if ["page_read", "read_url", "tabs_open", "page_do", "page_navigate", "page_text", "page_snapshot"].contains(name),
+               let last = content.lastIndex(where: { $0["type"] as? String == "text" }), let said = content[last]["text"] as? String {
+                content[last]["text"] = said + "\n(read at \(readStamp()))"
             }
             if Trace.dir != nil, !Trace.quiet.contains(name) {
                 let said = content.compactMap { $0["text"] as? String }.joined(separator: "\n")
@@ -1396,6 +1401,14 @@ func handle(_ message: [String: Any], with sill: Sill) -> [String: Any]? {
     default:
         return error(-32601, "Method not found: \(method)")
     }
+}
+
+/// The local date and time with its offset, to the second: "2026-11-26 03:41:12 -05:00".
+func readStamp() -> String {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "yyyy-MM-dd HH:mm:ss xxx"
+    return f.string(from: Date())
 }
 
 func emit(_ object: [String: Any]) {
