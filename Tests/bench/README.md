@@ -101,3 +101,21 @@ comparable to each other or to this harness.
 because WebVoyager overstates agents: a plain search agent solves up to 51% of WebVoyager but
 22% of Online-Mind2Web. There, Operator scored 61.3%, Claude 3.7 computer use 56.3%,
 Browser Use (GPT-4o) 30.0%, Claude 3.5 computer use 29.0% and Agent-E 28.0%.
+
+## Saved for later: Odysseys2
+
+The yardstick for delegated work: 100 long live-web tasks built by CMU and Browser Use from
+real user requests, graded against 982 rubric checks (shopping, research, finance and law,
+directories, media, property, local and travel). MIT license. https://odysseysbench.com/v2/
+
+- Data: `~/Library/Caches/Sill Bench/datasets/odysseys2` (github.com/ljang0/odysseys2-benchmark
+  at 02d42e1, checksums verified). Not read: keep it unseen until we run it.
+- Protocol in its `EVALUATION.md`: judge gpt-5.6-luna at xhigh with `judge-prompt.txt` byte for
+  byte, 3600 s per task, every rubric item weight 1, a reward-hacking check that zeroes a task.
+- Published (mean score /100, tasks fully passed): GPT-6 Astra 84.6, 47; Opus 5.5 on
+  BrowserCode 71.2, 18; Grok 4.7 68.2, 13; GPT-5.6 Luna 55–60, 4–8.
+- No runner yet: write one like `bubench.py` (same findings-judge family) when we're ready.
+
+Also worth knowing: WebTailBench v2 (Microsoft, May 2026, `microsoft/WebTailBench` test_v2):
+609 refreshed everyday tasks (flights, hotels, restaurants, tickets, shopping lists,
+comparisons) for breadth on short and medium tasks.
