@@ -1,0 +1,8 @@
+<!doctype html><meta charset=utf-8><title>Filters that reload</title><script src=kit.js></script>
+<h1>Results</h1><p>Each filter reloads the page, as many shops do.</p>
+<script>
+const on = new Set((new URLSearchParams(location.search).get('f') || '').split(',').filter(Boolean));
+document.write(['Free delivery', 'In stock', 'On sale'].map((n) => `<label><input type=checkbox data-n="${n}" ${on.has(n) ? 'checked' : ''}> ${n}</label><br>`).join(''));
+document.querySelectorAll('input').forEach((b) => b.onchange = () => { b.checked ? on.add(b.dataset.n) : on.delete(b.dataset.n); location.search = '?f=' + [...on].join(','); });
+if (on.size === 3) done('all', true);
+</script>

@@ -1185,7 +1185,9 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 _ = try sill.run("page.dialog", tab.merging(["accept": step["dialog"] as? Bool ?? true, "text": step["text"] as? String ?? ""]) { $1 })
                 did = "answered the dialog"
             } else {
-                throw Failure("Unknown step \(step.keys.sorted().joined(separator: ", ")).")
+                // An option written as a step ({"full": true}, {"read": "text"} is a step; these aren't): no-op, said.
+                if Set(step.keys).isSubset(of: ["full", "needs", "tab", "timeout", "snapshot"]) { did = "(\(step.keys.sorted().joined(separator: ", ")) is an option of page_do, not a step: ignored)" }
+                else { throw Failure("Unknown step \(step.keys.sorted().joined(separator: ", ")).") }
             }
             return did
     }
@@ -1203,6 +1205,12 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
             var did: String
             do { did = try attempt(step) }
             catch let failure as Failure {
+                // The page re-rendered or reloaded between steps (ticking one filter reloads the results): the
+                // control the ref named is found again by its name, as it was listed.
+                if failure.message.contains("is no longer on the page"), let again = renamed(step, tab: tab),
+                   let redone = try? attempt(again.step) {
+                    did = redone + " (the page had changed: found “\(clip(again.name, 40))” again by name)"
+                } else {
                 // Recalculate, as a map does after a wrong turn: one general fix, then the same step again.
                 guard let fix = recalculate(sill, failure, tab: tab, wentAway: wentAway) else { throw failure }
                 do { did = try attempt(step) + " (recalculated: \(fix))" }
@@ -1210,6 +1218,7 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                     // The way back didn't have it either: return to where the click went, and say what failed first.
                     if fix.contains("went back") { _ = try? sill.run("page.forward", tab) }
                     throw failure
+                }
                 }
             }
             lines.append("\(i + 1). ✓ \(did) (\(Int(Date().timeIntervalSince(t0) * 1000)) ms)")
@@ -1237,6 +1246,22 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
         lines.append(listing(snapshot, full: args["full"] as? Bool ?? false))
     }
     return lines.joined(separator: "\n")
+}
+
+/// A step whose ref went stale, aimed instead at what that ref was listed as: its name (role kept for the record).
+func renamed(_ step: [String: Any], tab: [String: Any]) -> (step: [String: Any], name: String)? {
+    guard let id = (tab["tab"] as? String) ?? seen.last, let lines = seen.lines(id) else { return nil }
+    for key in ["click", "type", "select", "hover", "drag", "on"] {
+        guard let ref = step[key] as? String, ref.range(of: #"^[a-z]?\d+$|^e\d+$"#, options: .regularExpression) != nil else { continue }
+        guard let line = lines.first(where: { $0.contains("[\(ref)] ") }),
+              let r = line.range(of: #"\] [a-z]+ "([^"]+)""#, options: .regularExpression) else { continue }
+        let quoted = String(line[r]).components(separatedBy: "\"")
+        guard quoted.count >= 2, !quoted[1].isEmpty, !quoted[1].hasSuffix("…") else { continue }
+        var again = step
+        again[key] = quoted[1]
+        return (again, quoted[1])
+    }
+    return nil
 }
 
 /// After a step fails, the general ways back on course, tried before giving up: what's in the way

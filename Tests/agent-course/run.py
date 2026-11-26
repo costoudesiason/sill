@@ -668,6 +668,19 @@ def grid_cells(c):
     return True
 
 @case
+def stale_refs(c):
+    # Refs from one look, used after the page reloaded itself between steps: found again by name, not refused;
+    # and a name that isn't on a still page fails at once, not after a long wait.
+    look = c.look()
+    refs = [ref(look, "checkbox", n) for n in ("Free delivery", "In stock", "On sale")]
+    c.must("page_do", steps=[{"click": r} for r in refs])
+    if c.result().get("all") is not True: raise Fail(f"not all ticked: {c.result()}")
+    t = time.time(); ok, out = c.do("page_do", steps=[{"click": "Express shipping"}]); took = time.time() - t
+    if ok and "✗" not in out: raise Fail("clicked something that isn't there")
+    if took > 1.5: raise Fail(f"a missing name took {took:.1f} s to be said missing")
+    return True
+
+@case
 def popup(c):
     ok, out = c.do("page_click", ref=ref(c.look(), "link", "Open help"))
     ok2, tabs = c.m.call("tabs_list")
@@ -902,7 +915,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups", "needs": "state", "reroute": "empty", "page-map": "check", "ticking": "ticker", "grid-cells": "sheet"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups", "needs": "state", "reroute": "empty", "page-map": "check", "ticking": "ticker", "grid-cells": "sheet", "stale-refs": "reloading-filters"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)

@@ -1820,6 +1820,7 @@ enum AgentCommands {
         let byName = ref == nil
         // A step's own settle has already waited for the page to answer: a short wait covers late renders.
         let deadline = Date().addingTimeInterval(byName ? (args["wait"] as? Double ?? 1.5) : 0)
+        let started = Date()
         while true {
             if let dialog = view.openDialog { throw dialogError(dialog) }
             let found = try await evaluate("return window.__sillAgent.locate(ref, selector, text, editable, scope)", in: view, world: Web.world, arguments: [
@@ -1836,7 +1837,17 @@ enum AgentCommands {
             if let found, found["ref"] != nil, found["visible"] as? Bool != false || Date() >= deadline {
                 return target(from: found, ref: nil)
             }
-            if Date() >= deadline {
+            // Not there, and the page has held its shape a while (nothing still arriving): it won't come, so say so
+            // now rather than at the deadline. A name that's close but not the page's own fails in a third of a second.
+            var settledAbsent = false
+            if byName, args["wait"] == nil, Date().timeIntervalSince(started) > 0.3,
+               let state = (try? await evaluate("return window.__sillAgent.state()", in: view, world: Web.world)) as? [String: Any],
+               // ...and the agent's last action was a while ago: right after a click, a page may still draw on a timer.
+               (state["still"] as? Double ?? 0) >= 800, (state["sinceAct"] as? Double ?? 0) >= 1500,
+               !view.isLoading, !AgentPage.of(view).fetching(since: .distantPast) {
+                settledAbsent = true
+            }
+            if Date() >= deadline || settledAbsent {
                 let near = await closest(to: args["text"] as? String, in: view)
                 throw AgentError(byName ? "Nothing on the page matches \((args["selector"] ?? args["text"]).map { "“\($0)”" } ?? "that").\(near)"
                                         : "No element matched. Use page_read for refs.")
@@ -2011,7 +2022,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 28) return;
+      if (window.__sillAgent && window.__sillAgent.v === 29) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -2372,7 +2383,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 28,
+        v: 29,
         // The page as a person sees it, in reading order: headings, the text around the
         // controls (prices, results, messages), every control (including ones made clickable
         // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.
@@ -3051,7 +3062,8 @@ enum AgentScript {
         // How the page is doing: its load state, and ms since it last changed (huge if it hasn't).
         state() {
           this.watch();
-          return { ready: document.readyState, idle: performance.now() - window.__sillLastChange, still: performance.now() - window.__sillLastShape };
+          return { ready: document.readyState, idle: performance.now() - window.__sillLastChange, still: performance.now() - window.__sillLastShape,
+                   sinceAct: performance.now() - (window.__sillAgentClickAt || -1e9) };
         },
         quiet(ms) { return this.state().idle >= ms; },
         sending() {
