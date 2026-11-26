@@ -1,0 +1,41 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><title>Trail Runner 3 – Stride</title><script src=scen.js></script>
+<style>body{font:15px system-ui;margin:24px;max-width:760px} .sizes button{width:48px;margin:2px;padding:8px} .sizes button[aria-pressed=true]{background:#111;color:#fff}
+.step{border-top:1px solid #ddd;margin-top:20px;padding-top:12px} label{display:block;margin:8px 0} input{padding:6px;width:260px}
+#country{position:relative;display:inline-block} #clist{position:absolute;background:#fff;border:1px solid #ccc;max-height:160px;overflow:auto;list-style:none;margin:0;padding:0;width:260px;z-index:5} #clist li{padding:6px}</style></head><body>
+<div id=product><h1>Trail Runner 3</h1><p>€129.00 per pair · Free returns</p>
+<div>Size (EU)</div><div class=sizes role=group aria-label="Size"></div>
+<div>Quantity <button id=minus aria-label="Decrease quantity">−</button> <span id=qty aria-live=polite>1</span> <button id=plus aria-label="Increase quantity">+</button></div>
+<button id=add>Add to bag</button> <span id=added></span></div>
+<div id=bag class=step hidden><h2>Your bag</h2><div id=lines></div><button id=checkout>Checkout</button></div>
+<div id=ship class=step hidden><h2>Shipping</h2>
+<label>Full name <input id=name autocomplete=name></label><label>Street address <input id=street autocomplete=street-address></label><label>City <input id=city></label>
+<label id=countryLabel>Country <span id=country><button id=cbtn aria-haspopup=listbox aria-expanded=false>Choose a country</button><ul id=clist role=listbox hidden></ul></span></label>
+<label id=stateRow hidden>State <select id=state><option value="">Select a state</option></select></label>
+<label>Postcode / ZIP <input id=zip></label><div id=err role=alert></div><button id=topay>Continue to payment</button></div>
+<div id=pay class=step hidden><h2>Payment</h2><p id=summary></p><iframe id=card title="Secure card payment" style="width:420px;height:150px;border:1px solid #ccc"></iframe><br><button id=paybtn>Pay now</button></div>
+<script>
+const $ = (id) => document.getElementById(id);
+const SIZES = [38, 39, 40, 41, 42, 43, 44, 45]; let size = null, qty = 1, bag = null;
+document.querySelector('.sizes').innerHTML = SIZES.map((s) => `<button aria-pressed=false data-s=${s}>${s}</button>`).join('');
+document.querySelector('.sizes').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; size = +b.dataset.s; document.querySelectorAll('.sizes button').forEach((x) => x.setAttribute('aria-pressed', x === b)); });
+$('plus').onclick = () => { qty = Math.min(5, qty + 1); $('qty').textContent = qty; }; $('minus').onclick = () => { qty = Math.max(1, qty - 1); $('qty').textContent = qty; };
+$('add').onclick = () => { if (!size) { $('added').textContent = 'Choose a size first'; return; } bag = { size, qty }; report('bag', bag); $('added').textContent = 'Added to bag'; $('bag').hidden = false;
+  $('lines').innerHTML = `Trail Runner 3 · EU ${size} · Qty ${qty} · €${(129 * qty).toFixed(2)}`; };
+$('checkout').onclick = () => { $('ship').hidden = false; $('ship').scrollIntoView(); };
+const COUNTRIES = ['Australia', 'Canada', 'France', 'Germany', 'Ireland', 'Portugal', 'Spain', 'United Kingdom', 'United States'];
+let country = '';
+$('cbtn').onclick = (e) => { e.preventDefault(); const open = $('clist').hidden; $('clist').hidden = !open; $('cbtn').setAttribute('aria-expanded', open);
+  $('clist').innerHTML = COUNTRIES.map((c) => `<li role=option>${c}</li>`).join(''); };
+$('clist').addEventListener('click', (e) => { const li = e.target.closest('li'); if (!li) return; country = li.textContent; $('cbtn').textContent = country; $('clist').hidden = true; $('cbtn').setAttribute('aria-expanded', false);
+  const states = country === 'United States' ? ['California', 'New York', 'Oregon', 'Texas', 'Washington'] : country === 'Canada' ? ['Ontario', 'Quebec', 'British Columbia'] : [];
+  $('stateRow').hidden = !states.length; $('state').innerHTML = '<option value="">Select a state</option>' + states.map((s) => `<option>${s}</option>`).join(''); });
+$('topay').onclick = () => {
+  const f = { name: $('name').value.trim(), street: $('street').value.trim(), city: $('city').value.trim(), country, state: $('state').value, zip: $('zip').value.trim() };
+  const missing = Object.entries(f).filter(([k, v]) => !v && !(k === 'state' && $('stateRow').hidden)).map(([k]) => k);
+  if (missing.length) { $('err').textContent = 'Please fill in: ' + missing.join(', '); return; }
+  report('shipping', f); const shipCost = f.country === 'United States' ? 18 : 6, total = 129 * bag.qty + shipCost;
+  $('summary').textContent = `Items €${(129 * bag.qty).toFixed(2)} · Shipping €${shipCost.toFixed(2)} · Order total €${total.toFixed(2)}`;
+  $('card').src = 'http://127.0.0.1:8812/card.html'; $('pay').hidden = false; report('payment_step', total); $('pay').scrollIntoView(); };
+$('paybtn').onclick = () => report('paid', true);
+report('loaded', true);
+</script></body></html>

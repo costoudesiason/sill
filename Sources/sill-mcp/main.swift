@@ -253,6 +253,7 @@ func compactSnapshot(_ result: Any, boxes: Bool = false) -> String {
             case "page": pageInfo = element
             // The page's map first, then what it's set to, then how far through its list.
             case "map": lines.insert("Page: " + text, at: min(2, lines.count))
+            case "grid": lines.append("[\(element["ref"] as? String ?? "")] " + text + "  (click or type into a cell by its address; {\"paste\": \"a\\nb\", \"on\": \"B2\"} fills down from B2)")
             case "state":
                 let at = lines.firstIndex(where: { $0.hasPrefix("Page: ") }).map { $0 + 1 } ?? min(2, lines.count)
                 lines.insert("State: " + text, at: at)
@@ -1016,6 +1017,16 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                 if r["partial"] as? Bool == true { did += " ⚠ partial match for “\(t as? String ?? "")”: check it's what you meant" }
                 if let d = r["dialog"] as? [String: Any] { did += "; the page opened a \(d["kind"] ?? "dialog"): “\(d["message"] ?? "")”" }
                 if let o = r["opened"] as? [String: Any] { did += "; it opened a new tab \(o["id"] ?? "") (now current)"; tab["tab"] = o["id"] }
+            } else if let t = step["type"], let address = t as? String, address.range(of: #"^[A-Z]{1,3}[0-9]{1,6}$"#, options: .regularExpression) != nil,
+                      step["ref"] == nil {
+                // A grid's cell by its address: chosen with a click and filled as a sheet takes it (pasted).
+                let text = step["text"] as? String ?? ""
+                let c = try sill.run("page.click", tab.merging(["text": address]) { $1 }) as? [String: Any] ?? [:]
+                if let missed = c["missed"] as? String { throw Failure(missed) }
+                _ = try sill.run("clipboard.set", ["text": text])
+                _ = try sill.run("page.press", tab.merging(["key": "Meta+V"]) { $1 })
+                if step["submit"] as? Bool == true { _ = try sill.run("page.press", tab.merging(["key": "Enter"]) { $1 }) }
+                did = "put “\(clip(text, 40))” in \(address)"
             } else if let t = step["type"] {
                 var a = tab.merging(["text": step["text"] as? String ?? "", "clear": step["clear"] as? Bool ?? true,
                                      "submit": step["submit"] as? Bool ?? false]) { $1 }
@@ -1044,9 +1055,13 @@ func runSteps(_ sill: Sill, _ args: [String: Any]) throws -> String {
                     html = text.contains("\t") ? "<table>" + rows.joined() + "</table>" : nil
                 }
                 _ = try sill.run("clipboard.set", ["text": text, "html": html as Any].compactMapValues { $0 is NSNull ? nil : $0 })
-                var a = tab.merging(["key": "Meta+V"]) { $1 }
-                if let on = step["on"] { a.merge(target(on)) { $1 } }
-                _ = try sill.run("page.press", a)
+                // Where it goes is chosen as a person chooses it, by clicking there (a grid selects a cell on a
+                // click; a cell can't take focus), then ⌘V goes to whatever the click made active.
+                if let on = step["on"] {
+                    let c = try sill.run("page.click", tab.merging(target(on, in: step["in"])) { $1 }) as? [String: Any] ?? [:]
+                    if let missed = c["missed"] as? String { throw Failure(missed) }
+                }
+                _ = try sill.run("page.press", tab.merging(["key": "Meta+V"]) { $1 })
                 let lines = text.split(separator: "\n").count
                 did = "pasted \(lines > 1 ? "\(lines) lines" : "“\(clip(text, 40))”")"
             } else if let day = step["date"] as? String, let parts = Optional(day.split(separator: "-")), parts.count == 3,

@@ -56,7 +56,10 @@ final class SiteNotes {
            let read = try? JSONDecoder().decode([String: Note].self, from: data) { notes = read }
     }
 
-    private static func host(_ url: URL?) -> String? { url?.host().map { Domains.bare($0.lowercased()) } }
+    /// The site: its host, and its port when it has one (two local apps on one machine are two sites).
+    private static func host(_ url: URL?) -> String? {
+        url?.host().map { Domains.bare($0.lowercased()) + (url?.port.map { ":\($0)" } ?? "") }
+    }
 
     func agentTyped(_ text: String, in tab: Tab) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)

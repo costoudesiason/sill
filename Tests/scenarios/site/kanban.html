@@ -1,0 +1,19 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><title>Sprint 14 – Board</title><script src=scen.js></script>
+<style>body{font:14px system-ui;margin:20px;display:flex;gap:16px} .col{background:#f1f2f4;border-radius:8px;padding:8px;width:220px;min-height:300px} .card{background:#fff;border-radius:6px;padding:10px;margin:6px 0;box-shadow:0 1px 2px #0002;cursor:grab;user-select:none} .ghost{opacity:.4}</style></head><body>
+<div id=board style="display:flex;gap:16px"></div>
+<script>
+// Saved, as a real board saves (a reload shows the same board). The runner starts each run from a fresh profile.
+const cols = JSON.parse(localStorage.getItem('board') || 'null') || { 'To do': ['Write release notes', 'Fix login bug', 'Update icons'], 'In progress': ['Search filters', 'Onboarding copy'], 'Done': ['Dark mode', 'Crash on launch'] };
+const board = document.getElementById('board');
+const draw = () => { board.innerHTML = Object.entries(cols).map(([c, cards]) => `<section class=col data-c="${c}" aria-label="${c}"><h3>${c}</h3>${cards.map((t) => `<div class=card>${t}</div>`).join('')}</section>`).join(''); localStorage.setItem('board', JSON.stringify(cols)); report('board', cols); };
+// Drag with the pointer (no HTML drag and drop): press, move, let go where it should go.
+let drag = null;
+board.addEventListener('pointerdown', (e) => { const card = e.target.closest('.card'); if (!card) return; drag = { text: card.textContent, from: card.closest('.col').dataset.c }; card.classList.add('ghost'); card.setPointerCapture(e.pointerId); });
+board.addEventListener('pointerup', (e) => {
+  if (!drag) return; const at = document.elementsFromPoint(e.clientX, e.clientY); const col = at.map((x) => x.closest && x.closest('.col')).find(Boolean);
+  if (col) { cols[drag.from] = cols[drag.from].filter((t) => t !== drag.text); const list = cols[col.dataset.c];
+    const cards = [...col.querySelectorAll('.card')].filter((c) => c.textContent !== drag.text); let i = cards.findIndex((c) => { const r = c.getBoundingClientRect(); return e.clientY < r.top + r.height / 2; });
+    if (i < 0) i = cards.length; list.splice(i, 0, drag.text); }
+  drag = null; draw(); });
+draw();
+</script></body></html>

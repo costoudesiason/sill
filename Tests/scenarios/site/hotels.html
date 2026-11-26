@@ -1,0 +1,107 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><title>Stayfinder</title><script src=scen.js></script>
+<style>body{font:15px system-ui;margin:0;color:#222} header{background:#003b95;color:#fff;padding:14px 24px} main{display:grid;grid-template-columns:240px 1fr;gap:24px;padding:20px 24px}
+.card{border:1px solid #ddd;border-radius:8px;padding:12px;margin-bottom:10px;display:grid;grid-template-columns:1fr 180px} .price{text-align:right} .big{font-size:20px;font-weight:700}
+.tag{color:#008234;font-size:13px} #form{display:flex;gap:8px;padding:16px 24px;background:#febb02} #form>*{padding:10px;border:0;border-radius:4px;font:inherit}
+#cal{position:absolute;top:120px;left:300px;background:#fff;border:1px solid #ccc;padding:12px;display:flex;gap:24px;box-shadow:0 6px 20px #0003} .mo{display:grid;grid-template-columns:repeat(7,32px);gap:2px} .mo h4{grid-column:1/8;margin:4px 0}
+.mo button{padding:6px 0;border:0;background:#f5f5f5} .mo button.in{background:#cfe0fc} #sugg{position:absolute;top:118px;left:24px;background:#fff;border:1px solid #ccc;width:300px;list-style:none;margin:0;padding:0} #sugg li{padding:8px;cursor:pointer}
+#menu{position:absolute;background:#fff;border:1px solid #ccc;box-shadow:0 6px 20px #0003;padding:4px 0} #menu [role=menuitem]{display:block;padding:8px 16px;border:0;background:none;width:100%;text-align:left;font:inherit}
+.pager button{margin-right:4px}</style></head><body>
+<script>
+// A bot check on the first visit: a blank page that reloads itself, as Booking's does.
+if (!sessionStorage.getItem('passed')) {
+  document.write('<div id=chk></div>');
+  setTimeout(() => { sessionStorage.setItem('passed', '1'); const u = new URL(location.href); u.searchParams.set('chal_t', Date.now()); location.replace(u); }, 1200);
+  throw new Error('checking');
+}
+</script>
+<header><b>Stayfinder</b></header>
+<div id=form>
+  <input id=dest placeholder="Where are you going?" aria-label="Where are you going?" autocomplete=off>
+  <button id=dates aria-expanded=false aria-haspopup=dialog>Check-in date — Check-out date</button>
+  <button id=guests>2 adults · 0 children · 1 room</button>
+  <button id=go>Search</button>
+</div>
+<ul id=sugg role=listbox hidden></ul>
+<div id=cal role=dialog aria-label="Choose dates" hidden></div>
+<main id=main></main>
+<script>
+const $ = (id) => document.getElementById(id);
+const q = new URLSearchParams(location.search);
+let ready = false; setTimeout(() => { ready = true; }, 900);   // the page's script takes over a moment after it's drawn
+const live = (el, ev, fn) => el.addEventListener(ev, (e) => { if (ready) fn(e); });
+// Destination with suggestions
+const PLACES = ['Lisbon, Portugal', 'Lisbon, Ohio, United States', 'Lisburn, Northern Ireland', 'Lima, Peru', 'Liverpool, United Kingdom'];
+let dest = q.get('ss') || ''; $('dest').value = dest;
+$('dest').addEventListener('input', () => {
+  const v = $('dest').value.toLowerCase(); dest = '';
+  const hits = v.length >= 2 ? PLACES.filter((p) => p.toLowerCase().startsWith(v)) : [];
+  $('sugg').innerHTML = hits.map((p) => `<li role=option>${p}</li>`).join(''); $('sugg').hidden = !hits.length;
+});
+$('sugg').addEventListener('click', (e) => { const li = e.target.closest('li'); if (!li) return; dest = li.textContent; $('dest').value = dest; $('sugg').hidden = true; });
+// Dates: a two-month calendar with arrows
+let ci = q.get('checkin') || '', co = q.get('checkout') || '', first = new Date(2026, 11, 1);
+const fmt = (d) => d.toISOString().slice(0, 10);
+const nice = (s) => new Date(s + 'T12:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+const label = () => { $('dates').textContent = ci && co ? nice(ci) + ' — ' + nice(co) : ci ? nice(ci) + ' — Check-out date' : 'Check-in date — Check-out date'; };
+const drawCal = () => {
+  const month = (m) => { const d0 = new Date(first.getFullYear(), first.getMonth() + m, 1), name = d0.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+    let h = `<div class=mo><h4>${name}</h4>` + '<span></span>'.repeat((d0.getDay() + 6) % 7);
+    for (let d = new Date(d0); d.getMonth() === d0.getMonth(); d.setDate(d.getDate() + 1)) { const s = fmt(new Date(d.getTime() + 12 * 3600e3));
+      h += `<button data-d=${s} aria-label="${d.getDate()} ${d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' })}" class="${ci && s >= ci && s <= (co || ci) ? 'in' : ''}">${d.getDate()}</button>`; }
+    return h + '</div>'; };
+  $('cal').innerHTML = `<button id=prev aria-label="Previous month">‹</button>` + month(0) + month(1) + `<button id=nextm aria-label="Next month">›</button>`;
+};
+live($('dates'), 'click', () => { const open = $('cal').hidden; $('cal').hidden = !open; $('dates').setAttribute('aria-expanded', open); if (open) drawCal(); });
+$('cal').addEventListener('click', (e) => {
+  if (e.target.id === 'prev') { first.setMonth(first.getMonth() - 1); return drawCal(); }
+  if (e.target.id === 'nextm') { first.setMonth(first.getMonth() + 1); return drawCal(); }
+  const d = e.target.dataset && e.target.dataset.d; if (!d) return;
+  if (!ci || co || d <= ci) { ci = d; co = ''; } else { co = d; $('cal').hidden = true; $('dates').setAttribute('aria-expanded', false); }
+  label(); drawCal();
+});
+label();
+live($('go'), 'click', () => {
+  if (!dest) { alert('Choose a destination from the list'); return; }
+  const u = new URL(location.href); ['ss', 'checkin', 'checkout', 'adults', 'order', 'page', 'fc', 'sc8', 'sc9', 'bf'].forEach((k) => u.searchParams.delete(k));
+  u.searchParams.set('ss', dest); if (ci) u.searchParams.set('checkin', ci); if (co) u.searchParams.set('checkout', co); u.searchParams.set('adults', 2);
+  location.assign(u);
+});
+// Results
+const HOTELS = [
+  ['Memmo Príncipe Real', 'Príncipe Real', 9.1, 1840, 1, 0, 289], ['Hostel Alfama Sun', 'Alfama', 8.6, 3120, 0, 0, 66],
+  ['Lisbon Budget Inn', 'Arroios', 7.4, 980, 1, 0, 103], ['Pensão Azul', 'Baixa', 7.9, 655, 1, 1, 93], ['Hotel Avenida Palace', 'Baixa', 8.9, 2210, 1, 1, 214],
+  ['Corpo Santo Hotel', 'Cais do Sodré', 9.3, 2766, 1, 1, 241], ['Ibis Lisboa Saldanha', 'Saldanha', 7.8, 4410, 0, 0, 98], ['Casa do Rio Suites', 'Belém', 8.8, 512, 1, 0, 117],
+  ['The Lumiares', 'Bairro Alto', 9.0, 1390, 1, 1, 233], ['Moov Hotel Porto Norte', 'Avenidas Novas', 8.0, 2034, 0, 1, 104], ['Alfama Patio Hostel', 'Alfama', 8.7, 2880, 0, 0, 79],
+  ['Hotel Mundial', 'Martim Moniz', 8.2, 3305, 1, 1, 136], ['Lisboa Tejo Hotel', 'Baixa', 8.4, 1702, 0, 1, 121], ['Casa do Rio', 'Belém', 8.3, 447, 1, 0, 112],
+  ['NH Collection Liberdade', 'Avenida', 8.6, 1590, 1, 1, 187], ['Hotel Lis', 'Baixa', 7.6, 801, 1, 0, 108], ['Turim Ibéria Hotel', 'Campo de Ourique', 8.5, 1199, 1, 1, 129],
+  ['Olissippo Lapa Palace', 'Lapa', 9.4, 980, 1, 1, 520], ['Hotel Zenit Lisboa', 'Saldanha', 8.1, 1433, 0, 1, 115], ['Inspira Liberdade', 'Avenida', 8.9, 2650, 1, 0, 176],
+  ['Sunset Destination Hostel', 'Cais do Sodré', 8.6, 3999, 1, 0, 120], ['Hotel Britania', 'Avenida', 9.2, 1123, 1, 1, 198], ['VIP Executive Saldanha', 'Saldanha', 8.0, 1877, 0, 1, 119], ['Ritz Four Seasons', 'Marquês', 9.5, 900, 1, 1, 780],
+].map(([name, area, score, reviews, fc, bf, night], i) => ({ name, area, score, reviews, fc, bf, night, rank: i }));
+if (q.get('ss')) {
+  report('search', { ss: q.get('ss'), checkin: q.get('checkin'), checkout: q.get('checkout'), adults: q.get('adults') });
+  const nights = ci && co ? Math.round((new Date(co) - new Date(ci)) / 864e5) : 1;
+  const mult = ci === '2027-01-14' ? 1 : 1.17;   // other dates, other prices
+  const want = { fc: q.get('fc'), sc8: q.get('sc8'), sc9: q.get('sc9'), bf: q.get('bf') }, order = q.get('order') || 'popularity', page = +(q.get('page') || 1);
+  const words = { score: (s) => s >= 9 ? 'Wonderful' : s >= 8 ? 'Very good' : s >= 7 ? 'Good' : 'Pleasant' };
+  let list = q.get('ss').startsWith('Lisbon, Portugal') ? HOTELS.slice() : HOTELS.slice(0, 5).map((h) => ({ ...h, name: h.name + ' (Ohio)' }));
+  if (want.fc) list = list.filter((h) => h.fc); if (want.bf) list = list.filter((h) => h.bf); if (want.sc8) list = list.filter((h) => h.score >= 8); if (want.sc9) list = list.filter((h) => h.score >= 9);
+  if (order === 'price') list.sort((a, b) => a.night - b.night); else if (order === 'price_desc') list.sort((a, b) => b.night - a.night); else if (order === 'score') list.sort((a, b) => b.score - a.score);
+  const per = 10, pages = Math.ceil(list.length / per), shown = list.slice((page - 1) * per, page * per);
+  const box = (k, txt) => `<label><input type=checkbox data-k=${k} ${want[k] ? 'checked' : ''}> ${txt}</label><br>`;
+  const sorts = { popularity: 'Our top picks', price: 'Price (lowest first)', price_desc: 'Price (highest first)', score: 'Review score' };
+  $('main').innerHTML = `<aside><h3>Filter by:</h3><h4>Popular filters</h4>${box('fc', 'Free cancellation')}${box('bf', 'Breakfast included')}<h4>Review score</h4>${box('sc8', 'Very good: 8+')}${box('sc9', 'Wonderful: 9+')}</aside>
+    <section><h2>${q.get('ss').split(',')[0]}: ${list.length} properties found</h2>
+    <button id=sort aria-expanded=false aria-haspopup=menu>Sort by: ${sorts[order]}</button>
+    <div id=menu role=menu hidden>${Object.entries(sorts).map(([k, v]) => `<button role=menuitem data-o=${k}>${v}</button>`).join('')}</div>
+    <div id=list>${shown.map((h) => `<div class=card><div><h3><a href="#${encodeURIComponent(h.name)}">${h.name}</a></h3><div>${h.area}, Lisbon</div>
+      <div>Scored ${h.score.toFixed(1)} · ${words.score(h.score)} · ${h.reviews.toLocaleString('en')} reviews</div>${h.fc ? '<div class=tag>Free cancellation</div>' : '<div>Non-refundable</div>'}${h.bf ? '<div class=tag>Breakfast included</div>' : ''}</div>
+      <div class=price><div>${nights} night${nights > 1 ? 's' : ''}, 2 adults</div><div class=big>€${Math.round(h.night * nights * mult)}</div><div>€${Math.round(h.night * mult)} per night</div><button>See availability</button></div></div>`).join('')}</div>
+    <div class=pager>${Array.from({ length: pages }, (_, i) => `<button data-p=${i + 1} ${i + 1 === page ? 'aria-current=page' : ''}>${i + 1}</button>`).join('')}${page < pages ? '<button data-p=' + (page + 1) + '>Next page</button>' : ''}</div></section>`;
+  const go = (k, v) => { const u = new URL(location.href); if (v == null) u.searchParams.delete(k); else u.searchParams.set(k, v); if (k !== 'page') u.searchParams.delete('page'); location.assign(u); };
+  document.querySelectorAll('aside input').forEach((b) => b.addEventListener('change', () => { if (!ready) { b.checked = !b.checked; return; } report('filter_' + b.dataset.k, b.checked); go(b.dataset.k, b.checked ? 1 : null); }));
+  live($('sort'), 'click', () => { const open = $('menu').hidden; $('menu').hidden = !open; $('sort').setAttribute('aria-expanded', open); const r = $('sort').getBoundingClientRect(); $('menu').style.left = r.left + 'px'; $('menu').style.top = (r.bottom + scrollY) + 'px'; });
+  $('menu').addEventListener('click', (e) => { const o = e.target.dataset.o; if (o) { report('sort', o); go('order', o); } });
+  document.querySelectorAll('.pager button').forEach((b) => live(b, 'click', () => go('page', b.dataset.p)));
+}
+report('loaded', location.search);
+</script></body></html>

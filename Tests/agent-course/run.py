@@ -649,6 +649,25 @@ def page_map(c):
     return True
 
 @case
+def ticking(c):
+    # A page whose only change is a number ticking in place has settled; a thing with a grab cursor is a control.
+    t = time.time(); c.must("page_do", steps=[{"wait": "settled"}]); took = time.time() - t
+    if took > 2: raise Fail(f"a ticking countdown held settled for {took:.1f} s")
+    look = c.look()
+    if '"Drag me"' not in look: raise Fail("a card with a grab cursor isn't listed: " + look[:400])
+    c.must("page_do", steps=[{"click": "Go"}])
+    return c.result().get("go") is True
+
+@case
+def grid_cells(c):
+    # A grid read as cells by address, and a paste aimed at a cell lands there.
+    look = c.look()
+    if "Grid " not in look: raise Fail("no grid line: " + look[:400])
+    ok, out = c.do("page_do", steps=[{"paste": "x1\nx2", "on": "B2"}])
+    if 'B2 "x1"' not in out or 'B3 "x2"' not in out: raise Fail("paste didn't land at B2: " + out[-700:])
+    return True
+
+@case
 def popup(c):
     ok, out = c.do("page_click", ref=ref(c.look(), "link", "Open help"))
     ok2, tabs = c.m.call("tabs_list")
@@ -883,7 +902,7 @@ def run_case(mcp, name, f, timeout=40):
     def go():
         c = None
         try:
-            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups", "needs": "state", "reroute": "empty", "page-map": "check"}.get(name, name))
+            c = Case(mcp, {"keyboard-stays": "react-input", "read-script": "animated", "goal": "animated", "habits": "animated", "cross-tab": "animated", "errands": "animated", "files": "animated", "beside": "animated", "paste-rows": "grid", "in-context": "two-months", "pick": "autocomplete", "date-gesture": "two-months", "records": "cards", "zoom": "cards", "site-notes": "two-months", "vault": "react-input", "pdf": "cards", "recalculate": "consent", "press-list": "press-list", "stale-wait": "stale-wait", "drawn-select": "drawn-select", "month-paging": "month-calendar", "goal-repeat": "facets", "find": "facets", "answer-check": "check", "page-state": "state", "list-end": "list", "popups": "popups", "failure-picture": "popups", "needs": "state", "reroute": "empty", "page-map": "check", "ticking": "ticker", "grid-cells": "sheet"}.get(name, name))
             v = f(c)
             out["v"] = v
         except Fail as e: out["v"] = str(e)

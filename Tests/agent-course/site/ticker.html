@@ -1,0 +1,5 @@
+<!doctype html><meta charset=utf-8><title>Ticking</title><script src=kit.js></script>
+<h1>Next question in <span id=t>20</span></h1><p>A countdown that changes every 200 ms, as a quiz or an auction does.</p>
+<div style="display:flex;gap:8px"><div class=card style="cursor:grab;border:1px solid #ccc;padding:10px">Drag me</div></div>
+<button onclick="done('go', true)">Go</button>
+<script>let n = 200; setInterval(() => { n--; document.getElementById('t').textContent = (n / 10).toFixed(1); }, 200);</script>

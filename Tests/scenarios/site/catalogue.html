@@ -1,0 +1,14 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><title>Lumen – Lighting catalogue</title><script src=scen.js></script>
+<style>body{font:14px system-ui;margin:20px} #grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px} .item{border:1px solid #eee;padding:12px;height:120px}</style></head><body>
+<h1>Lighting</h1><form id=f role=search><input id=s type=search placeholder="Search the catalogue" aria-label="Search the catalogue"> <button>Search</button></form><div id=grid></div><p id=end></p>
+<script>
+const kinds = ['Pendant', 'Floor Lamp', 'Desk Lamp', 'Wall Light', 'Ceiling Light', 'Table Lamp'], woods = ['Birch', 'Walnut', 'Ash', 'Brass', 'Linen', 'Glass', 'Steel'];
+const items = Array.from({ length: 400 }, (_, i) => ({ name: woods[i % 7] + ' ' + kinds[(i * 5) % 6] + ' ' + (100 + i), price: 39 + ((i * 37) % 260) }));
+items[232] = { name: 'Nordic Oak Lamp', price: 149 }; items[51] = { name: 'Nordic Oak Lamp Shade', price: 35 };
+let shown = 0, list = items;
+const add = () => { const html = list.slice(shown, shown + 20).map((x) => `<div class=item><b>${x.name}</b><div>€${x.price}</div></div>`).join(''); document.getElementById('grid').insertAdjacentHTML('beforeend', html); shown += 20; report('shown', shown);
+  document.getElementById('end').textContent = shown >= list.length ? 'That’s everything.' : ''; };
+addEventListener('scroll', () => { if (innerHeight + scrollY > document.body.scrollHeight - 300 && shown < list.length) add(); });
+document.getElementById('f').onsubmit = (e) => { e.preventDefault(); const v = document.getElementById('s').value.toLowerCase(); list = items.filter((x) => x.name.toLowerCase().includes(v)); shown = 0; document.getElementById('grid').innerHTML = ''; report('searched', v); add(); };
+add();
+</script></body></html>

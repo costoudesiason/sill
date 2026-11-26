@@ -1,0 +1,51 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><title id=t>Capacitor discharge – Sheet</title><script src=kit.js></script><script>window.report = () => {};</script>
+<style>
+body{font:13px system-ui;margin:0} #bar{display:flex;gap:8px;padding:8px;border-bottom:1px solid #ddd;align-items:center}
+#name{width:60px;border:1px solid #ccc;padding:3px} #fx{flex:1;border:1px solid #ccc;padding:4px}
+#grid{display:grid;grid-template-columns:40px repeat(6,110px);position:relative}
+.h,.r{background:#f3f3f3;color:#555;text-align:center;padding:4px;border:1px solid #e3e3e3}
+.c{border:1px solid #e3e3e3;padding:4px 6px;height:18px;white-space:pre;overflow:hidden;cursor:cell}
+.c.sel{outline:2px solid #1a73e8;outline-offset:-2px} #ed{position:absolute;opacity:0;width:1px;height:1px;left:-10px}
+</style></head><body>
+<div id=bar><input id=name aria-label="Name box" readonly value=A1><span>fx</span><input id=fx aria-label="Formula bar"></div>
+<div id=grid role=grid aria-label="Sheet1"></div><textarea id=ed aria-label="Cell editor"></textarea>
+<script>
+const COLS = 'ABCDEF', ROWS = 30, data = {};
+const mode = new URLSearchParams(location.search).get('mode') || 'voltage';
+if (mode === 'voltage') { data.A1 = 'Time / s'; data.B1 = 'Voltage / V'; for (let i = 0; i < 12; i++) data['A' + (i + 2)] = String(i * 2); }
+else { document.getElementById('t').textContent = 'Lab results – Sheet'; data.A1 = 'Run'; data.B1 = 'Totals'; ['Run 1','Run 2','Run 3'].forEach((r, i) => data['A' + (i + 2)] = r); }
+const grid = document.getElementById('grid'), ed = document.getElementById('ed'), fx = document.getElementById('fx'), nameBox = document.getElementById('name');
+let sel = 'A1', editing = false;
+grid.appendChild(Object.assign(document.createElement('div'), { className: 'h' }));
+for (const c of COLS) grid.appendChild(Object.assign(document.createElement('div'), { className: 'h', textContent: c, role: 'columnheader' }));
+const cells = {};
+for (let r = 1; r <= ROWS; r++) {
+  grid.appendChild(Object.assign(document.createElement('div'), { className: 'r', textContent: r, role: 'rowheader' }));
+  for (const c of COLS) { const id = c + r, d = document.createElement('div'); d.className = 'c'; d.setAttribute('role', 'gridcell'); d.setAttribute('aria-label', id); d.dataset.id = id; d.textContent = data[id] || ''; cells[id] = d; grid.appendChild(d); }
+}
+const show = () => { for (const id in cells) { cells[id].classList.toggle('sel', id === sel); cells[id].setAttribute('aria-selected', id === sel); } nameBox.value = sel; fx.value = data[sel] || ''; };
+const save = () => { for (const id in cells) cells[id].textContent = data[id] || ''; report('cells', Object.fromEntries(Object.entries(data).filter(([, v]) => v !== ''))); show(); };
+const move = (dc, dr) => { const c = COLS.indexOf(sel[0]) + dc, r = +sel.slice(1) + dr; if (c >= 0 && c < COLS.length && r >= 1 && r <= ROWS) sel = COLS[c] + r; };
+let buf = null;
+const commit = () => { if (buf !== null) { data[sel] = buf; buf = null; save(); } };
+grid.addEventListener('mousedown', (e) => { const d = e.target.closest('.c'); if (!d) return; commit(); sel = d.dataset.id; show(); setTimeout(() => ed.focus()); });
+// Typing goes to the selected cell, as in Google Sheets: Enter commits and moves down, Tab moves right.
+ed.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); commit(); move(0, 1); show(); }
+  else if (e.key === 'Tab') { e.preventDefault(); commit(); move(1, 0); show(); }
+  else if (e.key.startsWith('Arrow') && buf === null) { e.preventDefault(); move(e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0, e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0); show(); }
+  else if ((e.key === 'Backspace' || e.key === 'Delete') && buf === null) { data[sel] = ''; save(); }
+});
+ed.addEventListener('input', () => { if (buf === null) buf = ''; buf += ed.value; ed.value = ''; cells[sel].textContent = buf; fx.value = buf; });
+// Pasting rows and columns fills the cells from the selected one (one line per row, tabs per column).
+ed.addEventListener('paste', (e) => {
+  e.preventDefault(); const text = (e.clipboardData || window.clipboardData).getData('text');
+  const rows = text.replace(/\r/g, '').replace(/\n$/, '').split('\n');
+  const c0 = COLS.indexOf(sel[0]), r0 = +sel.slice(1);
+  rows.forEach((line, i) => line.split('\t').forEach((v, j) => { const id = COLS[c0 + j] + (r0 + i); if (cells[id]) data[id] = v.trim(); }));
+  report('pasted', rows.length); save();
+});
+fx.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); data[sel] = fx.value; save(); move(0, 1); show(); ed.focus(); } });
+document.addEventListener('keydown', (e) => { if (document.activeElement === document.body) ed.focus(); });
+show(); ed.focus(); report('loaded', true);
+</script></body></html>

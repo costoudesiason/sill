@@ -7,7 +7,8 @@ import Foundation
 // MARK: - Habits: where the user goes
 
 func hostOf(_ url: String) -> String? {
-    URL(string: url)?.host() ?? URL(string: "https://" + url)?.host()
+    guard let u = URL(string: url)?.host() != nil ? URL(string: url) : URL(string: "https://" + url), let host = u.host() else { return nil }
+    return host + (u.port.map { ":\($0)" } ?? "")   // a port is another site (two local apps)
 }
 
 func pageLine(_ page: [String: Any]) -> String {

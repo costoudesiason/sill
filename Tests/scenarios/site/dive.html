@@ -1,0 +1,43 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><title>Deepdive · the daily dive</title><script src=scen.js></script>
+<style>body{font:16px ui-monospace,monospace;background:#0e2a47;color:#cfe;margin:0;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center}
+#card{background:#142;border:2px solid #345;padding:24px 32px;min-width:420px;text-align:center} #prompt{font-size:26px;margin:12px 0}
+#count{font-size:60px} #bar{position:fixed;bottom:24px;display:flex;gap:8px;align-items:center} input{font:inherit;padding:10px;width:320px;background:#012;color:#fff;border:2px solid #e57}
+button{font:inherit;padding:10px 18px;background:#e57;color:#fff;border:0} #timer{width:48px;text-align:center} #msg{color:#f99;min-height:20px}</style></head><body>
+<div id=card><div id=label></div><div id=prompt></div><div id=count></div><div id=msg></div><button id=start>Start today's dive</button></div>
+<div id=bar hidden><span id=timer aria-label="Seconds left"></span><input id=answer placeholder="type one answer…" aria-label="Your answer" disabled><button id=dive disabled>DIVE</button></div>
+<script>
+const ROUNDS = [
+  ['Name a magazine', ['vogue','time','wired','the economist','economist','national geographic','forbes','rolling stone','the new yorker','new yorker','vanity fair','cosmopolitan','gq','elle','people','newsweek','the atlantic','atlantic','harper\'s bazaar','esquire','mad','monocle','private eye','the spectator','spectator','nature','science','scientific american','popular science','time out','tatler','dazed','i-d','kinfolk','wallpaper','the face','granta','paris review','the paris review','mojo','q','nme','vice','highlights','reader\'s digest','readers digest','playboy','sports illustrated','tv guide','marie claire','harpers bazaar','fortune','bloomberg businessweek','businessweek','smithsonian','new scientist','the week','life','look','jet','ebony']],
+  ['Name a planet', ['mercury','venus','earth','mars','jupiter','saturn','uranus','neptune']],
+  ['Name a chemical element', ['hydrogen','helium','lithium','beryllium','boron','carbon','nitrogen','oxygen','fluorine','neon','sodium','magnesium','aluminium','aluminum','silicon','phosphorus','sulfur','sulphur','chlorine','argon','potassium','calcium','scandium','titanium','vanadium','chromium','manganese','iron','cobalt','nickel','copper','zinc','gallium','germanium','arsenic','selenium','bromine','krypton','rubidium','strontium','yttrium','zirconium','niobium','molybdenum','technetium','ruthenium','rhodium','palladium','silver','cadmium','indium','tin','antimony','tellurium','iodine','xenon','caesium','cesium','barium','lanthanum','cerium','tungsten','platinum','gold','mercury','lead','bismuth','polonium','radon','radium','uranium','plutonium','osmium','iridium','thallium','thorium','neodymium','europium','gadolinium','holmium','erbium','thulium','ytterbium','lutetium','hafnium','tantalum','rhenium','francium','astatine','actinium','protactinium','neptunium','americium','curium','berkelium','californium','einsteinium','fermium','mendelevium','nobelium','lawrencium','praseodymium','promethium','samarium','terbium','dysprosium']],
+  ['Name a European capital', ['london','paris','berlin','madrid','rome','lisbon','dublin','amsterdam','brussels','vienna','prague','warsaw','budapest','athens','stockholm','oslo','copenhagen','helsinki','bern','reykjavik','tallinn','riga','vilnius','bratislava','ljubljana','zagreb','belgrade','sarajevo','podgorica','tirana','skopje','sofia','bucharest','chisinau','kyiv','kiev','minsk','moscow','valletta','nicosia','luxembourg','monaco','vaduz','andorra la vella','san marino','vatican city','pristina']],
+  ['Name a programming language', ['python','javascript','typescript','java','c','c++','c#','go','rust','swift','kotlin','ruby','php','perl','haskell','ocaml','scala','elixir','erlang','clojure','lisp','scheme','racket','fortran','cobol','pascal','ada','lua','r','julia','matlab','dart','zig','nim','crystal','f#','prolog','smalltalk','objective-c','assembly','bash','sql','groovy','elm','d','vb','visual basic','basic','apl','forth','solidity','mojo','gleam','odin']],
+];
+const $ = (id) => document.getElementById(id);
+let i = -1, deadline = 0, tick = null, shownAt = 0;
+const results = [];
+const next = () => {
+  i++; $('msg').textContent = '';
+  if (i >= ROUNDS.length) { $('bar').hidden = true; $('label').textContent = 'DIVE COMPLETE'; $('prompt').textContent = 'Score: ' + results.filter((r) => r.valid).length * 100; $('count').textContent = ''; report('done', results); return; }
+  $('label').textContent = 'PROMPT ' + (i + 1) + ' OF ' + ROUNDS.length; $('prompt').textContent = 'Get ready…'; $('answer').disabled = true; $('dive').disabled = true;
+  let n = 3; $('count').textContent = n;
+  const cd = setInterval(() => { n--; if (n > 0) { $('count').textContent = n; return; } clearInterval(cd); $('count').textContent = '';
+    $('prompt').textContent = ROUNDS[i][0]; $('answer').disabled = false; $('dive').disabled = false; $('answer').value = ''; $('answer').focus();
+    shownAt = Date.now(); deadline = shownAt + 20000;
+    tick = setInterval(() => { const left = Math.ceil((deadline - Date.now()) / 1000); $('timer').textContent = left;
+      if (left <= 0) { clearInterval(tick); results.push({ prompt: ROUNDS[i][0], answer: null, valid: false, ms: 20000 }); report('round' + i, results[results.length - 1]); next(); } }, 200);
+  }, 1000);
+};
+const submit = () => {
+  if ($('answer').disabled) return;
+  const a = $('answer').value.trim().toLowerCase().replace(/^the /, (m) => m);
+  if (!a) return;
+  const ok = ROUNDS[i][1].includes(a) || ROUNDS[i][1].includes(a.replace(/^the /, ''));
+  if (!ok) { $('msg').textContent = '“' + $('answer').value + '” doesn’t count. Try again.'; report('wrong' + i + '_' + Date.now(), a); $('answer').value = ''; return; }
+  clearInterval(tick);
+  results.push({ prompt: ROUNDS[i][0], answer: a, valid: true, ms: Date.now() - shownAt }); report('round' + i, results[results.length - 1]); next();
+};
+$('dive').onclick = submit; $('answer').addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+$('start').onclick = () => { $('start').remove(); $('bar').hidden = false; report('started', Date.now()); next(); };
+report('loaded', true);
+</script></body></html>

@@ -115,10 +115,12 @@ final class Habits {
 
     /// Your pages on a site (most visited, lately), and what you click there.
     func site(_ host: String, page: URL? = nil, limit: Int = 6) -> [String: Any] {
-        let bare = Domains.bare(host.lowercased())
+        // "host:port" is one site: another port on the same machine is another app.
+        let parts = host.lowercased().split(separator: ":", maxSplits: 1)
+        let bare = Domains.bare(parts.first.map(String.init) ?? host.lowercased()), port = parts.count > 1 ? Int(parts[1]) : nil
         let now = Date()
         let pages = History.shared.visits.values
-            .filter { Domains.bare($0.address?.host()) == bare && $0.count >= 2 }
+            .filter { Domains.bare($0.address?.host()) == bare && (port == nil || $0.address?.port == port) && $0.count >= 2 }
             .sorted { $0.score(now: now) > $1.score(now: now) }
             .prefix(limit)
         let here = page.flatMap(Self.page)

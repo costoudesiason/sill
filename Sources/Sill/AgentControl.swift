@@ -639,7 +639,9 @@ enum AgentCommands {
                 let deadline = Date().addingTimeInterval(timeout)
                 while Date() < deadline {
                     let state = (try? await evaluate("return window.__sillAgent.state()", in: view, world: Web.world)) as? [String: Any]
-                    if let idle = state?["idle"] as? Double, idle >= 500, !AgentPage.of(view).fetching(since: .distantPast) { return describe(tab, in: browser) }
+                    // Held still: nothing changing, or only text ticking in place (a timer) while its shape holds.
+                    let idle = state?["idle"] as? Double ?? 0, still = state?["still"] as? Double ?? 0
+                    if idle >= 500 || still >= 700, !AgentPage.of(view).fetching(since: .distantPast) { return describe(tab, in: browser) }
                     try await Task.sleep(nanoseconds: 100_000_000)
                 }
                 return describe(tab, in: browser)
@@ -2009,7 +2011,7 @@ enum AgentScript {
     /// actions on them. Never reads the value of a password field.
     static let source = #"""
     (() => {
-      if (window.__sillAgent && window.__sillAgent.v === 26) return;
+      if (window.__sillAgent && window.__sillAgent.v === 28) return;
       const refs = new Map();
       const ids = new WeakMap();
       let next = 1;
@@ -2030,7 +2032,7 @@ enum AgentScript {
         const s = style(el);
         return s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.01;
       };
-      const interactive = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=switch],[role=combobox],[role=textbox],[role=searchbox],[role=slider],[role=spinbutton],[role=treeitem],[contenteditable=""],[contenteditable=true],[onclick],[draggable=true],[tabindex]:not([tabindex="-1"])';
+      const interactive = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=switch],[role=combobox],[role=textbox],[role=searchbox],[role=slider],[role=spinbutton],[role=treeitem],[role=gridcell],[contenteditable=""],[contenteditable=true],[onclick],[draggable=true],[tabindex]:not([tabindex="-1"])';
       const clean = (t) => String(t || '').replace(/\s+/g, ' ').trim();
       const byIds = (el, attr) => clean((el.getAttribute(attr) || '').split(/\s+/).map((id) => {
         const root = el.getRootNode(); const t = root.getElementById ? root.getElementById(id) : null; return t ? t.innerText || t.textContent : '';
@@ -2265,7 +2267,32 @@ enum AgentScript {
         return reachable.length === 1 ? reachable[0] : null;
       };
       let lastScope = null;
+      // Grids (spreadsheets, data grids): each cell has an address (B2) from its label, its row and column
+      // indices, or its place in the rows; cells are found by that address.
+      const colName = (i) => { let s = ''; for (i++; i > 0; i = Math.floor((i - 1) / 26)) s = String.fromCharCode(65 + (i - 1) % 26) + s; return s; };
+      const cellAddress = (cell, grid) => {
+        const label = clean(cell.getAttribute('aria-label') || '');
+        if (/^[A-Z]{1,3}\d{1,6}$/.test(label)) return label;
+        const ci = +cell.getAttribute('aria-colindex'), row = cell.closest('[role=row]'), ri = +(row && row.getAttribute('aria-rowindex'));
+        if (ci && ri) return colName(ci - 1) + ri;
+        if (row && grid) {
+          const rows = [...grid.querySelectorAll('[role=row]')].filter((r) => r.closest('[role=grid],[role=treegrid]') === grid);
+          const cells = [...row.children].filter((c) => /^(gridcell|cell|columnheader|rowheader)$/.test(c.getAttribute('role') || ''));
+          const hasRowHeader = cells[0] && cells[0].getAttribute('role') === 'rowheader';
+          const c = cells.indexOf(cell) - (hasRowHeader ? 1 : 0);
+          if (c >= 0) return colName(c) + (rows.indexOf(row) + 1);
+        }
+        return '';
+      };
+      const cellByAddress = (addr) => {
+        for (const grid of document.querySelectorAll('[role=grid],[role=treegrid]')) {
+          for (const cell of grid.querySelectorAll('[role=gridcell],[role=cell]')) if (cellAddress(cell, grid) === addr) return cell;
+        }
+        return null;
+      };
       const byText = (text, editable) => {
+        // A cell by its address ("B2"), when the page has a grid.
+        if (!editable && /^[A-Z]{1,3}\d{1,6}$/.test(clean(text))) { const cell = cellByAddress(clean(text)); if (cell) return cell; }
         const scope = lastScope;
         const want = clean(text).toLowerCase();
         const whole = new RegExp('(^|[^\\p{L}\\p{N}])' + escape(want) + '($|[^\\p{L}\\p{N}])', 'u');
@@ -2345,7 +2372,7 @@ enum AgentScript {
         return null;
       };
       window.__sillAgent = {
-        v: 26,
+        v: 28,
         // The page as a person sees it, in reading order: headings, the text around the
         // controls (prices, results, messages), every control (including ones made clickable
         // only by script), what draws itself (canvas, maps, video), and what scrolls on its own.
@@ -2367,9 +2394,38 @@ enum AgentScript {
           const textBudget = all_ ? 400 : 70;
           const ownText = (el) => { for (const n of el.childNodes) if (n.nodeType === 3 && n.textContent.trim()) return true; return false; };
           const skip = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'HEAD', 'svg', 'SVG', 'PATH', 'OPTION']);
+          // A grid is shown as a grid: its size, the selected cell, and every cell with something in it by its
+          // address ("B1 "Voltage / V""), not as loose text. Its cells are clicked, typed or pasted into by address.
+          const grids = new Map();
+          for (const g of document.querySelectorAll('[role=grid],[role=treegrid]')) {
+            if (!seen(g) || g.getBoundingClientRect().width < 120) continue;
+            const cells = [...g.querySelectorAll('[role=gridcell],[role=cell]')];
+            if (cells.length < 4) continue;
+            const filled = [], addrs = [];
+            let selected = '';
+            for (const c of cells) {
+              const a = cellAddress(c, g); if (!a) continue;
+              addrs.push(a);
+              if (c.getAttribute('aria-selected') === 'true' || c === document.activeElement) selected = a;
+              const v = clean(c.innerText || c.textContent);
+              if (v && filled.length < 120) filled.push(a + ' "' + v.slice(0, 40) + '"');
+            }
+            if (!addrs.length) continue;
+            const rowsN = Math.max(...addrs.map((a) => +a.replace(/^[A-Z]+/, ''))), colsN = new Set(addrs.map((a) => a.replace(/\d+$/, ''))).size;
+            const name = clean(g.getAttribute('aria-label') || '') || 'grid';
+            grids.set(g, { context: 'grid', ref: refOf(g), text: `Grid "${name}" (${rowsN} rows × ${colsN} columns, cells by address like B2${selected ? '; selected ' + selected : ''}): `
+              + (filled.length ? filled.join(' · ') : 'empty') + (filled.length >= 120 ? ' …' : '') });
+          }
+          const gridOf = (el) => { if (!grids.size) return null; const g = el.closest && el.closest('[role=grid],[role=treegrid]'); return g && grids.has(g) ? g : null; };
+          const realControl = 'a[href],button,input,select,textarea,[role=button],[role=link],[role=checkbox],[role=combobox],[role=menuitem]';
           const items = all((el, dx, dy, out) => {
             if (out.length >= 700) return false;
             if (skip.has(el.tagName)) return;
+            if (grids.size) {
+              if (grids.has(el)) { out.push(grids.get(el)); return; }
+              const g = gridOf(el);
+              if (g && !el.matches(realControl)) return;   // its cells and their text are in the grid's line
+            }
             const said = context(el);
             if (said) {
               const text = clean(el.innerText || el.textContent).slice(0, 200);
@@ -2388,7 +2444,9 @@ enum AgentScript {
             if (!control && inView && r.width >= 8 && r.height >= 8 && performance.now() - t0 < 250 && r.width * r.height < W * H * 0.5) {
               styled++;
               const st = style(el);
-              if (st.cursor === 'pointer' && el.parentElement && style(el.parentElement).cursor !== 'pointer'
+              // A pointer, or a hand to grab or move it (a card on a board, a row in a sortable list): something to act on.
+              const acts = /^(pointer|grab|-webkit-grab|move)$/.test(st.cursor);
+              if (acts && el.parentElement && style(el.parentElement).cursor !== st.cursor
                   && !el.closest(interactive) && !el.querySelector(interactive) && seen(el)) {
                 clickables.add(el); fresh.add(el); control = true;
               }
@@ -2971,15 +3029,20 @@ enum AgentScript {
         watch() {
           if (window.__sillWatch) return;
           window.__sillLastChange = -1e9;
+          window.__sillLastShape = -1e9;   // the page's structure: elements in or out, things opening or closing
           const inArt = (n) => { const el = n.nodeType === 1 ? n : n.parentElement; return !!(el && el.closest('svg, canvas, script, style, noscript, template')); };
           const counts = (n) => n.nodeType === 1 ? !/^(SCRIPT|STYLE|LINK|META|NOSCRIPT)$/.test(n.tagName) : n.nodeType === 3 && n.data.trim() !== '';
           window.__sillWatch = new MutationObserver((records) => {
+            let changed = false;
             for (const r of records) {
               if (inArt(r.target)) continue;
               if (r.type === 'childList' && ![...r.addedNodes].some(counts) && ![...r.removedNodes].some(counts)) continue;
-              window.__sillLastChange = performance.now();
-              return;
+              changed = true;
+              // A number ticking in place (a countdown, a clock, a live price) is text changing, not the page's shape.
+              const shape = r.type === 'attributes' || (r.type === 'childList' && [...r.addedNodes, ...r.removedNodes].some((n) => n.nodeType === 1 && counts(n)));
+              if (shape) { window.__sillLastShape = performance.now(); break; }
             }
+            if (changed) window.__sillLastChange = performance.now();
           });
           window.__sillWatch.observe(document, { subtree: true, childList: true, characterData: true, attributes: true,
             attributeFilter: ['aria-expanded', 'aria-hidden', 'aria-selected', 'aria-checked', 'aria-pressed', 'aria-busy',
@@ -2988,7 +3051,7 @@ enum AgentScript {
         // How the page is doing: its load state, and ms since it last changed (huge if it hasn't).
         state() {
           this.watch();
-          return { ready: document.readyState, idle: performance.now() - window.__sillLastChange };
+          return { ready: document.readyState, idle: performance.now() - window.__sillLastChange, still: performance.now() - window.__sillLastShape };
         },
         quiet(ms) { return this.state().idle >= ms; },
         sending() {

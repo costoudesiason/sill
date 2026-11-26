@@ -16,6 +16,7 @@
 // field, never a password; the values Claude gives to type are sent.
 
 import Foundation
+import LocalAuthentication
 import Security
 
 enum Jev {
@@ -23,8 +24,14 @@ enum Jev {
         if let env = ProcessInfo.processInfo.environment["TYPESAFE_API_KEY"], !env.isEmpty { return env }
         // From Sill's vault, over its private socket: no Keychain prompt for this helper.
         if let r = try? Sill().run("vault.key", ["name": "typesafe"]) as? [String: Any], let v = r["value"] as? String, !v.isEmpty { return v }
+        // Never a Keychain prompt: a helper rebuilt or copied (the test copies) is a new program to the
+        // Keychain, which would ask the user every time. If reading it would ask, go without.
+        let context = LAContext()
+        context.interactionNotAllowed = true
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "Sill TypeSafe",
-                                    kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
+                                    kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne,
+                                    kSecUseAuthenticationContext as String: context,
+                                    kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip]
         var item: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let data = item as? Data,
               let key = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else { return nil }
