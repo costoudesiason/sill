@@ -47,9 +47,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Launch
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        Profile.preload()
         NSApp.mainMenu = MainMenu.build()
-        // Before any tab loads: the first loads wait for it (at most a second).
-        if Preferences.shared.blocksAds { Shield.shared.compile() }
         NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(handleURLEvent(_:reply:)),
                                                      forEventClass: AEEventClass(kInternetEventClass),
                                                      andEventID: AEEventID(kAEGetURL))
@@ -75,6 +74,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         pressure.activate()
         WarmSite.shared.warm(after: 4)
+        // Bookmarks read off the main thread, for the menu and ⌘T.
+        Bookmarks.preload()
         // Only if some site was allowed to notify before: else nothing is set up.
         if SitePermissions.shared.keepsNotifications { PageNotifications.shared.install() }
         // Opened again while running: a window of Sill's, if none is showing.
@@ -175,6 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         terminated = true
         session.flush(sessionState())
         History.shared.flush()
+        if Bookmarks.made { Bookmarks.shared.flush() }
         Downloads.shared.discardUnfinished()
     }
 
@@ -227,7 +229,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return browser
     }
 
+    /// Windows closed since Sill opened, newest last, for Reopen Closed Window (and ⇧⌘T).
+    private(set) var closedWindows: [(window: SessionWindow, at: Date)] = []
+
+    /// Keeps a window that's closing, tabs and place, to bring back. Not a
+    /// private window or a pop-up, and once only.
+    func rememberClosed(_ browser: BrowserWindowController) {
+        guard !browser.isPrivate, !browser.isPopup, !browser.remembered else { return }
+        let state = sessionWindow(of: browser)
+        guard !state.tabs.isEmpty else { return }
+        browser.remembered = true
+        closedWindows.append((state, Date()))
+        if closedWindows.count > 10 { closedWindows.removeFirst() }
+    }
+
+    @objc func reopenClosedWindow(_ sender: Any?) {
+        guard let last = closedWindows.popLast() else { return }
+        let browser = makeBrowser(isPrivate: false)
+        if let frame = last.window.frame { browser.window?.setFrame(from: frame) }
+        browser.restore(last.window.tabs, selectedIndex: last.window.selected, splits: last.window.splits ?? [])
+        browser.showWindow(nil)
+    }
+
+    /// A bookmark from the menu bar, in the tab in front (⌘ for a new tab).
+    @objc func openBookmark(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        let newTab = NSApp.currentEvent?.modifierFlags.contains(.command) == true
+        if let browser = current, !browser.isPopup {
+            browser.navigate(to: url, newTab: newTab, typed: true)
+            browser.showWindow(nil)
+        } else {
+            open(url)
+        }
+    }
+
+    /// Clearing history clears what was closed since `since`, windows and tabs.
+    func forgetClosed(since: Date) {
+        closedWindows.removeAll { $0.at >= since }
+        browsers.forEach { $0.forgetClosed(since: since) }
+    }
+
+    /// ⇧⌘T with no window open: the last window closed.
+    @objc func reopenClosedTab(_ sender: Any?) { reopenClosedWindow(sender) }
+
     func windowClosed(_ browser: BrowserWindowController) {
+        rememberClosed(browser)
         browsers.removeAll { $0 === browser }
         if browser.isPrivate, !browsers.contains(where: { $0.isPrivate }) {
             Downloads.shared.forgetPrivate()
@@ -237,7 +283,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func sessionState() -> [SessionWindow] {
-        browsers.filter { !$0.isPrivate && !$0.isPopup }.map { browser in
+        browsers.filter { !$0.isPrivate && !$0.isPopup }.map(sessionWindow(of:))
+    }
+
+    private func sessionWindow(of browser: BrowserWindowController) -> SessionWindow {
             var kept: [Tab] = []
             let tabs = browser.tabs.compactMap { tab -> SessionTab? in
                 guard let url = tab.webView?.url ?? tab.url, url.scheme?.hasPrefix("http") == true else { return nil }
@@ -253,7 +302,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return SessionWindow(tabs: tabs, selected: selected, frame: browser.window?.frameDescriptor,
                                  splits: splits.isEmpty ? nil : splits)
-        }
     }
 
     private func saveSession() {
@@ -308,6 +356,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.buttons.first?.hasDestructiveAction = true
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let gone = History.shared.clear()
+        // What was closed goes too: cleared pages can't be reopened from the menu.
+        forgetClosed(since: .distantPast)
         guard !gone.isEmpty else { return }
         current?.toast("Cleared all history", action: ("Undo", { History.shared.restore(gone) }))
     }
@@ -406,8 +456,17 @@ enum MainMenu {
             .separator(),
             item("Show History", #selector(BrowserWindowController.showHistory(_:)), "y"),
             .separator(),
+            item("Reopen Closed Window", #selector(AppDelegate.reopenClosedWindow(_:)), target: app),
+            .separator(),
             item("Clear History…", #selector(BrowserWindowController.clearHistory(_:))),
         ]))
+
+        let bookmarks = submenu("Bookmarks", [
+            item("Add Bookmark", #selector(BrowserWindowController.toggleBookmark(_:)), "d"),
+            .separator(),
+        ])
+        bookmarks.submenu?.delegate = BookmarksMenu.shared
+        main.addItem(bookmarks)
 
         var tabItems: [NSMenuItem] = [
             item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
@@ -467,3 +526,27 @@ enum MainMenu {
 }
 
 
+
+
+extension AppDelegate {
+    /// Another app in front: an open menu goes, as a real menu would.
+    func applicationDidResignActive(_ notification: Notification) {
+        // An offer (Save Password) stays: you may be off fetching a code.
+        GlassMenu.dismissCurrent(keepingOffers: true)
+    }
+}
+
+extension AppDelegate: NSMenuItemValidation {
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(reopenClosedWindow(_:)):
+            return !closedWindows.isEmpty
+        case #selector(reopenClosedTab(_:)):
+            // Only reached with no browser window in front.
+            item.title = "Reopen Closed Window"
+            return !closedWindows.isEmpty
+        default:
+            return true
+        }
+    }
+}

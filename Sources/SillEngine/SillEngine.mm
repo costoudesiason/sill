@@ -282,8 +282,13 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   }
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     devtools_ = nullptr;
-    pending_.clear();
+    // The view lets go of its browser first, so a call made from an answer
+    // below fails at once rather than going to the closing page.
     [view_ browserClosed];
+    // Every call still waiting is answered (failed), not left waiting forever.
+    auto waiting = std::move(pending_);
+    pending_.clear();
+    for (auto& entry : waiting) entry.second(NO, nil);
     if (--gOpenBrowsers <= 0 && gQuitting) CefQuitMessageLoop();
   }
   bool OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int, const CefString& target_url, const CefString&,
@@ -393,7 +398,9 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
     id<SEWebViewDelegate> d = view_.pageDelegate;
     if (!url || ![d respondsToSelector:@selector(webView:openURL:inBackground:)]) return false;
     BOOL background = disposition == CEF_WOD_NEW_BACKGROUND_TAB;
-    dispatch_async(dispatch_get_main_queue(), ^{ [d webView:view_ openURL:url inBackground:background]; });
+    // The view, not `this`: the handler may be gone by the time this runs.
+    SEWebView* view = view_;
+    dispatch_async(dispatch_get_main_queue(), ^{ if (view) [d webView:view openURL:url inBackground:background]; });
     return true;
   }
   void OnRenderProcessTerminated(CefRefPtr<CefBrowser>, TerminationStatus, int, const CefString&) override {
@@ -858,7 +865,9 @@ bool SEClient::OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int, co
   NSURL* url = [NSURL URLWithString:S(target_url)];
   if (url && [d respondsToSelector:@selector(webView:openURL:inBackground:)]) {
     BOOL background = disposition == CEF_WOD_NEW_BACKGROUND_TAB;
-    dispatch_async(dispatch_get_main_queue(), ^{ [d webView:view_ openURL:url inBackground:background]; });
+    // The view, not `this`: the handler may be gone by the time this runs.
+    SEWebView* view = view_;
+    dispatch_async(dispatch_get_main_queue(), ^{ if (view) [d webView:view openURL:url inBackground:background]; });
   }
   return true;
 }

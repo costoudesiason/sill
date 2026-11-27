@@ -39,6 +39,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     let isPrivate: Bool
     /// A small window a page opened at a size of its own ("Sign in with…").
     let isPopup: Bool
+    /// Kept already for Reopen Closed Window.
+    var remembered = false
     private(set) var tabs: [Tab] = []
     private(set) var selected: Tab?
 
@@ -153,11 +155,28 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         strip.showZoom(Int((Double(webView.pageZoom) * 100).rounded()), up: up, for: tab)
     }
     private var downloadsPopover: NSPopover?
+    /// A tab closed in this window: enough to put it back where it was, with its history.
+    struct ClosedTab {
+        let id = UUID()
+        let url: URL
+        let title: String
+        let index: Int
+        let state: Any?
+        /// It was the tab in front when it closed.
+        var wasFront = false
+        let at = Date()
+    }
+
+    /// Clearing history: closed tabs since `since` can't be reopened.
+    func forgetClosed(since: Date) {
+        closed.removeAll { $0.at >= since }
+    }
     /// Recently closed in this window, newest last, for ⇧⌘T.
-    private var closed: [(url: URL, title: String, index: Int, state: Any?)] = []
+    private var closed: [ClosedTab] = []
     var onChange: (() -> Void)?
     private var napTimer: Timer?
     private var watchingPrefs: AnyCancellable?
+    private var watchingDownloads: AnyCancellable?
     /// The tab whose video Sill sent to picture in picture, to bring back when it's shown again.
     private weak var pictured: Tab?
     /// A web view made while ⌘T is open, so Return doesn't wait for one to
@@ -254,6 +273,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         bar.profile.action = #selector(showProfile(_:))
         bar.downloads.target = self
         bar.downloads.action = #selector(showDownloads(_:))
+        // The ring on Downloads: this window's own downloads (a private
+        // window's, or everyone else's).
+        bar.downloads.show(Downloads.shared.overall(isPrivate: isPrivate), animated: false)
+        watchingDownloads = NotificationCenter.default.publisher(for: Downloads.progressChanged)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.bar.downloads.show(Downloads.shared.overall(isPrivate: self.isPrivate))
+                }
+            }
         bar.add.target = self
         bar.add.action = #selector(newTab(_:))
         bar.allTabs.target = self
@@ -478,7 +507,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         guard tab === selected, let window, window.isVisible else { return }
         let site = Domains.bare(host)
         var entries: [GlassMenu.Entry] = [
-            .item(.init(title: update ? "Update Password" : "Save Password", symbol: "key.fill", keys: ["↩"],
+            .item(.init(title: update ? "Update Password" : "Save Password", symbol: "key.fill",
                         subtitle: user.isEmpty ? nil : user) { [weak self] in
                 Task { @MainActor [weak self] in
                     guard await SavedPasswords.save(password, user: user, host: host) != .failed else { return }
@@ -493,7 +522,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
         let anchor = bar.convert(bar.profileRect, to: nil)
         GlassMenu(title: update ? "Update your password for \(site)?" : "Save your password for \(site)?", entries: entries, searchable: false)
-            .show(in: window, at: NSPoint(x: anchor.maxX, y: anchor.minY - 6), alignRight: true, from: bar.profile)
+            .show(in: window, at: NSPoint(x: anchor.maxX, y: anchor.minY - 6), alignRight: true, from: bar.profile, takesKeys: false)
     }
 
     /// The profile button: who's browsing, and the browser's everyday places.
@@ -743,6 +772,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if let pending = pendingSplit, !pending.contains(tab) { pendingSplit = nil }
         if paletteOpen && selected !== tab { palette.close(animated: false, focusPage: false) }
         madeFindBar?.close()
+        // A menu belongs to the tab it was opened over: it goes with it.
+        // (Not an offer that came up on its own, like Save Password: it
+        // would be lost for good.)
+        if selected !== tab { GlassMenu.dismissCurrent(keepingOffers: true) }
         let previous = selected
         hidePreview(animated: false)
         // The page being left keeps its place in the window, under the new
@@ -772,7 +805,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if let page = fullScreenPage, page !== tab { page.webView?.exitFullScreen() }
         // Pictured as it's left, while still on screen: Chromium can't picture
         // a page it has hidden, and its hover card would be blank. Kept small.
-        if let previous, previous !== tab, previous.webView?.isShown == true {
+        if Preferences.shared.showsTabPreviews, let previous, previous !== tab, previous.webView?.isShown == true {
             previous.capturePicture { [weak previous] image in
                 if let image { previous?.keepWhileAsleep(image) }
             }
@@ -835,12 +868,53 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         return answer ?? false
     }
 
-    func closeNow(_ tab: Tab) {
-        guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
+    /// Closes several tabs at once; one Undo puts them all back where they were.
+    func close(_ many: [Tab]) {
+        var back: [ClosedTab] = []
+        var waiting = many[...]
+        func next() {
+            guard let tab = waiting.popFirst() else {
+                guard !back.isEmpty else { return }
+                toast(back.count == 1 ? "Closed 1 tab" : "Closed \(back.count) tabs",
+                      action: ("Undo", { [weak self] in self?.reopen(back) }))
+                return
+            }
+            tab.mayClose { [weak self] may in
+                if may, let entry = self?.closeNow(tab) { back.append(entry) }
+                next()
+            }
+        }
+        next()
+    }
+
+    /// Tabs closed together, back in their places: the last closed goes back first.
+    private func reopen(_ entries: [ClosedTab]) {
+        // Only those not already back (⇧⌘T while the toast was up).
+        let waiting = Set(closed.map(\.id))
+        let entries = entries.filter { waiting.contains($0.id) }
+        let ids = Set(entries.map(\.id))
+        closed.removeAll { ids.contains($0.id) }
+        var front: Tab?
+        for entry in entries.reversed() {
+            let tab = addTab(url: entry.url, at: min(entry.index, tabs.count), select: false, state: entry.state)
+            if entry.wasFront { front = tab }
+        }
+        // The one that was in front comes back to the front.
+        if let front { select(front) }
+    }
+
+    @discardableResult
+    func closeNow(_ tab: Tab) -> ClosedTab? {
+        guard let index = tabs.firstIndex(where: { $0 === tab }) else { return nil }
         tab.dropAsks()
         hidePreview(animated: false)
-        if let url = tab.webView?.url ?? tab.url, !isPrivate {
-            closed.append((url, tab.displayTitle, index, tab.interactionState))
+        // The last tab takes the window with it: the window is what ⇧⌘T brings back.
+        if tabs.count == 1 { AppDelegate.shared.rememberClosed(self) }
+        var entry: ClosedTab?
+        // Not an agent's tab you never looked at: it was never yours to reopen.
+        if let url = tab.webView?.url ?? tab.url, !isPrivate, !(tab.openedByAgent && tab.seenAt == nil) {
+            entry = ClosedTab(url: url, title: tab.displayTitle, index: index, state: tab.interactionState, wasFront: tab === selected)
+            closed.append(entry!)
             if closed.count > 30 { closed.removeFirst() }
         }
         tabs.remove(at: index)
@@ -859,7 +933,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if tabs.isEmpty {
             selected = nil
             window?.close()
-            return
+            return entry
         }
         if selected === tab {
             // Back to the tab that opened it if it's still alongside; else the one that slid into its place.
@@ -872,6 +946,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             strip.sync(animated: true)
         }
         changed()
+        return entry
     }
 
     /// A tab that loads only when first shown, at the end of the row.
@@ -1306,7 +1381,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
         add("Copy Link", enabled: url != nil) { if let url { Pasteboard.copy(url) } }
         if let view = tab.webView, tab.audible || view.audioMuted {
-            add(view.audioMuted ? "Unmute Tab" : "Mute Tab") { view.audioMuted.toggle() }
+            add(view.audioMuted ? "Unmute Tab" : "Mute Tab") { [weak self] in
+                view.audioMuted.toggle()
+                self?.strip.refresh(tab)
+            }
         }
         menu.addItem(.separator())
         if let pair = split(of: tab) {
@@ -1317,23 +1395,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
         add("Move to New Window", enabled: tabs.count > 1) { [weak self] in self?.moveToNewWindow(tab) }
         // Off for the one site it broke, rather than everywhere.
-        if Preferences.shared.blocksAds, let host = url?.host(), !host.isEmpty {
-            let paused = Shield.shared.isPaused(on: host)
-            let item = ClosureMenuItem(title: "Block Ads on \(Domains.bare(host))") { [weak tab] in
-                Shield.shared.pause(host, !paused) { tab?.reload() }
-            }
-            item.state = paused ? .off : .on
-            menu.addItem(item)
-        }
         menu.addItem(.separator())
         add("Close Tab") { [weak self] in self?.close(tab) }
         add("Close Other Tabs", enabled: tabs.count > 1) { [weak self] in
             guard let self else { return }
-            for other in self.tabs where other !== tab { self.close(other) }
+            self.close(self.tabs.filter { $0 !== tab })
         }
         add("Close Tabs to the Right", enabled: tabs.last !== tab) { [weak self] in
             guard let self, let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
-            for other in self.tabs[(index + 1)...] { self.close(other) }
+            self.close(Array(self.tabs[(index + 1)...]))
         }
         return menu
     }
@@ -1385,10 +1455,28 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if let selected { close(selected) } else { window?.close() }
     }
 
+    /// ⇧⌘T: whatever was closed last, a tab here or a whole window.
     @objc func reopenClosedTab(_ sender: Any?) {
+        if reopensWindow { AppDelegate.shared.reopenClosedWindow(sender); return }
         guard let last = closed.popLast() else { return }
         // With its back and forward history, as it was.
         addTab(url: last.url, at: min(last.index, tabs.count), state: last.state)
+    }
+
+    /// ⌘D: keeps the page in front as a bookmark, or lets it go if it is one.
+    @objc func toggleBookmark(_ sender: Any?) {
+        guard let tab = selected, let url = tab.webView?.url ?? tab.url, History.key(url) != nil else { return }
+        if let index = Bookmarks.shared.index(of: url), let gone = Bookmarks.shared.remove(url) {
+            toast("Removed Bookmark", action: ("Undo", { Bookmarks.shared.restore(gone, at: index) }))
+        } else if Bookmarks.shared.add(url, title: tab.displayTitle) {
+            toast("Added Bookmark", action: ("Undo", { Bookmarks.shared.remove(url) }))
+        }
+    }
+
+    /// A window was closed after this window's last closed tab.
+    private var reopensWindow: Bool {
+        guard let window = AppDelegate.shared.closedWindows.last else { return false }
+        return window.at > (closed.last?.at ?? .distantPast)
     }
 
     @objc func goBack(_ sender: Any?) { selected?.goBack() }
@@ -1460,7 +1548,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         switch item.action {
         case #selector(goBack(_:)): return selected?.canGoBack ?? false
         case #selector(goForward(_:)): return selected?.canGoForward ?? false
-        case #selector(reopenClosedTab(_:)): return !closed.isEmpty
+        case #selector(toggleBookmark(_:)):
+            let url = selected.flatMap { $0.webView?.url ?? $0.url }
+            item.title = Bookmarks.shared.contains(url) ? "Remove Bookmark" : "Add Bookmark"
+            return url.flatMap(History.key) != nil
+        case #selector(reopenClosedTab(_:)):
+            item.title = reopensWindow ? "Reopen Closed Window" : "Reopen Closed Tab"
+            return !closed.isEmpty || reopensWindow
         case #selector(reloadPage(_:)), #selector(reloadFromOrigin(_:)), #selector(copyPageLink(_:)),
              #selector(showFind(_:)), #selector(zoomIn(_:)), #selector(zoomOut(_:)), #selector(actualSize(_:)),
              #selector(showInspector(_:)):
@@ -1481,6 +1575,7 @@ extension BrowserWindowController: TabHost {
         switch what {
         case .icon, .loading:
             strip.refresh(tab)
+            if what == .icon, preview.tab === tab { preview.retitle() }
             if what == .loading, tab === selected {
                 loadingLine.show(progress: tab.progress, loading: tab.isLoading)
                 bar.isLoading = tab.isLoading
@@ -1526,6 +1621,7 @@ extension BrowserWindowController: TabHost {
         guard tabs.contains(where: { $0 === tab }) else { return }
         strip.refresh(tab)
         if tab === selected { window?.title = tab.displayTitle }
+        if preview.tab === tab { preview.retitle() }
     }
 
     func open(from tab: Tab, url: URL?, configuration: WKWebViewConfiguration?, background: Bool) -> Tab {
@@ -1780,7 +1876,7 @@ extension BrowserWindowController {
             }
             if under, let shown {
                 for case let old as SillWebView in pageHost.subviews { old.outgoing = true }
-                shown.afterNextFrame { [weak self, weak shown] in
+                shown.afterNextFrame(within: 0.6, settle: Self.twoFrames) { [weak self, weak shown] in
                     guard let self, shown != nil, self.split?.contains(self.selected) == true,
                           self.splitView.superview === self.pageHost else { return }
                     self.putAside(except: self.splitView, self.leaving)
@@ -1831,7 +1927,11 @@ extension BrowserWindowController {
             webView.cameIntoView()
             if under {
                 for case let old as SillWebView in pageHost.subviews where old !== webView { old.outgoing = true }
-                webView.afterNextFrame { [weak self, weak webView] in
+                // The page left stays until the new one's frame is on screen:
+                // two frames after it has drawn, and a busy page (two tabs of
+                // one site share their page process) is given 0.6 s before
+                // the window could show through between them.
+                webView.afterNextFrame(within: 0.6, settle: Self.twoFrames) { [weak self, weak webView] in
                     guard let self, let webView, self.selected?.webView === webView,
                           webView.superview === self.pageHost, !webView.isHidden else { return }
                     self.putAside(except: webView, self.leaving)
@@ -1839,6 +1939,10 @@ extension BrowserWindowController {
             }
         }
     }
+
+    /// Time for a drawn frame to reach the screen: two refreshes at 60 Hz
+    /// (on a 120 Hz screen, four; the GPU's pace isn't the screen's).
+    private static let twoFrames: TimeInterval = 0.034
 
     /// A page in the page area that is in sight: not put aside, and not one
     /// only drawing ahead under the others.
@@ -2021,11 +2125,14 @@ extension BrowserWindowController {
     /// A new picture of a running page, unless it has one from the last
     /// `within` seconds or is still loading (it would be half drawn).
     private func freshenPicture(of tab: Tab, within: CFTimeInterval = 2) {
-        guard tab.webView != nil, !tab.isLoading,
+        // A hidden page can't be pictured: its card shows it as it was left.
+        guard tab.webView?.isShown == true || tab.webView?.keepsDrawing == true, !tab.isLoading,
               tab.picture == nil || CACurrentMediaTime() - tab.pictureTakenAt > within else { return }
         tab.capturePicture { [weak self, weak tab] image in
-            guard let self, let tab, let image, self.preview.tab === tab else { return }
-            tab.sleepingPicture = nil
+            guard let self, let tab, let image else { return }
+            // Kept small for when the card comes again, so it's never blank.
+            tab.keepWhileAsleep(image)
+            guard self.preview.tab === tab else { return }
             self.preview.show(image)
             self.preview.retitle()
         }

@@ -302,7 +302,10 @@ final class Toast: NSView {
     private func scheduleHide(after delay: TimeInterval?) {
         hiding?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            Motion.animate(0.18, { self?.animator().alphaValue = 0 }, completion: { self?.isHidden = true })
+            // Hidden only if still faded out: a toast shown during the fade keeps showing.
+            Motion.animate(0.18, { self?.animator().alphaValue = 0 }, completion: {
+                if let self, self.alphaValue == 0 { self.isHidden = true }
+            })
         }
         hiding = work
         if let delay { DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) }
@@ -339,8 +342,11 @@ final class Toast: NSView {
     }
 
     @objc private func run() {
+        // This toast's fade, taken before the action: an Undo that says
+        // something shows a new toast, which mustn't be faded with it.
+        let fade = hiding
         action?()
-        hiding?.perform()
+        if hiding === fade { fade?.perform() }
     }
 
     /// Fades out now (another toast is taking its place).

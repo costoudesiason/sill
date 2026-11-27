@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import WebKit
 
 /// The page's alert(), confirm() and prompt(), and HTTP sign-ins: the Mac's
@@ -117,6 +118,50 @@ final class DownloadItem: ObservableObject, Identifiable {
     }
 
     var active: Bool { !finished && !failed }
+    /// When it began: what the time left is reckoned from.
+    let began = Date()
+
+    /// "1.2 MB · PDF document", read once when it lands, not on every redraw.
+    private(set) lazy var detail: String = {
+        guard let url else { return "" }
+        let kind = UTType(filenameExtension: url.pathExtension)?.localizedDescription
+        let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+        let size = bytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) }
+        return [size, kind].compactMap { $0 }.joined(separator: " · ")
+    }()
+
+    /// Still where it landed: moved or thrown away since, it can't be opened
+    /// or dragged. Looked at when the list opens and on a click, not on
+    /// every redraw (Downloads may be on a slow disk).
+    @Published private(set) var isThere = true
+    func checkThere() {
+        guard finished else { return }
+        let there = url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        if there != isThere { isThere = there }
+    }
+
+    /// How far it was, and when, over the last few seconds: time left goes
+    /// by the recent pace, so a download that speeds up or stalls is told right.
+    private var samples: [(at: TimeInterval, fraction: Double)] = []
+    private static let words: DateComponentsFormatter = {
+        let format = DateComponentsFormatter()
+        format.unitsStyle = .full
+        format.maximumUnitCount = 1
+        return format
+    }()
+
+    /// "45% · About 12 seconds left": time left only once there's enough to go on.
+    var status: String {
+        guard fraction > 0 else { return "Starting…" }
+        let percent = "\(Int((fraction * 100).rounded(.down)))%"
+        guard fraction < 1, let first = samples.first, let last = samples.last,
+              last.at - first.at > 1.5, last.fraction > first.fraction else { return percent }
+        var left = (last.at - first.at) * (1 - last.fraction) / (last.fraction - first.fraction)
+        if left > 10 { left = (left / 5).rounded() * 5 }
+        Self.words.allowedUnits = left >= 3600 ? [.hour, .minute] : left >= 60 ? [.minute] : [.second]
+        guard let words = Self.words.string(from: max(1, left)) else { return percent }
+        return "\(percent) · About \(words) left"
+    }
 
     private var drawn: (url: URL?, finished: Bool, image: NSImage)?
 
@@ -136,6 +181,11 @@ final class DownloadItem: ObservableObject, Identifiable {
     func refresh() {
         guard active else { return }
         let value = download?.progress.fractionCompleted ?? reported
+        let now = ProcessInfo.processInfo.systemUptime
+        if value >= 0 {
+            samples.append((now, value))
+            samples.removeAll { now - $0.at > 5 }
+        }
         guard value != fraction else { return }
         fraction = value
     }
@@ -165,32 +215,86 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
     private var windows: [ObjectIdentifier: NSWindow] = [:]
     private var watchers = 0
     private var ticker: Timer?
+    private var tickEvery: TimeInterval = 0
 
-    /// The list is on screen (or gone again): progress bars only move while
-    /// someone is looking, ten times a second, all rows in one pass.
+    /// How everything still coming down is going, for the toolbar's ring and
+    /// the Dock. `fraction` is nil when some file's size isn't known.
+    struct Overall: Equatable {
+        var count: Int
+        var fraction: Double?
+    }
+    /// Said whenever `overall(isPrivate:)` changes.
+    static let progressChanged = Notification.Name("SillDownloadsProgress")
+    private var lastOverall: [Bool: Overall?] = [:]
+
+    /// Everything that has come down since the ring last went away: a file
+    /// that lands still counts (as done) until the rest have, so the ring
+    /// never goes backwards when one of several finishes.
+    private var batch: [Bool: [DownloadItem]] = [:]
+
+    func overall(isPrivate: Bool) -> Overall? {
+        let running = items.filter { $0.active && $0.isPrivate == isPrivate }
+        guard !running.isEmpty else { return nil }
+        let counted = (batch[isPrivate] ?? []).filter { !$0.failed } + running.filter { item in
+            !(batch[isPrivate] ?? []).contains { $0 === item }
+        }
+        let sizes = counted.map { $0.finished ? 1 : $0.fraction }
+        // Whole percents: the ring moves when it can be seen to, not more often.
+        let fraction = sizes.contains { $0 < 0 } ? nil : (sizes.reduce(0, +) / Double(sizes.count) * 100).rounded() / 100
+        return Overall(count: running.count, fraction: fraction)
+    }
+
+    /// The list is on screen (or gone again): its rows move ten times a
+    /// second while someone looks; otherwise four, for the ring alone.
     func watch(_ watching: Bool) {
         watchers = max(0, watchers + (watching ? 1 : -1))
         retime()
     }
 
     private func retime() {
-        let wanted = watchers > 0 && items.contains { $0.active }
-        if wanted, ticker == nil {
-            items.forEach { $0.refresh() }
-            let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    self.items.forEach { $0.refresh() }
-                    self.retime()
-                }
-            }
-            timer.tolerance = 0.02
-            RunLoop.main.add(timer, forMode: .common)
-            ticker = timer
-        } else if !wanted, ticker != nil {
+        let wanted: TimeInterval = !items.contains { $0.active } ? 0 : watchers > 0 ? 0.1 : 0.25
+        if wanted != tickEvery {
             ticker?.invalidate()
             ticker = nil
+            tickEvery = wanted
+            if wanted > 0 {
+                tick()
+                let timer = Timer(timeInterval: wanted, repeats: true) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.tick() }
+                }
+                timer.tolerance = wanted / 5
+                RunLoop.main.add(timer, forMode: .common)
+                ticker = timer
+            }
         }
+        announce()
+    }
+
+    private func tick() {
+        items.forEach { $0.refresh() }
+        announce()
+    }
+
+    /// Tells the windows (and the Dock) only when what they show would change.
+    private func announce() {
+        var moved = false
+        for isPrivate in [false, true] {
+            // The batch: what's running joins it; once nothing is, it ends.
+            if items.contains(where: { $0.active && $0.isPrivate == isPrivate }) {
+                var members = batch[isPrivate] ?? []
+                for item in items where item.active && item.isPrivate == isPrivate && !members.contains(where: { $0 === item }) {
+                    members.append(item)
+                }
+                batch[isPrivate] = members
+            } else {
+                batch[isPrivate] = nil
+            }
+            let now = overall(isPrivate: isPrivate)
+            if lastOverall[isPrivate] != now { lastOverall[isPrivate] = now; moved = true }
+        }
+        guard moved else { return }
+        NotificationCenter.default.post(name: Self.progressChanged, object: self)
+        DockProgress.shared.show(overall(isPrivate: false), private: overall(isPrivate: true))
     }
 
     private func item(for download: WKDownload) -> DownloadItem? {
@@ -381,6 +485,7 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
         // The list's Clear depends on rows being done, which it isn't told of
         // by the rows themselves.
         objectWillChange.send()
+        defer { retime() }
         if freesName, let path = item?.url?.path { Self.naming.async { Self.promised.remove(path.lowercased()) } }
         if let item, item.isPrivate, !AppDelegate.shared.browsers.contains(where: { $0.isPrivate }) {
             items.removeAll { $0 === item }
@@ -438,69 +543,243 @@ struct DownloadsView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 28)
             } else {
-                ScrollView {
-                    VStack(spacing: 2) {
-                        ForEach(items) { DownloadRow(item: $0) }
-                    }
-                    .padding(8)
-                }
-                .frame(maxHeight: 360)
-                Divider()
+                // Safari's arrangement, one line: what this is, and Clear.
                 HStack {
-                    Button("Clear") { downloads.clear(isPrivate: isPrivate) }
-                        .disabled(!items.contains { $0.finished || $0.failed })
+                    Text("Downloads").font(.headline)
                     Spacer()
-                    Button("Open Downloads Folder") {
-                        NSWorkspace.shared.open(FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0])
-                    }
+                    Button("Clear") { withAnimation(Motion.snappy) { downloads.clear(isPrivate: isPrivate) } }
+                        .buttonStyle(.borderless)
+                        .disabled(!items.contains { !$0.active })
                 }
-                .controlSize(.small)
-                .padding(10)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 4)
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(items) { item in
+                            DownloadRow(item: item)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.bottom, 6)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(maxHeight: 380)
             }
         }
-        .frame(width: 340)
+        .frame(width: 320)
+        .animation(Motion.snappy, value: items.map(\.id))
+        .onAppear { downloads.items.forEach { $0.checkThere() } }
     }
 }
 
+/// One file: click to open it, drag it out to put a copy wherever it's let
+/// go (the Desktop, a folder, a mail, a page's upload), as Safari's list does.
 private struct DownloadRow: View {
     @ObservedObject var item: DownloadItem
     @State private var hovering = false
 
+    private var openable: URL? { item.finished && item.isThere ? item.url : nil }
+
     var body: some View {
         HStack(spacing: 10) {
-            Image(nsImage: item.icon)
-                .resizable()
-                .frame(width: 32, height: 32)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(item.name).lineLimit(1).truncationMode(.middle)
-                if item.failed {
-                    Text("Stopped").font(.caption).foregroundStyle(.secondary)
-                } else if item.finished {
-                    Text("Done").font(.caption).foregroundStyle(.secondary)
-                } else {
-                    // Size unknown (no length from the server): it moves, not fills.
-                    if item.fraction < 0 { ProgressView().progressViewStyle(.linear).controlSize(.small) }
-                    else { ProgressView(value: item.fraction).controlSize(.small) }
+            HStack(spacing: 10) {
+                Image(nsImage: item.icon)
+                    .resizable()
+                    .frame(width: 32, height: 32)
+                    .opacity(item.finished && !item.isThere ? 0.5 : 1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.name)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if item.active {
+                        // Size unknown (no length from the server): it moves, not fills.
+                        if item.fraction < 0 { ProgressView().progressViewStyle(.linear).controlSize(.mini) }
+                        else { ProgressView(value: item.fraction).controlSize(.mini) }
+                        Text(item.fraction < 0 ? "Downloading…" : item.status)
+                            .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    } else {
+                        Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
-            if item.finished, let url = item.url {
+            .contentShape(Rectangle())
+            .overlay(FileDragArea(url: openable, icon: item.icon) {
+                // Looked at again: it may have gone since the list opened.
+                item.checkThere()
+                if let url = openable { NSWorkspace.shared.open(url) }
+            })
+
+            if item.active {
+                Button { item.cancel() } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("Stop")
+                    .accessibilityLabel("Stop")
+            } else if let url = openable {
                 Button { NSWorkspace.shared.activateFileViewerSelecting([url]) } label: {
                     Image(systemName: "magnifyingglass")
                 }
                 .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
                 .help("Show in Finder")
-            } else if !item.failed {
-                Button { item.cancel() } label: { Image(systemName: "xmark.circle.fill") }
-                    .buttonStyle(.borderless)
-                    .help("Stop")
+                .accessibilityLabel("Show in Finder")
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 8).fill(hovering ? Color.primary.opacity(0.06) : .clear))
-        .contentShape(Rectangle())
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(hovering && openable != nil ? Color.primary.opacity(0.07) : .clear))
         .onHover { hovering = $0 }
-        .onTapGesture(count: 2) { if item.finished, let url = item.url { NSWorkspace.shared.open(url) } }
+        .accessibilityElement(children: .combine)
+        .accessibilityAction(named: "Open") { if let url = openable { NSWorkspace.shared.open(url) } }
+    }
+
+    private var subtitle: String {
+        if item.failed { return "Stopped" }
+        if !item.isThere { return "Moved or deleted" }
+        return item.detail.isEmpty ? "Done" : item.detail
+    }
+}
+
+/// Under a downloaded file's row: a click opens it, a drag carries the file
+/// out. A copy, never a move: the file stays in Downloads, and on the list.
+private struct FileDragArea: NSViewRepresentable {
+    let url: URL?
+    let icon: NSImage
+    let open: () -> Void
+
+    func makeNSView(context: Context) -> DragView { DragView() }
+    func updateNSView(_ view: DragView, context: Context) {
+        view.url = url
+        view.icon = icon
+        view.open = open
+    }
+
+    final class DragView: NSView, NSDraggingSource {
+        var url: URL?
+        var icon: NSImage?
+        var open: (() -> Void)?
+        private var downAt: NSPoint?
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func mouseDown(with event: NSEvent) { downAt = event.locationInWindow }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let start = downAt, let url else { return }
+            let at = event.locationInWindow
+            guard hypot(at.x - start.x, at.y - start.y) > 3 else { return }
+            downAt = nil
+            let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+            let point = convert(start, from: nil)
+            item.setDraggingFrame(NSRect(x: point.x - 16, y: point.y - 16, width: 32, height: 32), contents: icon)
+            // Held until the drop: the list may close mid-drag and let this go.
+            Self.dragging = self
+            beginDraggingSession(with: [item], event: event, source: self)
+        }
+
+        private static var dragging: DragView?
+        func draggingSession(_ session: NSDraggingSession, endedAt point: NSPoint, operation: NSDragOperation) {
+            Self.dragging = nil
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            if downAt != nil, bounds.contains(convert(event.locationInWindow, from: nil)) { open?() }
+            downAt = nil
+        }
+
+        func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+            .copy
+        }
+    }
+}
+
+extension Motion {
+    /// The list's rows coming and going: none with Reduce Motion.
+    static var snappy: Animation? { reduced ? nil : .snappy(duration: standard) }
+}
+
+/// The Dock icon while files come down: a small round badge at its corner
+/// with how many, ringed by how far along they are, as Dia's. Gone the
+/// moment the last one lands, leaving the system's own icon.
+@MainActor
+final class DockProgress {
+    static let shared = DockProgress()
+    private var view: BadgeView?
+
+    func show(_ yours: Downloads.Overall?, private secret: Downloads.Overall?) {
+        // Private downloads count, but say nothing more than a number would.
+        let count = (yours?.count ?? 0) + (secret?.count ?? 0)
+        let tile = NSApp.dockTile
+        guard count > 0 else {
+            guard view != nil else { return }
+            view = nil
+            tile.contentView = nil
+            tile.display()
+            return
+        }
+        let parts = [yours, secret].compactMap { $0 }
+        let fraction: Double? = parts.contains { $0.fraction == nil } ? nil
+            : parts.reduce(0) { $0 + ($1.fraction ?? 0) * Double($1.count) } / Double(count)
+        if view == nil {
+            let badge = BadgeView(frame: NSRect(origin: .zero, size: tile.size))
+            view = badge
+            tile.contentView = badge
+        }
+        guard let view, view.count != count || view.fraction != fraction else { return }
+        view.count = count
+        view.fraction = fraction
+        tile.display()
+    }
+
+    private final class BadgeView: NSView {
+        var count = 0
+        var fraction: Double?
+
+        override func draw(_ dirtyRect: NSRect) {
+            NSApp.applicationIconImage?.draw(in: bounds)
+            let side = bounds.width * 0.36
+            let inset = bounds.width * 0.06
+            let disc = NSRect(x: bounds.maxX - side - inset, y: bounds.minY + inset, width: side, height: side)
+            NSShadow.withShadow(blur: side * 0.12, offset: -side * 0.03) {
+                NSColor.white.setFill()
+                NSBezierPath(ovalIn: disc).fill()
+            }
+            let line = side * 0.1
+            let ring = disc.insetBy(dx: line * 0.9, dy: line * 0.9)
+            let track = NSBezierPath(ovalIn: ring)
+            track.lineWidth = line
+            NSColor(white: 0, alpha: 0.1).setStroke()
+            track.stroke()
+            let center = NSPoint(x: ring.midX, y: ring.midY)
+            let arc = NSBezierPath()
+            // Unknown size: a quarter of the ring, standing for "on its way".
+            let along = fraction.map { max(0.02, min(1, $0)) } ?? 0.25
+            arc.appendArc(withCenter: center, radius: ring.width / 2, startAngle: 90, endAngle: 90 - 360 * along, clockwise: true)
+            arc.lineWidth = line
+            arc.lineCapStyle = .round
+            NSColor.controlAccentColor.usingColorSpace(.displayP3)?.setStroke()
+            arc.stroke()
+            let text = count > 99 ? "99+" : "\(count)"
+            let font = NSFont.systemFont(ofSize: side * (text.count > 1 ? 0.36 : 0.44), weight: .semibold)
+            let label = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: NSColor(white: 0.2, alpha: 1)])
+            let size = label.size()
+            label.draw(at: NSPoint(x: disc.midX - size.width / 2, y: disc.midY - size.height / 2))
+        }
+    }
+}
+
+private extension NSShadow {
+    static func withShadow(blur: CGFloat, offset: CGFloat, _ draw: () -> Void) {
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowBlurRadius = blur
+        shadow.shadowOffset = NSSize(width: 0, height: offset)
+        shadow.shadowColor = NSColor(white: 0, alpha: 0.3)
+        shadow.set()
+        draw()
+        NSGraphicsContext.restoreGraphicsState()
     }
 }

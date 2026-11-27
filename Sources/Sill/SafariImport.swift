@@ -34,7 +34,7 @@ final class SafariImport: ObservableObject {
         let historyFile = historyFile, bookmarksFile = bookmarksFile, cookiesFile = cookiesFile
         Task.detached(priority: .userInitiated) {
             let visits = history ? Self.readHistory(historyFile) : []
-            let marks = bookmarks ? Self.readBookmarks(bookmarksFile) : []
+            let marks = bookmarks ? Bookmarks.readSafari(bookmarksFile) : []
             let jar = cookies ? Self.readCookies(cookiesFile) : []
             await MainActor.run {
                 var lines: [String] = []
@@ -43,7 +43,7 @@ final class SafariImport: ObservableObject {
                     lines.append("\(visits.count) history entries")
                 }
                 if bookmarks {
-                    History.shared.merge(marks)
+                    Bookmarks.shared.merge(marks)
                     lines.append("\(marks.count) bookmarks")
                 }
                 if cookies {
@@ -87,24 +87,6 @@ final class SafariImport: ObservableObject {
             let time = sqlite3_column_double(statement, 3)
             result.append(Visit(url: url, title: title, count: max(1, count), last: Date(timeIntervalSinceReferenceDate: time)))
         }
-        return result
-    }
-
-    // MARK: - Bookmarks
-
-    nonisolated private static func readBookmarks(_ file: URL) -> [Visit] {
-        guard let data = try? Data(contentsOf: file),
-              let root = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return [] }
-        var result: [Visit] = []
-        func walk(_ node: [String: Any]) {
-            if let url = node["URLString"] as? String, url.hasPrefix("http") {
-                let title = (node["URIDictionary"] as? [String: Any])?["title"] as? String ?? ""
-                // A bookmark counts as a site you chose: typed, so it ranks well.
-                result.append(Visit(url: url, title: title, count: 1, last: Date(timeIntervalSinceNow: -86_400 * 7), typed: 3))
-            }
-            (node["Children"] as? [[String: Any]])?.forEach(walk)
-        }
-        walk(root)
         return result
     }
 

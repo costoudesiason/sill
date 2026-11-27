@@ -69,7 +69,10 @@ final class Tab: NSObject {
     /// Whether a video is playing in the page, as its script last said.
     private(set) var playingVideo = false
     /// A video or sound playing out loud, as the page script last said (Chromium).
-    var audible = false
+    var audible = false {
+        // The tab's speaker comes and goes with it.
+        didSet { if audible != oldValue { host?.tabChanged(self, .icon) } }
+    }
     /// How far down the page was when it went to sleep.
     var wakeScroll: CGFloat?
     /// A sign-in sent and not yet known to have gone through.

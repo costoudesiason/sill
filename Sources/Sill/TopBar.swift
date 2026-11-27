@@ -27,7 +27,7 @@ final class TopBar: NSView {
     let forward = BarButton(symbol: "chevron.forward", label: "Forward")
     let reload = BarButton(symbol: "arrow.clockwise", label: "Reload Page")
     let extensions = BarButton(symbol: "puzzlepiece.extension", label: "Extensions")
-    let downloads = BarButton(symbol: "arrow.down.circle", label: "Downloads")
+    let downloads = DownloadsButton()
     let add = BarButton(symbol: "plus", label: "New Tab")
     let allTabs = BarButton(symbol: "square.on.square", label: "Show All Tabs")
 
@@ -208,7 +208,7 @@ final class TopBar: NSView {
 }
 
 /// A symbol button on the bar's glass: borderless, the glass gives the press.
-final class BarButton: NSButton {
+class BarButton: NSButton {
     init(symbol: String, label: String) {
         super.init(frame: .zero)
         isBordered = false
@@ -285,6 +285,151 @@ final class BarButton: NSButton {
     }
 }
 
+/// Downloads: while files come down, its symbol's circle becomes a ring
+/// that fills with them, the arrow inside. When the last one lands the ring
+/// closes and fades, the circle comes back, and the arrow gives a bounce.
+final class DownloadsButton: BarButton {
+    private let track = CAShapeLayer()
+    private let fill = CAShapeLayer()
+    private let glyph = NSImageView()
+    private var showing: Downloads.Overall?
+    private var settling: DispatchWorkItem?
+
+    private static func symbol(_ name: String, size: CGFloat, weight: NSFont.Weight) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: "Downloads")?
+            .withSymbolConfiguration(.init(pointSize: size, weight: weight))
+    }
+    private static let idle = symbol("arrow.down.circle", size: 16, weight: .regular)
+    private static let busy = symbol("arrow.down", size: 9, weight: .bold)
+
+    init() {
+        super.init(symbol: "arrow.down.circle", label: "Downloads")
+        image = nil
+        glyph.image = Self.idle
+        glyph.imageScaling = .scaleNone
+        glyph.contentTintColor = .labelColor
+        addSubview(glyph)
+        for ring in [track, fill] {
+            ring.fillColor = nil
+            ring.lineWidth = 1.5
+            ring.opacity = 0
+            ring.actions = ["path": NSNull(), "bounds": NSNull(), "position": NSNull(), "strokeColor": NSNull()]
+            layer?.addSublayer(ring)
+        }
+        fill.lineCap = .round
+        fill.strokeEnd = 0
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    // The glyph is only a picture: the press is the button's.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        frame.contains(point) ? self : nil
+    }
+
+    override func layout() {
+        super.layout()
+        glyph.frame = bounds
+        // The ring sits where the symbol's own circle does.
+        let path = CGMutablePath()
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        // The button's layer is flipped (y down): from the top, round clockwise.
+        path.addArc(center: center, radius: 7.3, startAngle: -.pi / 2, endAngle: 1.5 * .pi, clockwise: false)
+        for ring in [track, fill] {
+            ring.frame = bounds
+            ring.path = path
+        }
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            track.strokeColor = NSColor.labelColor.withAlphaComponent(0.2).cgColor
+            fill.strokeColor = NSColor.controlAccentColor.cgColor
+        }
+    }
+
+    /// How the downloads are going: nil when nothing is coming down.
+    func show(_ progress: Downloads.Overall?, animated: Bool = true) {
+        guard progress != showing else { return }
+        let was = showing
+        showing = progress
+        let moving = animated && !Motion.reduced
+        if let progress {
+            settling?.cancel()
+            settling = nil
+            if was == nil || glyph.image !== Self.busy {
+                swap(to: Self.busy, animated: moving)
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                fill.strokeEnd = 0
+                CATransaction.commit()
+                fade(rings: 1, animated: moving)
+            }
+            setAccessibilityValue(progress.fraction.map { "\(Int($0 * 100)) percent" } ?? "Downloading")
+            if let fraction = progress.fraction {
+                fill.removeAnimation(forKey: "spin")
+                CATransaction.begin()
+                CATransaction.setAnimationDuration(moving ? 0.3 : 0)
+                CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .linear))
+                fill.strokeEnd = max(0.03, fraction)
+                CATransaction.commit()
+            } else {
+                // No size known: a quarter of the ring, going round.
+                fill.strokeEnd = 0.25
+                spinIfUnsized()
+            }
+        } else {
+            setAccessibilityValue(nil)
+            guard was != nil else { return }
+            // The ring closes, then gives way to the circle.
+            fill.removeAnimation(forKey: "spin")
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(moving ? 0.2 : 0)
+            fill.strokeEnd = 1
+            CATransaction.commit()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.settling = nil
+                self.fade(rings: 0, animated: moving)
+                self.swap(to: Self.idle, animated: moving)
+                if moving { self.glyph.addSymbolEffect(.bounce, options: .nonRepeating) }
+            }
+            settling = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + (moving ? 0.35 : 0), execute: work)
+        }
+    }
+
+    /// The quarter ring of a download of unknown size goes round, whether
+    /// the window was opened before or during it, and again after the
+    /// layer has left the window (which takes its animations with it).
+    private func spinIfUnsized() {
+        guard let showing, showing.fraction == nil, !Motion.reduced, fill.animation(forKey: "spin") == nil else { return }
+        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+        spin.fromValue = 0
+        spin.toValue = 2 * Double.pi
+        spin.duration = 1
+        spin.repeatCount = .infinity
+        fill.add(spin, forKey: "spin")
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { spinIfUnsized() }
+    }
+
+    private func swap(to image: NSImage?, animated: Bool) {
+        guard let image else { return }
+        if animated { glyph.setSymbolImage(image, contentTransition: .replace) } else { glyph.image = image }
+    }
+
+    private func fade(rings opacity: Float, animated: Bool) {
+        for ring in [track, fill] {
+            let animation = CABasicAnimation(keyPath: "opacity")
+            animation.fromValue = ring.presentation()?.opacity ?? ring.opacity
+            animation.duration = animated ? 0.2 : 0
+            ring.opacity = opacity
+            ring.add(animation, forKey: "opacity")
+        }
+    }
+}
+
 /// The profile button: your Mac account's picture, round, filling the
 /// glass; your initials where there is no picture.
 final class ProfileButton: NSButton {
@@ -298,14 +443,21 @@ final class ProfileButton: NSButton {
         imageScaling = .scaleNone
         toolTip = Profile.name
         setAccessibilityLabel("Profile, \(Profile.name)")
-        image = Profile.picture(size: 26)
+        // Your picture once it's been looked up (usually before the window
+        // shows); never your initials first and then a swap.
+        Profile.whenReady { [weak self] in
+            guard let self, !self.isPrivate else { return }
+            self.image = Profile.picture(size: 26)
+        }
     }
+    private var isPrivate = false
     required init?(coder: NSCoder) { fatalError() }
 
     /// A private window says so where your picture would be, with Safari's
     /// raised hand: dark like any dark window, it was otherwise no
     /// different to look at.
     func markPrivate() {
+        isPrivate = true
         image = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: "Private Window")?
             .withSymbolConfiguration(.init(pointSize: 14, weight: .semibold))
         contentTintColor = .labelColor

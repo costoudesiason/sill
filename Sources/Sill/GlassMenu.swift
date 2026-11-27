@@ -45,9 +45,12 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
     static var isOpen: Bool { current != nil }
 
     /// Puts away whatever menu is open. True if there was one.
+    /// `keepingOffers`: a menu that came up on its own without taking the
+    /// keys (Save Password) stays.
     @discardableResult
-    static func dismissCurrent() -> Bool {
+    static func dismissCurrent(keepingOffers: Bool = false) -> Bool {
         guard let current else { return false }
+        if keepingOffers, !current.tookKeys { return false }
         current.dismiss()
         return true
     }
@@ -84,6 +87,7 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
 
     /// A short list of choices (a setting's values) has no search field.
     private let searchable: Bool
+    private var tookKeys = true
 
     init(title: String?, entries: [Entry], searchable: Bool = true) {
         self.title = title
@@ -135,7 +139,10 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
 
     /// Opens at `point` (window coordinates, bottom-left origin), growing
     /// down from it, or up from it when `above`, kept inside the window.
-    func show(in window: NSWindow, at point: NSPoint, above: Bool = false, alignRight: Bool = false, from source: AnyObject? = nil) {
+    /// `takesKeys` false: the keyboard stays where it was (an offer that
+    /// comes up on its own mustn't take what you're typing).
+    func show(in window: NSWindow, at point: NSPoint, above: Bool = false, alignRight: Bool = false, from source: AnyObject? = nil,
+              takesKeys: Bool = true) {
         guard let host = window.contentView else { return }
         // A tab's preview card doesn't stay up over its menu.
         (window.windowController as? BrowserWindowController)?.hidePreview(animated: false)
@@ -171,7 +178,8 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
         glass.frame = frame
         body.frame = glass.bounds
         layout()
-        window.makeFirstResponder(search)
+        tookKeys = takesKeys
+        if takesKeys { window.makeFirstResponder(search) }
         guard !Motion.reduced else { return }
         glass.alphaValue = 0
         Motion.animate(0.14) { glass.animator().alphaValue = 1 }
@@ -309,6 +317,8 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
     // MARK: - keys
 
     func controlTextDidChange(_ obj: Notification) {
+        // Nothing to search: typing doesn't hide rows.
+        guard searchable else { search.stringValue = ""; return }
         rebuild(filter: search.stringValue)
         refit()
     }

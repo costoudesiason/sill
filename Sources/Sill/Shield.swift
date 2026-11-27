@@ -43,13 +43,9 @@ final class Shield: ObservableObject {
 
     /// Runs `go` now, or once the list is ready, has failed, or a second has passed.
     func whenReady(_ go: @escaping () -> Void) {
-        guard !settled, preparing, Preferences.shared.blocksAds else { return go() }
-        if held.isEmpty {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-                MainActor.assumeIsolated { self?.release() }
-            }
-        }
-        held.append(go)
+        // On Chromium, uBlock Origin Lite blocks inside the engine from the
+        // first request: nothing needs to wait for WebKit's list.
+        go()
     }
 
     private func release() {
