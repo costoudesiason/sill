@@ -203,7 +203,7 @@ final class History {
         finish(making)
     }
 
-    static func key(_ url: URL) -> String? {
+    nonisolated static func key(_ url: URL) -> String? {
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return nil }
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         components?.fragment = nil

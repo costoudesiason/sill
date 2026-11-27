@@ -268,6 +268,30 @@ enum Profile {
         return nil
     }()
 
+    /// Looked up once, off the main thread, as Sill starts: the directory
+    /// lookup isn't something the first window should wait on.
+    @MainActor private(set) static var isReady = false
+    @MainActor private static var waiting: [@MainActor () -> Void] = []
+
+    @MainActor static func preload() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = accountPicture
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    isReady = true
+                    let run = waiting
+                    waiting = []
+                    run.forEach { $0() }
+                }
+            }
+        }
+    }
+
+    /// Runs `then` once the picture has been looked up (at once if it has).
+    @MainActor static func whenReady(_ then: @escaping @MainActor () -> Void) {
+        if isReady { then() } else { waiting.append(then) }
+    }
+
     /// The account picture, round, at `size` points; initials on a tinted
     /// circle where there is none.
     static func picture(size: CGFloat) -> NSImage {

@@ -135,7 +135,10 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
 
     /// Opens at `point` (window coordinates, bottom-left origin), growing
     /// down from it, or up from it when `above`, kept inside the window.
-    func show(in window: NSWindow, at point: NSPoint, above: Bool = false, alignRight: Bool = false, from source: AnyObject? = nil) {
+    /// `takesKeys` false: the keyboard stays where it was (an offer that
+    /// comes up on its own mustn't take what you're typing).
+    func show(in window: NSWindow, at point: NSPoint, above: Bool = false, alignRight: Bool = false, from source: AnyObject? = nil,
+              takesKeys: Bool = true) {
         guard let host = window.contentView else { return }
         // A tab's preview card doesn't stay up over its menu.
         (window.windowController as? BrowserWindowController)?.hidePreview(animated: false)
@@ -171,7 +174,7 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
         glass.frame = frame
         body.frame = glass.bounds
         layout()
-        window.makeFirstResponder(search)
+        if takesKeys { window.makeFirstResponder(search) }
         guard !Motion.reduced else { return }
         glass.alphaValue = 0
         Motion.animate(0.14) { glass.animator().alphaValue = 1 }
@@ -309,6 +312,8 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
     // MARK: - keys
 
     func controlTextDidChange(_ obj: Notification) {
+        // Nothing to search: typing doesn't hide rows.
+        guard searchable else { search.stringValue = ""; return }
         rebuild(filter: search.stringValue)
         refit()
     }

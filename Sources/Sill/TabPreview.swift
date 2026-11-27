@@ -81,6 +81,9 @@ final class TabPreview: NSView {
     func retitle() {
         guard let tab else { return }
         titleLabel.stringValue = tab.displayTitle
+        addressLabel.stringValue = tab.url.map { Domains.bare($0.host()).isEmpty ? Address.display($0) : Domains.bare($0.host()) } ?? ""
+        icon.image = tab.favicon ?? Self.globe
+        icon.contentTintColor = tab.favicon == nil ? .secondaryLabelColor : nil
     }
 
     /// A newer picture of the page shown.

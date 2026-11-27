@@ -279,6 +279,7 @@ final class Saver<Value: Encodable> {
     private let url: URL
     private let delay: TimeInterval
     private var pending: DispatchWorkItem?
+    private var unsavedSince: Date?
     private let queue = saveQueue
 
     init(_ url: URL, delay: TimeInterval = 1) {
@@ -290,7 +291,14 @@ final class Saver<Value: Encodable> {
     func save(_ make: @escaping () -> Value, written: (@MainActor () -> Void)? = nil) {
         guard !final else { return }
         pending?.cancel()
-        let work = DispatchWorkItem { [url, queue] in
+        // Each change puts the write off, but never past three delays from
+        // the first unsaved one: a page retitling every second still gets saved.
+        let now = Date()
+        let first = unsavedSince ?? now
+        unsavedSince = first
+        let wait = max(0, min(delay, delay * 3 - now.timeIntervalSince(first)))
+        let work = DispatchWorkItem { [weak self, url, queue] in
+            self?.unsavedSince = nil
             let value = make()
             queue.async {
                 guard let data = try? JSONEncoder().encode(value) else { return }
@@ -299,7 +307,7 @@ final class Saver<Value: Encodable> {
             }
         }
         pending = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
     }
 
     /// Written at quitting: what the app does as it closes everything down

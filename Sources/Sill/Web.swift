@@ -309,7 +309,9 @@ final class SillWebView: SEWebView {
     /// in the page, then one for the window to show it), or after `limit`,
     /// whichever comes first: a page coming in stays under the one being
     /// left until then, so nothing blank shows between them.
-    func afterNextFrame(within limit: TimeInterval = 0.25, _ run: @escaping () -> Void) {
+    /// `settle`: how long after the page has drawn before `run`, for its
+    /// frame to reach the screen (it goes through the GPU process first).
+    func afterNextFrame(within limit: TimeInterval = 0.25, settle: TimeInterval = 0.017, _ run: @escaping () -> Void) {
         var done = false
         let finish = {
             guard !done else { return }
@@ -319,7 +321,7 @@ final class SillWebView: SEWebView {
         evaluateJavaScript("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))", completion: { _, error in
             // No page to ask yet: the limit decides, not the failure.
             guard error == nil else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.017) { MainActor.assumeIsolated { finish() } }
+            DispatchQueue.main.asyncAfter(deadline: .now() + settle) { MainActor.assumeIsolated { finish() } }
         })
         DispatchQueue.main.asyncAfter(deadline: .now() + limit) { MainActor.assumeIsolated { finish() } }
     }

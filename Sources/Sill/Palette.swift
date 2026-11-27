@@ -80,6 +80,8 @@ final class Palette: NSObject {
     /// The rest of a site's address, shown selected after what was typed.
     private var inline: String?
     private var completing = true
+    /// What the field held when it opened: Esc goes back to it before it closes.
+    private var opening = ""
 
     static let width: CGFloat = 680
     static let fieldHeight: CGFloat = 58
@@ -211,7 +213,7 @@ final class Palette: NSObject {
     /// The window's look, pinned on the card and its fixed colours. Again
     /// when the look changes with the palette open (Settings' Light/Dark):
     /// the card stayed in the old one until it was closed.
-    func takeAppearance(of window: NSWindow?) {
+    func takeAppearance(of window: NSWindow?, rebuilding: Bool = true) {
         let appearance = window?.effectiveAppearance ?? NSApp.effectiveAppearance
         let named = NSAppearance(named: appearance.bestMatch(from: [.aqua, .darkAqua]) ?? .aqua)
         card.appearance = named
@@ -227,7 +229,7 @@ final class Palette: NSObject {
         field.textColor = Ink.current.primary
         searchIcon.contentTintColor = Ink.current.secondary
         pill.needsLayout = true
-        if card.superview != nil { rebuild(keepSelection: true, fresh: true) }
+        if rebuilding, card.superview != nil { rebuild(keepSelection: true, fresh: true) }
     }
 
     func open(_ mode: Mode, in stage: NSView) {
@@ -236,7 +238,8 @@ final class Palette: NSObject {
         // Glass picks its look from what's behind it a frame late; pin the
         // window's own, and fixed colours with it, before anything is drawn,
         // so no text (placeholder included) flips from dark to light.
-        takeAppearance(of: stage.window)
+        // Not drawn here: the rows are made once below, for this opening's text.
+        takeAppearance(of: stage.window, rebuilding: false)
         ready(in: stage)
         // Above whatever came after it was readied, as when it was made here.
         if !raised, stage.subviews.last !== card {
@@ -260,8 +263,10 @@ final class Palette: NSObject {
             attributes: [.foregroundColor: Ink.current.tertiary, .font: field.font!])
         field.stringValue = initial
         typed = initial
+        opening = initial
         inline = nil
-        completing = false
+        // The first letter completes too, as in Safari.
+        completing = true
         suggestions = []
         suggestionsFor = ""
         suggestionCache = [:]
@@ -517,8 +522,16 @@ final class Palette: NSObject {
                 let topURL = top.compactMap { if case .go(let url) = $0 { return History.key(url) }; return nil }.first
                 let open = Set(tabMatches.compactMap { $0.url.flatMap(History.key) })
                 // Results pages are the searches above, not pages of their own.
+                // Bookmarks first: kept on purpose, they say more than a visit.
+                let marks = Bookmarks.shared.search(text, limit: 3).filter { $0.url != topURL && !open.contains($0.url) }
+                if !marks.isEmpty {
+                    rows.append(.header("Bookmarks"))
+                    rows += marks.map { .item(.visit($0.asVisit)) }
+                }
+                let marked = Set(marks.map(\.url))
                 let visits = History.shared.search(text, limit: 14).filter {
-                    $0.url != topURL && !open.contains($0.url) && SearchEngine.google.query(in: $0.address) == nil
+                    $0.url != topURL && !open.contains($0.url) && !marked.contains($0.url)
+                        && SearchEngine.google.query(in: $0.address) == nil
                 }
                 if !visits.isEmpty {
                     rows.append(.header("History"))
@@ -818,6 +831,22 @@ final class Palette: NSObject {
         GlassMenu(title: nil, entries: entries, searchable: false).show(in: window, at: corner, alignRight: true, from: host)
     }
 
+    /// Keeps a row's page as a bookmark, or lets it go, with Undo.
+    private func toggleBookmark(_ url: URL, title: String) {
+        if let index = Bookmarks.shared.index(of: url), let gone = Bookmarks.shared.remove(url) {
+            browser?.toast("Removed Bookmark", action: ("Undo", { [weak self] in
+                Bookmarks.shared.restore(gone, at: index)
+                self?.rebuild(keepSelection: true)
+            }))
+        } else if Bookmarks.shared.add(url, title: title) {
+            browser?.toast("Added Bookmark", action: ("Undo", { [weak self] in
+                Bookmarks.shared.remove(url)
+                self?.rebuild(keepSelection: true)
+            }))
+        }
+        rebuild(keepSelection: true)
+    }
+
     /// ⌘K or the pill's Actions: what else can be done with the chosen row.
     /// A right-click on a row shows the same at the pointer.
     func showActions(at point: NSPoint? = nil) {
@@ -860,7 +889,14 @@ final class Palette: NSObject {
             menu.addItem(ClosureMenuItem(title: "Copy Link") { Pasteboard.copy(url) })
         }
         var siteTitle: String?
-        if case .visit(let visit) = item {
+        if case .visit(let visit) = item, let url = visit.address {
+            let marked = Bookmarks.shared.contains(url)
+            menu.addItem(ClosureMenuItem(title: marked ? "Remove Bookmark" : "Add Bookmark") { [weak self] in
+                self?.toggleBookmark(url, title: visit.title)
+            })
+        }
+        // A row from bookmarks that isn't in history has no history to remove.
+        if case .visit(let visit) = item, History.shared.visits[visit.url] != nil {
             menu.addItem(.separator())
             menu.addItem(ClosureMenuItem(title: "Remove from History") { [weak self] in self?.removeSelectedVisit() })
             // The whole site, when there is more of it than this one page.
@@ -887,7 +923,7 @@ final class Palette: NSObject {
             "Switch to Tab": "arrow.right.square", "Close Tab": "xmark.square",
             "Open in New Tab": "plus.square.on.square", "Open in Background Tab": "square.stack",
             "Open Here": "arrow.turn.down.right", "Copy Link": "link", "Remove from History": "trash",
-            "Clear History…": "clock.arrow.circlepath",
+            "Clear History…": "clock.arrow.circlepath", "Add Bookmark": "bookmark", "Remove Bookmark": "bookmark.slash",
         ].merging(siteTitle.map { [$0: "trash.square"] } ?? [:]) { a, _ in a },
         keys: ["Open in New Tab": ["↩"], "Switch to Tab": ["↩"], "Copy Link": ["⇧", "⌘", "C"],
                "Remove from History": ["⌘", "⌫"]])
@@ -1093,6 +1129,16 @@ extension Palette: NSTextFieldDelegate {
         case #selector(NSResponder.cancelOperation(_:)):
             // First Esc takes back the completion; the next one closes.
             if showsInline(textView) { dropInline(textView); return true }
+            // Then it puts back what the field opened with (nothing in ⌘T,
+            // the page's address in ⌘L); only the next one closes.
+            if textView.string != opening {
+                textView.string = opening
+                textView.selectAll(nil)
+                typed = opening
+                inline = nil
+                rebuild()
+                return true
+            }
             close()
             return true
         case #selector(NSResponder.insertTab(_:)):

@@ -644,6 +644,15 @@ final class TabItemView: NSView {
     private let spinner = NSProgressIndicator()
     private let label = NSTextField(labelWithString: "")
     private let closeButton = TabCloseButton()
+    /// Sound playing (or held muted): a speaker after the title, as Safari
+    /// has it, that mutes and unmutes the tab.
+    private let speaker = NSButton()
+    private var showsSpeaker: Bool { tab.audible || tab.webView?.audioMuted == true }
+    private static func speakerImage(muted: Bool) -> NSImage? {
+        NSImage(systemSymbolName: muted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                accessibilityDescription: muted ? "Unmute Tab" : "Mute Tab")?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+    }
     private let fade = CAGradientLayer()
     /// The title's size, measured once per title and font: a label asked
     /// measures its text again each time, and every tab is laid out on every
@@ -669,6 +678,9 @@ final class TabItemView: NSView {
         let local = convert(point, from: superview)
         if !closeButton.isHidden, closeButton.frame.contains(closeButton.superview.map { convert(local, to: $0) } ?? local) {
             return closeButton
+        }
+        if !speaker.isHidden, speaker.frame.insetBy(dx: -3, dy: -4).contains(speaker.superview.map { convert(local, to: $0) } ?? local) {
+            return speaker
         }
         return self
     }
@@ -715,6 +727,14 @@ final class TabItemView: NSView {
         closeButton.setAccessibilityLabel("Close Tab")
         content.addSubview(closeButton)
 
+        speaker.isBordered = false
+        speaker.imagePosition = .imageOnly
+        speaker.contentTintColor = .secondaryLabelColor
+        speaker.target = self
+        speaker.action = #selector(speakerClicked)
+        speaker.isHidden = true
+        content.addSubview(speaker)
+
         setAccessibilityRole(.radioButton)
         refresh()
     }
@@ -742,7 +762,8 @@ final class TabItemView: NSView {
             self.strip?.browser?.warm(self.tab)
         }
         warming = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+        // As long as the card's wait: a pointer passing along the row wakes nothing.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
         strip?.browser?.tabHovered(tab, in: self)
     }
 
@@ -782,6 +803,15 @@ final class TabItemView: NSView {
         if icon.image !== image { icon.image = image }
         let tint: NSColor? = zoomText != nil || tab.favicon == nil ? .secondaryLabelColor : nil
         if icon.contentTintColor != tint { icon.contentTintColor = tint }
+        let muted = tab.webView?.audioMuted == true
+        if showsSpeaker, speaker.tag != (muted ? 2 : 1) {
+            speaker.tag = muted ? 2 : 1
+            speaker.image = Self.speakerImage(muted: muted)
+            speaker.toolTip = muted ? "Unmute Tab" : "Mute Tab"
+            speaker.setAccessibilityLabel(speaker.toolTip)
+        } else if !showsSpeaker {
+            speaker.tag = 0
+        }
         restyle()
     }
 
@@ -962,6 +992,7 @@ final class TabItemView: NSView {
             closeButton.frame = NSRect(x: (w - 18) / 2, y: (h - 18) / 2, width: 18, height: 18)
             label.isHidden = true
             agentDots?.isHidden = true
+            speaker.isHidden = true
             return
         }
         icon.isHidden = tab.isLoading && tab.favicon == nil && zoomText == nil
@@ -976,7 +1007,8 @@ final class TabItemView: NSView {
         // A few points to spare: measured to the exact width, the title sat
         // a fraction over its field and the fade took its last letter.
         let dots: CGFloat = agentDots == nil ? 0 : 13   // the dots, and a gap before the title
-        let group = min(w - edge * 2, iconSize + gap + dots + ceil(titleSize.width) + 6)
+        let sound: CGFloat = showsSpeaker ? 20 : 0   // the speaker, and a gap before it
+        let group = min(w - edge * 2, iconSize + gap + dots + ceil(titleSize.width) + 6 + sound)
         // Never under the close button: in a tab too narrow for the group
         // to sit centred clear of it, the group moves left of it, the same
         // in every tab and whether the button shows or not (hovering moves
@@ -992,7 +1024,9 @@ final class TabItemView: NSView {
             agentDots.frame = NSRect(x: start + iconSize + 6, y: (h - 12) / 2, width: 8, height: 12)
         }
         let labelX = start + iconSize + gap + dots
-        let labelRight = min(showsClose ? w - 34 : w - edge, max(labelX, start + group))
+        let labelRight = min(showsClose ? w - 34 : w - edge, max(labelX, start + group)) - sound
+        speaker.isHidden = !showsSpeaker
+        if showsSpeaker { speaker.frame = NSRect(x: labelRight + 3, y: (h - 16) / 2, width: 16, height: 16) }
         let labelHeight = ceil(titleSize.height)
         let labelFrame = NSRect(x: labelX, y: (h - labelHeight) / 2, width: max(0, labelRight - labelX), height: labelHeight)
         if let figure, !figure.isHidden {
@@ -1035,8 +1069,16 @@ final class TabItemView: NSView {
         strip?.track(self, from: event)
     }
 
+    /// The middle button closes on release, as in Safari: moving off first lets it go.
+    private var middleDown = false
     override func otherMouseDown(with event: NSEvent) {
-        if event.buttonNumber == 2 { strip?.close(self) } else { super.otherMouseDown(with: event) }
+        if event.buttonNumber == 2 { middleDown = true } else { super.otherMouseDown(with: event) }
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        guard event.buttonNumber == 2, middleDown else { return super.otherMouseUp(with: event) }
+        middleDown = false
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { strip?.close(self) }
     }
 
     /// Right-click: the tab's commands in a glass menu at the pointer.
@@ -1059,6 +1101,12 @@ final class TabItemView: NSView {
 
     @objc private func closeClicked() {
         strip?.close(self)
+    }
+
+    @objc private func speakerClicked() {
+        guard let view = tab.webView else { return }
+        view.audioMuted.toggle()
+        refresh()
     }
 }
 
