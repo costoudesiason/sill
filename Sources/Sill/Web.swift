@@ -319,8 +319,13 @@ final class SillWebView: SEWebView {
             run()
         }
         evaluateJavaScript("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))", completion: { _, error in
-            // No page to ask yet: the limit decides, not the failure.
-            guard error == nil else { return }
+            // No page to answer (crashed, mid-navigation): a long limit is
+            // only for a page that answers slowly; this one waits no more
+            // than a quarter of a second.
+            guard error == nil else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + min(limit, 0.25)) { MainActor.assumeIsolated { finish() } }
+                return
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + settle) { MainActor.assumeIsolated { finish() } }
         })
         DispatchQueue.main.asyncAfter(deadline: .now() + limit) { MainActor.assumeIsolated { finish() } }

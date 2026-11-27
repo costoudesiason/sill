@@ -74,8 +74,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         pressure.activate()
         WarmSite.shared.warm(after: 4)
-        // Bookmarks read once things have settled, for the menu and ⌘T.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { _ = Bookmarks.shared }
+        // Bookmarks read off the main thread, for the menu and ⌘T.
+        Bookmarks.preload()
         // Only if some site was allowed to notify before: else nothing is set up.
         if SitePermissions.shared.keepsNotifications { PageNotifications.shared.install() }
         // Opened again while running: a window of Sill's, if none is showing.
@@ -263,6 +263,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Clearing history clears what was closed since `since`, windows and tabs.
+    func forgetClosed(since: Date) {
+        closedWindows.removeAll { $0.at >= since }
+        browsers.forEach { $0.forgetClosed(since: since) }
+    }
+
     /// ⇧⌘T with no window open: the last window closed.
     @objc func reopenClosedTab(_ sender: Any?) { reopenClosedWindow(sender) }
 
@@ -350,6 +356,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.buttons.first?.hasDestructiveAction = true
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let gone = History.shared.clear()
+        // What was closed goes too: cleared pages can't be reopened from the menu.
+        forgetClosed(since: .distantPast)
         guard !gone.isEmpty else { return }
         current?.toast("Cleared all history", action: ("Undo", { History.shared.restore(gone) }))
     }
@@ -523,7 +531,8 @@ enum MainMenu {
 extension AppDelegate {
     /// Another app in front: an open menu goes, as a real menu would.
     func applicationDidResignActive(_ notification: Notification) {
-        GlassMenu.dismissCurrent()
+        // An offer (Save Password) stays: you may be off fetching a code.
+        GlassMenu.dismissCurrent(keepingOffers: true)
     }
 }
 

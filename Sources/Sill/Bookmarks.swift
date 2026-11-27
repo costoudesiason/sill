@@ -16,8 +16,9 @@ struct Bookmark: Codable, Hashable {
     var asVisit: Visit { Visit(url: url, title: title, count: 1, last: added, typed: 3) }
 }
 
-/// Your bookmarks, newest last, in a JSON file beside history. Never written
-/// for private windows: those don't add any.
+/// Your bookmarks, newest last, in a JSON file beside history. A private
+/// window can add one too, as in Safari: keeping a page is a choice you make,
+/// not a trace it leaves.
 @MainActor
 final class Bookmarks {
     static let shared = Bookmarks()
@@ -26,15 +27,55 @@ final class Bookmarks {
     static let changed = Notification.Name("SillBookmarksChanged")
     private(set) var list: [Bookmark]
     private var keys: Set<String>
-    private static var file: URL { Places.support.appendingPathComponent("bookmarks.json") }
+    /// Titles and addresses lowercased once, not on every key typed in ⌘T.
+    private var lowered: [(title: String, url: String)] = []
+    private nonisolated static var file: URL { Places.support.appendingPathComponent("bookmarks.json") }
     private let saver = Saver<[Bookmark]>(Bookmarks.file, delay: 0.5)
 
+    /// The file as read off the main thread at launch (preload).
+    private static var preloaded: Reading?
+    private enum Reading { case missing, unreadable, read([Bookmark]) }
+
+    private nonisolated static func read() -> Reading {
+        guard FileManager.default.fileExists(atPath: file.path) else { return .missing }
+        guard let data = try? Data(contentsOf: file),
+              let marks = try? JSONDecoder().decode([Bookmark].self, from: data) else { return .unreadable }
+        return .read(marks)
+    }
+
+    /// Read in the background as Sill starts, so the menu, ⌘D and ⌘T find
+    /// them ready without the main thread reading the file.
+    static func preload() {
+        Task.detached(priority: .utility) {
+            let reading = read()
+            await MainActor.run {
+                guard !made else { return }
+                preloaded = reading
+                _ = shared
+            }
+        }
+    }
+
     private init() {
-        let read = (try? Data(contentsOf: Self.file)).flatMap { try? JSONDecoder().decode([Bookmark].self, from: $0) }
-        list = read ?? []
+        let reading = Self.preloaded ?? Self.read()
+        Self.preloaded = nil
+        switch reading {
+        case .read(let marks):
+            list = marks
+        case .unreadable:
+            // Never written over: put aside, under a name of its own, for
+            // whoever wants it back, and started afresh.
+            list = []
+            let aside = Self.file.deletingLastPathComponent()
+                .appendingPathComponent("bookmarks (unreadable \(Int(Date().timeIntervalSince1970))).json")
+            try? FileManager.default.moveItem(at: Self.file, to: aside)
+        case .missing:
+            list = []
+        }
         keys = Set(list.map(\.url))
+        lowered = list.map { ($0.title.lowercased(), $0.url.lowercased()) }
         Self.made = true
-        if read == nil { Self.bringOverImported() }
+        if case .missing = reading { Self.bringOverImported() }
     }
 
     func contains(_ url: URL?) -> Bool { url.flatMap(History.key).map(keys.contains) ?? false }
@@ -82,9 +123,8 @@ final class Bookmarks {
         let words = text.lowercased().split(separator: " ")
         guard !words.isEmpty else { return [] }
         var result: [Bookmark] = []
-        for mark in list.reversed() {
-            let title = mark.title.lowercased(), url = mark.url.lowercased()
-            guard words.allSatisfy({ title.contains($0) || url.contains($0) }) else { continue }
+        for (mark, low) in zip(list, lowered).reversed() {
+            guard words.allSatisfy({ low.title.contains($0) || low.url.contains($0) }) else { continue }
             result.append(mark)
             if result.count == limit { break }
         }
@@ -106,6 +146,7 @@ final class Bookmarks {
 
     private func saved() {
         keys = Set(list.map(\.url))
+        lowered = list.map { ($0.title.lowercased(), $0.url.lowercased()) }
         saver.save { [list] in list }
         NotificationCenter.default.post(name: Self.changed, object: nil)
     }
@@ -140,19 +181,20 @@ final class Bookmarks {
     }
 
     /// Bookmarks imported from Safari before they had a place of their own
-    /// went into history: on the first launch with bookmarks, those still in
-    /// history come over, read again from Safari with their folders.
+    /// went into history, each marked as typed three times: on the first
+    /// launch with bookmarks, those still there come over, read again from
+    /// Safari with their folders. A page you only visited has no such mark.
     private static func bringOverImported() {
         let file = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Safari/Bookmarks.plist")
         Task.detached(priority: .utility) {
             let marks = readSafari(file)
+            // Safari's file not readable this time (no Full Disk Access):
+            // nothing written, so the next launch looks again.
+            guard !marks.isEmpty else { return }
             await MainActor.run {
                 let visits = History.shared.visits
-                var kept = marks.filter { visits[$0.url] != nil }
-                // Only if they were imported: then nearly all are in history.
-                // A few visited by chance aren't bookmarks you brought over.
-                if Double(kept.count) < Double(marks.count) * 0.8 { kept = [] }
-                // Written even when empty, so Safari is read for this once only.
+                let kept = marks.filter { (visits[$0.url]?.typed ?? 0) >= 3 }
+                // Written even when none came over, so this happens once.
                 if kept.isEmpty { Bookmarks.shared.saved() } else { Bookmarks.shared.merge(kept) }
             }
         }

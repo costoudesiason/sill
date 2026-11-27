@@ -282,11 +282,13 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   }
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     devtools_ = nullptr;
+    // The view lets go of its browser first, so a call made from an answer
+    // below fails at once rather than going to the closing page.
+    [view_ browserClosed];
     // Every call still waiting is answered (failed), not left waiting forever.
     auto waiting = std::move(pending_);
     pending_.clear();
     for (auto& entry : waiting) entry.second(NO, nil);
-    [view_ browserClosed];
     if (--gOpenBrowsers <= 0 && gQuitting) CefQuitMessageLoop();
   }
   bool OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int, const CefString& target_url, const CefString&,

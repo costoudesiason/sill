@@ -985,6 +985,7 @@ final class Palette: NSObject {
             return .item(GlassMenu.Item(title: "Clear \(title)", symbol: "clock",
                                         subtitle: count == 1 ? "1 page" : "\(count) pages") { [weak self] in
                 let gone = History.shared.remove { $0.last >= since }
+                AppDelegate.shared.forgetClosed(since: since)
                 self?.rebuild()
                 self?.offerUndo("Cleared \(title.lowercased()) of history", gone)
             })
@@ -1129,14 +1130,16 @@ extension Palette: NSTextFieldDelegate {
         case #selector(NSResponder.cancelOperation(_:)):
             // First Esc takes back the completion; the next one closes.
             if showsInline(textView) { dropInline(textView); return true }
-            // Then it puts back what the field opened with (nothing in ⌘T,
-            // the page's address in ⌘L); only the next one closes.
-            if textView.string != opening {
+            // In ⌘L it then puts the page's address back, as Safari does;
+            // only the next one closes. Elsewhere one Esc closes.
+            if mode == .address, textView.string != opening {
                 textView.string = opening
                 textView.selectAll(nil)
                 typed = opening
                 inline = nil
+                useCachedSuggestions()
                 rebuild()
+                askForSuggestions()
                 return true
             }
             close()

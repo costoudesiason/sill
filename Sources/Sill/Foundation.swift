@@ -279,7 +279,7 @@ final class Saver<Value: Encodable> {
     private let url: URL
     private let delay: TimeInterval
     private var pending: DispatchWorkItem?
-    private var unsavedSince: Date?
+    private var unsavedSince: UInt64?
     private let queue = saveQueue
 
     init(_ url: URL, delay: TimeInterval = 1) {
@@ -293,10 +293,11 @@ final class Saver<Value: Encodable> {
         pending?.cancel()
         // Each change puts the write off, but never past three delays from
         // the first unsaved one: a page retitling every second still gets saved.
-        let now = Date()
+        let now = DispatchTime.now().uptimeNanoseconds
         let first = unsavedSince ?? now
         unsavedSince = first
-        let wait = max(0, min(delay, delay * 3 - now.timeIntervalSince(first)))
+        let waited = TimeInterval(now - first) / 1e9
+        let wait = max(0, min(delay, delay * 3 - waited))
         let work = DispatchWorkItem { [weak self, url, queue] in
             self?.unsavedSince = nil
             let value = make()

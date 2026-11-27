@@ -130,22 +130,36 @@ final class DownloadItem: ObservableObject, Identifiable {
         return [size, kind].compactMap { $0 }.joined(separator: " · ")
     }()
 
-    /// Still where it landed: moved or thrown away since, it can't be opened or dragged.
-    var isThere: Bool { url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false }
+    /// Still where it landed: moved or thrown away since, it can't be opened
+    /// or dragged. Looked at when the list opens and on a click, not on
+    /// every redraw (Downloads may be on a slow disk).
+    @Published private(set) var isThere = true
+    func checkThere() {
+        guard finished else { return }
+        let there = url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        if there != isThere { isThere = there }
+    }
+
+    /// How far it was, and when, over the last few seconds: time left goes
+    /// by the recent pace, so a download that speeds up or stalls is told right.
+    private var samples: [(at: TimeInterval, fraction: Double)] = []
+    private static let words: DateComponentsFormatter = {
+        let format = DateComponentsFormatter()
+        format.unitsStyle = .full
+        format.maximumUnitCount = 1
+        return format
+    }()
 
     /// "45% · About 12 seconds left": time left only once there's enough to go on.
     var status: String {
         guard fraction > 0 else { return "Starting…" }
         let percent = "\(Int((fraction * 100).rounded(.down)))%"
-        let elapsed = Date().timeIntervalSince(began)
-        guard fraction > 0.03, fraction < 1, elapsed > 2 else { return percent }
-        var left = elapsed * (1 - fraction) / fraction
+        guard fraction < 1, let first = samples.first, let last = samples.last,
+              last.at - first.at > 1.5, last.fraction > first.fraction else { return percent }
+        var left = (last.at - first.at) * (1 - last.fraction) / (last.fraction - first.fraction)
         if left > 10 { left = (left / 5).rounded() * 5 }
-        let format = DateComponentsFormatter()
-        format.unitsStyle = .full
-        format.maximumUnitCount = 1
-        format.allowedUnits = left >= 3600 ? [.hour, .minute] : left >= 60 ? [.minute] : [.second]
-        guard let words = format.string(from: max(1, left)) else { return percent }
+        Self.words.allowedUnits = left >= 3600 ? [.hour, .minute] : left >= 60 ? [.minute] : [.second]
+        guard let words = Self.words.string(from: max(1, left)) else { return percent }
         return "\(percent) · About \(words) left"
     }
 
@@ -167,6 +181,11 @@ final class DownloadItem: ObservableObject, Identifiable {
     func refresh() {
         guard active else { return }
         let value = download?.progress.fractionCompleted ?? reported
+        let now = ProcessInfo.processInfo.systemUptime
+        if value >= 0 {
+            samples.append((now, value))
+            samples.removeAll { now - $0.at > 5 }
+        }
         guard value != fraction else { return }
         fraction = value
     }
@@ -208,10 +227,18 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
     static let progressChanged = Notification.Name("SillDownloadsProgress")
     private var lastOverall: [Bool: Overall?] = [:]
 
+    /// Everything that has come down since the ring last went away: a file
+    /// that lands still counts (as done) until the rest have, so the ring
+    /// never goes backwards when one of several finishes.
+    private var batch: [Bool: [DownloadItem]] = [:]
+
     func overall(isPrivate: Bool) -> Overall? {
         let running = items.filter { $0.active && $0.isPrivate == isPrivate }
         guard !running.isEmpty else { return nil }
-        let sizes = running.map(\.fraction)
+        let counted = (batch[isPrivate] ?? []).filter { !$0.failed } + running.filter { item in
+            !(batch[isPrivate] ?? []).contains { $0 === item }
+        }
+        let sizes = counted.map { $0.finished ? 1 : $0.fraction }
         // Whole percents: the ring moves when it can be seen to, not more often.
         let fraction = sizes.contains { $0 < 0 } ? nil : (sizes.reduce(0, +) / Double(sizes.count) * 100).rounded() / 100
         return Overall(count: running.count, fraction: fraction)
@@ -252,6 +279,16 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
     private func announce() {
         var moved = false
         for isPrivate in [false, true] {
+            // The batch: what's running joins it; once nothing is, it ends.
+            if items.contains(where: { $0.active && $0.isPrivate == isPrivate }) {
+                var members = batch[isPrivate] ?? []
+                for item in items where item.active && item.isPrivate == isPrivate && !members.contains(where: { $0 === item }) {
+                    members.append(item)
+                }
+                batch[isPrivate] = members
+            } else {
+                batch[isPrivate] = nil
+            }
             let now = overall(isPrivate: isPrivate)
             if lastOverall[isPrivate] != now { lastOverall[isPrivate] = now; moved = true }
         }
@@ -533,6 +570,7 @@ struct DownloadsView: View {
         }
         .frame(width: 320)
         .animation(Motion.snappy, value: items.map(\.id))
+        .onAppear { downloads.items.forEach { $0.checkThere() } }
     }
 }
 
@@ -568,7 +606,11 @@ private struct DownloadRow: View {
                 Spacer(minLength: 0)
             }
             .contentShape(Rectangle())
-            .overlay(FileDragArea(url: openable, icon: item.icon) { if let url = openable { NSWorkspace.shared.open(url) } })
+            .overlay(FileDragArea(url: openable, icon: item.icon) {
+                // Looked at again: it may have gone since the list opened.
+                item.checkThere()
+                if let url = openable { NSWorkspace.shared.open(url) }
+            })
 
             if item.active {
                 Button { item.cancel() } label: { Image(systemName: "xmark.circle.fill") }
@@ -633,7 +675,14 @@ private struct FileDragArea: NSViewRepresentable {
             let item = NSDraggingItem(pasteboardWriter: url as NSURL)
             let point = convert(start, from: nil)
             item.setDraggingFrame(NSRect(x: point.x - 16, y: point.y - 16, width: 32, height: 32), contents: icon)
+            // Held until the drop: the list may close mid-drag and let this go.
+            Self.dragging = self
             beginDraggingSession(with: [item], event: event, source: self)
+        }
+
+        private static var dragging: DragView?
+        func draggingSession(_ session: NSDraggingSession, endedAt point: NSPoint, operation: NSDragOperation) {
+            Self.dragging = nil
         }
 
         override func mouseUp(with event: NSEvent) {

@@ -162,7 +162,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         let title: String
         let index: Int
         let state: Any?
+        /// It was the tab in front when it closed.
+        var wasFront = false
         let at = Date()
+    }
+
+    /// Clearing history: closed tabs since `since` can't be reopened.
+    func forgetClosed(since: Date) {
+        closed.removeAll { $0.at >= since }
     }
     /// Recently closed in this window, newest last, for ⇧⌘T.
     private var closed: [ClosedTab] = []
@@ -766,7 +773,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if paletteOpen && selected !== tab { palette.close(animated: false, focusPage: false) }
         madeFindBar?.close()
         // A menu belongs to the tab it was opened over: it goes with it.
-        if selected !== tab { GlassMenu.dismissCurrent() }
+        // (Not an offer that came up on its own, like Save Password: it
+        // would be lost for good.)
+        if selected !== tab { GlassMenu.dismissCurrent(keepingOffers: true) }
         let previous = selected
         hidePreview(animated: false)
         // The page being left keeps its place in the window, under the new
@@ -880,11 +889,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     /// Tabs closed together, back in their places: the last closed goes back first.
     private func reopen(_ entries: [ClosedTab]) {
+        // Only those not already back (⇧⌘T while the toast was up).
+        let waiting = Set(closed.map(\.id))
+        let entries = entries.filter { waiting.contains($0.id) }
         let ids = Set(entries.map(\.id))
         closed.removeAll { ids.contains($0.id) }
+        var front: Tab?
         for entry in entries.reversed() {
-            addTab(url: entry.url, at: min(entry.index, tabs.count), select: false, state: entry.state)
+            let tab = addTab(url: entry.url, at: min(entry.index, tabs.count), select: false, state: entry.state)
+            if entry.wasFront { front = tab }
         }
+        // The one that was in front comes back to the front.
+        if let front { select(front) }
     }
 
     @discardableResult
@@ -897,7 +913,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         var entry: ClosedTab?
         // Not an agent's tab you never looked at: it was never yours to reopen.
         if let url = tab.webView?.url ?? tab.url, !isPrivate, !(tab.openedByAgent && tab.seenAt == nil) {
-            entry = ClosedTab(url: url, title: tab.displayTitle, index: index, state: tab.interactionState)
+            entry = ClosedTab(url: url, title: tab.displayTitle, index: index, state: tab.interactionState, wasFront: tab === selected)
             closed.append(entry!)
             if closed.count > 30 { closed.removeFirst() }
         }

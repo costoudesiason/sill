@@ -45,9 +45,12 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
     static var isOpen: Bool { current != nil }
 
     /// Puts away whatever menu is open. True if there was one.
+    /// `keepingOffers`: a menu that came up on its own without taking the
+    /// keys (Save Password) stays.
     @discardableResult
-    static func dismissCurrent() -> Bool {
+    static func dismissCurrent(keepingOffers: Bool = false) -> Bool {
         guard let current else { return false }
+        if keepingOffers, !current.tookKeys { return false }
         current.dismiss()
         return true
     }
@@ -84,6 +87,7 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
 
     /// A short list of choices (a setting's values) has no search field.
     private let searchable: Bool
+    private var tookKeys = true
 
     init(title: String?, entries: [Entry], searchable: Bool = true) {
         self.title = title
@@ -174,6 +178,7 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
         glass.frame = frame
         body.frame = glass.bounds
         layout()
+        tookKeys = takesKeys
         if takesKeys { window.makeFirstResponder(search) }
         guard !Motion.reduced else { return }
         glass.alphaValue = 0

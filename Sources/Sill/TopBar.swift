@@ -373,14 +373,7 @@ final class DownloadsButton: BarButton {
             } else {
                 // No size known: a quarter of the ring, going round.
                 fill.strokeEnd = 0.25
-                if moving, fill.animation(forKey: "spin") == nil {
-                    let spin = CABasicAnimation(keyPath: "transform.rotation.z")
-                    spin.fromValue = 0
-                    spin.toValue = 2 * Double.pi
-                    spin.duration = 1
-                    spin.repeatCount = .infinity
-                    fill.add(spin, forKey: "spin")
-                }
+                spinIfUnsized()
             }
         } else {
             setAccessibilityValue(nil)
@@ -401,6 +394,24 @@ final class DownloadsButton: BarButton {
             settling = work
             DispatchQueue.main.asyncAfter(deadline: .now() + (moving ? 0.35 : 0), execute: work)
         }
+    }
+
+    /// The quarter ring of a download of unknown size goes round, whether
+    /// the window was opened before or during it, and again after the
+    /// layer has left the window (which takes its animations with it).
+    private func spinIfUnsized() {
+        guard let showing, showing.fraction == nil, !Motion.reduced, fill.animation(forKey: "spin") == nil else { return }
+        let spin = CABasicAnimation(keyPath: "transform.rotation.z")
+        spin.fromValue = 0
+        spin.toValue = 2 * Double.pi
+        spin.duration = 1
+        spin.repeatCount = .infinity
+        fill.add(spin, forKey: "spin")
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { spinIfUnsized() }
     }
 
     private func swap(to image: NSImage?, animated: Bool) {

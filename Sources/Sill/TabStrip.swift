@@ -762,8 +762,9 @@ final class TabItemView: NSView {
             self.strip?.browser?.warm(self.tab)
         }
         warming = work
-        // As long as the card's wait: a pointer passing along the row wakes nothing.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
+        // A real pause, not a pointer passing along the row, yet before
+        // most clicks land: the page has a head start.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
         strip?.browser?.tabHovered(tab, in: self)
     }
 
@@ -1024,9 +1025,14 @@ final class TabItemView: NSView {
             agentDots.frame = NSRect(x: start + iconSize + 6, y: (h - 12) / 2, width: 8, height: 12)
         }
         let labelX = start + iconSize + gap + dots
-        let labelRight = min(showsClose ? w - 34 : w - edge, max(labelX, start + group)) - sound
+        let labelRight = max(labelX, min(showsClose ? w - 34 : w - edge, max(labelX, start + group)) - sound)
         speaker.isHidden = !showsSpeaker
-        if showsSpeaker { speaker.frame = NSRect(x: labelRight + 3, y: (h - 16) / 2, width: 16, height: 16) }
+        // After the title, or after the icon when there's no room for one.
+        if showsSpeaker {
+            let titled = min(closeLeft, labelRight) - labelX >= 22
+            let x = titled ? labelRight + 3 : start + iconSize + 4
+            speaker.frame = NSRect(x: x, y: (h - 16) / 2, width: 16, height: 16)
+        }
         let labelHeight = ceil(titleSize.height)
         let labelFrame = NSRect(x: labelX, y: (h - labelHeight) / 2, width: max(0, labelRight - labelX), height: labelHeight)
         if let figure, !figure.isHidden {
