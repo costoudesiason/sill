@@ -94,6 +94,12 @@ final class DownloadItem: ObservableObject, Identifiable {
     @Published var finished = false
     @Published var failed = false
     weak var download: WKDownload?
+    /// Chromium's downloads: the page that started it (which stops it), and
+    /// how far it had got when it last said.
+    /// Held while the download runs: a page let go (its tab closed or put
+    /// to sleep) took the download's updates and its Stop with it.
+    var engineView: SEWebView?
+    var reported: Double = 0
     /// From a private window: off the list once those are all closed.
     let isPrivate: Bool
 
@@ -101,6 +107,13 @@ final class DownloadItem: ObservableObject, Identifiable {
         self.download = download
         self.isPrivate = isPrivate
         name = download.originalRequest?.url?.lastPathComponent ?? "Download"
+    }
+
+    init(file: URL, from view: SEWebView, isPrivate: Bool) {
+        engineView = view
+        self.isPrivate = isPrivate
+        name = file.lastPathComponent
+        url = file
     }
 
     var active: Bool { !finished && !failed }
@@ -121,13 +134,22 @@ final class DownloadItem: ObservableObject, Identifiable {
     /// hundreds of times a second, and cost the main thread even when the
     /// list is closed.
     func refresh() {
-        guard active, let value = download?.progress.fractionCompleted, value != fraction else { return }
+        guard active else { return }
+        let value = download?.progress.fractionCompleted ?? reported
+        guard value != fraction else { return }
         fraction = value
     }
 
     func cancel() {
         let url = url
-        if let download { download.cancel { _ in Downloads.discard(url) } } else { Downloads.discard(url) }
+        if let download {
+            download.cancel { _ in Downloads.discard(url) }
+        } else if let engineView, let url {
+            // Chromium takes its half file away itself.
+            engineView.cancelDownload(to: url)
+        } else {
+            Downloads.discard(url)
+        }
         failed = true
         Downloads.shared.cancelled(self)
     }
@@ -179,15 +201,91 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
         download.delegate = self
         windows[ObjectIdentifier(download)] = window
         let isPrivate = (window?.windowController as? BrowserWindowController)?.isPrivate == true
-        items.insert(DownloadItem(download: download, isPrivate: isPrivate), at: 0)
+        add(DownloadItem(download: download, isPrivate: isPrivate))
+    }
+
+    private func add(_ item: DownloadItem) {
+        items.insert(item, at: 0)
         // The list keeps 30, oldest out first, but never drops one still
         // coming down: its row is what stops it and clears up after it.
         while items.count > 30, let old = items.lastIndex(where: { !$0.active }) { items.remove(at: old) }
         retime()
     }
 
-    func clear() {
-        items.removeAll { $0.finished || $0.failed }
+    /// A download began: the Downloads list opens under its button, showing
+    /// it, as Safari's does, in place of a toast. In the window it came from,
+    /// or, from a popup (which has no button), the browser window behind it.
+    static func reveal(in window: NSWindow?) {
+        var browser = window?.windowController as? BrowserWindowController
+        if browser?.isPopup != false {
+            let isPrivate = browser?.isPrivate ?? false
+            // The front-most such window, not the newest.
+            let front = NSApp.orderedWindows.compactMap { $0.windowController as? BrowserWindowController }
+            browser = front.first { !$0.isPopup && $0.isPrivate == isPrivate }
+        }
+        browser?.revealDownloads()
+    }
+
+    /// Chromium began a download into `file`.
+    func started(_ file: URL, from view: SEWebView, in window: NSWindow?, reveal: Bool = true) {
+        let isPrivate = (window?.windowController as? BrowserWindowController)?.isPrivate == true
+        add(DownloadItem(file: file, from: view, isPrivate: isPrivate))
+        if reveal { Self.reveal(in: window) }
+    }
+
+    /// How Chromium's download into `file` is going. Progress is only noted
+    /// here; the list reads it when it draws (refresh).
+    func progressed(_ file: URL, from view: SEWebView, fraction: Double, done: Bool, failed: Bool) {
+        guard let item = items.first(where: { $0.active && $0.url == file && $0.engineView === view }) else { return }
+        item.reported = fraction
+        guard done else { return }
+        if failed {
+            item.failed = true
+        } else {
+            item.finished = true
+            item.fraction = 1
+            DistributedNotificationCenter.default().post(name: .init("com.apple.DownloadFileFinished"), object: file.path)
+        }
+        let page = item.engineView
+        item.engineView = nil
+        settled(item, freesName: false)
+        retime()
+        closeIfDone(page)
+    }
+
+    /// Whether a page has a download still running (it isn't put to sleep).
+    func isDownloading(in view: SEWebView) -> Bool {
+        items.contains { $0.active && $0.engineView === view }
+    }
+
+    /// Pages whose tab closed while they downloaded: they hear on behalf
+    /// of the tab, and close once their downloads are all done.
+    private var orphans: [ObjectIdentifier: SEWebView] = [:]
+    private lazy var relay = Relay(downloads: self)
+
+    func outlive(_ view: SEWebView) {
+        view.pageDelegate = relay
+        orphans[ObjectIdentifier(view)] = view
+    }
+
+    private func closeIfDone(_ view: SEWebView?) {
+        guard let view, orphans[ObjectIdentifier(view)] != nil, !isDownloading(in: view) else { return }
+        orphans[ObjectIdentifier(view)] = nil
+        view.closePage()
+    }
+
+    private final class Relay: NSObject, SEWebViewDelegate {
+        weak var downloads: Downloads?
+        init(downloads: Downloads) { self.downloads = downloads }
+        func webView(_ view: SEWebView, download file: URL, progress: Double, done: Bool, failed: Bool) {
+            MainActor.assumeIsolated {
+                downloads?.progressed(file, from: view, fraction: progress, done: done, failed: failed)
+            }
+        }
+    }
+
+    func clear(isPrivate: Bool) {
+        items.removeAll { $0.isPrivate == isPrivate && ($0.finished || $0.failed) }
     }
 
     /// The last private window closed: what it downloaded, done or stopped,
@@ -267,7 +365,7 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
                         if item.failed { Self.naming.async { Self.promised.remove(url.path.lowercased()) }; return completionHandler(nil) }
                     }
                     completionHandler(url)
-                    browser?.toast("Downloading “\(url.lastPathComponent)”")
+                    Self.reveal(in: window)
                 }
             }
         }
@@ -280,6 +378,9 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
     }
 
     private func settled(_ item: DownloadItem?, freesName: Bool = true) {
+        // The list's Clear depends on rows being done, which it isn't told of
+        // by the rows themselves.
+        objectWillChange.send()
         if freesName, let path = item?.url?.path { Self.naming.async { Self.promised.remove(path.lowercased()) } }
         if let item, item.isPrivate, !AppDelegate.shared.browsers.contains(where: { $0.isPrivate }) {
             items.removeAll { $0 === item }
@@ -287,14 +388,13 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
     }
 
     func downloadDidFinish(_ download: WKDownload) {
-        let window = windows.removeValue(forKey: ObjectIdentifier(download))
+        windows[ObjectIdentifier(download)] = nil
         guard let item = item(for: download), let url = item.url else { return }
         item.finished = true
         item.fraction = 1
         settled(item)
+        // Done in the list (its row says so); the Dock's Downloads stack bounces.
         DistributedNotificationCenter.default().post(name: .init("com.apple.DownloadFileFinished"), object: url.path)
-        (window?.windowController as? BrowserWindowController)?.toast("Downloaded “\(url.lastPathComponent)”",
-                                                                    action: ("Show in Finder", { NSWorkspace.shared.activateFileViewerSelecting([url]) }))
     }
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
@@ -310,12 +410,26 @@ final class Downloads: NSObject, ObservableObject, WKDownloadDelegate {
 }
 
 /// The toolbar's Downloads list: a plain native list in the system popover.
+/// A panel's backing in dark mode: the system's popover glass turns pale
+/// over a white page, and white text (and a selected segment) on it can't
+/// be read. A dark layer under the contents keeps them legible; light mode
+/// is left to the glass.
+struct PanelBacking: ViewModifier {
+    @Environment(\.colorScheme) private var scheme
+    func body(content: Content) -> some View {
+        content.background(scheme == .dark ? Color.black.opacity(0.5) : Color.clear)
+    }
+}
+
 struct DownloadsView: View {
     @ObservedObject private var downloads = Downloads.shared
+    /// A private window lists its own downloads; others never see them.
+    var isPrivate = false
+    private var items: [DownloadItem] { downloads.items.filter { $0.isPrivate == isPrivate } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if downloads.items.isEmpty {
+            if items.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "arrow.down.circle").font(.system(size: 28)).foregroundStyle(.secondary)
                     Text("No Downloads").font(.headline)
@@ -326,15 +440,15 @@ struct DownloadsView: View {
             } else {
                 ScrollView {
                     VStack(spacing: 2) {
-                        ForEach(downloads.items) { DownloadRow(item: $0) }
+                        ForEach(items) { DownloadRow(item: $0) }
                     }
                     .padding(8)
                 }
                 .frame(maxHeight: 360)
                 Divider()
                 HStack {
-                    Button("Clear") { downloads.clear() }
-                        .disabled(!downloads.items.contains { $0.finished || $0.failed })
+                    Button("Clear") { downloads.clear(isPrivate: isPrivate) }
+                        .disabled(!items.contains { $0.finished || $0.failed })
                     Spacer()
                     Button("Open Downloads Folder") {
                         NSWorkspace.shared.open(FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0])
@@ -364,7 +478,9 @@ private struct DownloadRow: View {
                 } else if item.finished {
                     Text("Done").font(.caption).foregroundStyle(.secondary)
                 } else {
-                    ProgressView(value: item.fraction).controlSize(.small)
+                    // Size unknown (no length from the server): it moves, not fills.
+                    if item.fraction < 0 { ProgressView().progressViewStyle(.linear).controlSize(.small) }
+                    else { ProgressView(value: item.fraction).controlSize(.small) }
                 }
             }
             Spacer(minLength: 0)

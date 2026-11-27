@@ -294,7 +294,11 @@ final class SillWebView: SEWebView {
 
     var shownBefore = false
     var laidOutUnseen = false
-    private(set) var drawingAhead = false
+    /// Drawn ahead out of sight (⌘T's top hit, a tab about to come in):
+    /// its loads leave the keys where they are.
+    private(set) var drawingAhead = false {
+        didSet { takesFocusOnLoad = !drawingAhead }
+    }
     /// Under the page in front, drawing, until it's put aside (park) or comes in.
     func startDrawingAhead() { drawingAhead = true }
     func cameIntoView() {

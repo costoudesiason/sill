@@ -4,8 +4,8 @@ import AppKit
 /// and their keys, separators, a highlight that follows the pointer and the
 /// arrow keys, and a field at the bottom that narrows the list as you type.
 /// Return runs the highlighted row, Esc or a click elsewhere puts it away.
-/// Used for the palette's Actions (⌘K) and a tab's right-click menu; pages
-/// keep WebKit's own menus.
+/// Every menu in Sill is this one: pages' right-click (PageMenu), a tab's,
+/// the palette's Actions (⌘K), the profile button, Settings' choices.
 ///
 /// It's drawn inside the browser window, over everything, as the palette is:
 /// glass in a window of its own samples a rectangle behind that window and
@@ -33,9 +33,6 @@ final class GlassMenu: NSObject, NSTextFieldDelegate {
         case item(Item)
         case separator
     }
-
-    /// Pages' right-click menus use the glass menu (Web.swift).
-    static var isEnabledForPages = true
 
     /// The one on screen; showing another puts it away.
     private static var current: GlassMenu?

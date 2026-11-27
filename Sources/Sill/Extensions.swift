@@ -3,8 +3,9 @@ import OpenDirectory
 import CryptoKit
 import SwiftUI
 
-/// The extensions that come with Sill on Chromium (uBlock Origin Lite), as
-/// the engine installed them in the profile (SillEngine.mm, InstallExtensions).
+/// The extensions in the profile: those that come with Sill on Chromium
+/// (uBlock Origin Lite), as the engine installed them, and your own unpacked
+/// ones put beside them (SillEngine.mm, InstallExtensions).
 struct InstalledExtension: Identifiable, Equatable {
     /// The folder's name: what the on/off setting is kept under.
     let folder: String
@@ -291,5 +292,21 @@ enum Profile {
             }
             return true
         }
+    }
+}
+
+/// Chromium's own settings (chrome://settings). Chromium shows them only in
+/// a page it hosts itself, never in one of Sill's tabs, so wherever they're
+/// asked for (typed, opened, a link) they come up in a window of their own.
+@MainActor
+enum ChromiumSettings {
+    /// Opens them if `url` is theirs; whether it was.
+    static func open(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "chrome", url.host()?.lowercased() == "settings" else { return false }
+        // The page and what it was asked (a site's details, a search).
+        var page = url.path.trimmingCharacters(in: ["/"])
+        if let query = url.query, !query.isEmpty { page += "?" + query }
+        SEEngine.openChromiumSettings(page.isEmpty ? nil : page)
+        return true
     }
 }

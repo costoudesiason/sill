@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+import SwiftUI
 
 // MARK: - Find
 
@@ -24,6 +25,7 @@ final class FindBar: NSObject, NSSearchFieldDelegate {
         self.browser = browser
         super.init()
         glass.cornerRadius = 22
+        glass.style = .regular
         glass.contentView = content
         glass.isHidden = true
         glass.wantsLayer = true
@@ -82,6 +84,10 @@ final class FindBar: NSObject, NSSearchFieldDelegate {
         // Above whatever came after it was readied, as when it was made here.
         if glass.superview !== stage || (!raised && stage.subviews.last !== glass) { stage.addSubview(glass) }
         raised = true
+        // Dark: tinted as the palette is. Untinted, over a white page the
+        // glass went pale and patchy and its grey text faded into it.
+        let dark = stage.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        glass.tintColor = dark ? NSColor(white: 0.12, alpha: 0.55) : nil
         place(in: stage, top: top)
         stage.window?.makeFirstResponder(field)
         field.currentEditor()?.selectAll(nil)
@@ -165,6 +171,9 @@ final class FindBar: NSObject, NSSearchFieldDelegate {
 final class StatusPill: NSVisualEffectView {
     private let label = NSTextField(labelWithString: "")
     private var hiding: DispatchWorkItem?
+    /// Where a toast is showing at the bottom, if one is: the address stops
+    /// short of it rather than running under it.
+    var toastFrame: () -> NSRect? = { nil }
 
     init() {
         super.init(frame: .zero)
@@ -210,7 +219,9 @@ final class StatusPill: NSVisualEffectView {
 
     func place(in stage: NSView) {
         label.sizeToFit()
-        let width = min(stage.bounds.width * 0.6, label.frame.width + 16)
+        var most = stage.bounds.width * 0.6
+        if let toast = toastFrame(), toast.minX > 12 { most = min(most, toast.minX - 8 - 12) }
+        let width = max(60, min(most, label.frame.width + 16))
         frame = NSRect(x: 12, y: stage.bounds.height - 12 - 22, width: width, height: 22)
         label.frame = NSRect(x: 8, y: (22 - label.frame.height) / 2, width: width - 16, height: label.frame.height)
     }
@@ -283,11 +294,35 @@ final class Toast: NSView {
             alphaValue = 0
             Motion.animate(0.2) { animator().alphaValue = 1 }
         }
+        scheduleHide(after: hovering ? nil : (action == nil ? 2.2 : 5))
+    }
+
+    /// The fade, ready for `dismiss` and run after `delay`; with none it
+    /// waits (the pointer is on the toast, reaching for its Undo).
+    private func scheduleHide(after delay: TimeInterval?) {
+        hiding?.cancel()
         let work = DispatchWorkItem { [weak self] in
             Motion.animate(0.18, { self?.animator().alphaValue = 0 }, completion: { self?.isHidden = true })
         }
         hiding = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + (action == nil ? 2.2 : 5), execute: work)
+        if let delay { DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work) }
+    }
+
+    private var hovering = false
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.filter { $0.owner === self }.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) {
+        hovering = true
+        guard !isHidden, alphaValue > 0 else { return }
+        scheduleHide(after: nil)
+    }
+    override func mouseExited(with event: NSEvent) {
+        hovering = false
+        guard !isHidden, alphaValue > 0 else { return }
+        scheduleHide(after: 2)
     }
 
     func place(in stage: NSView) {
@@ -306,5 +341,130 @@ final class Toast: NSView {
     @objc private func run() {
         action?()
         hiding?.perform()
+    }
+
+    /// Fades out now (another toast is taking its place).
+    func dismiss() {
+        waiting = nil
+        guard !isHidden else { return }
+        if let hiding { hiding.perform() } else { isHidden = true }
+    }
+}
+
+// MARK: - Zoom
+
+/// The page's zoom, as a toast where the others are, for a moment after
+/// you change it: "Zoom 125%", the digits rolling from the old figure to
+/// the new as Apple's numeric text does, and Reset while it isn't 100%.
+/// Chromium keeps zoom per site, so a zoomed site comes back zoomed; the
+/// toast doesn't come with it, only with a change.
+@MainActor
+final class ZoomToast {
+    final class Model: ObservableObject {
+        @Published var percent = 100
+        var reset: () -> Void = {}
+        var hovering = false { didSet { if hovering != oldValue { onHover() } } }
+        var onHover: () -> Void = {}
+    }
+
+    private let model = Model()
+    private lazy var view: NSView = {
+        let host = NSHostingView(rootView: ZoomToastView(model: model))
+        host.sizingOptions = [.intrinsicContentSize]
+        host.isHidden = true
+        host.alphaValue = 0
+        return host
+    }()
+    private var made = false
+    private var measured: NSSize?
+    private var hiding: DispatchWorkItem?
+
+    init(reset: @escaping () -> Void) {
+        model.reset = reset
+        model.onHover = { [weak self] in
+            guard let self else { return }
+            if self.model.hovering { self.hiding?.cancel() } else if self.made, !self.view.isHidden { self.scheduleHide() }
+        }
+    }
+
+    /// Shows `zoom` (1 = 100%), rolling to it from what it showed last.
+    func show(_ zoom: Double, in stage: NSView, above: NSView) {
+        let percent = Int((zoom * 100).rounded())
+        if !made {
+            made = true
+            stage.addSubview(view, positioned: .above, relativeTo: above)
+        }
+        let wasHidden = view.isHidden || view.alphaValue < 1
+        if percent != model.percent {
+            if wasHidden || Motion.reduced { model.percent = percent }
+            else { withAnimation(.snappy(duration: 0.3)) { model.percent = percent } }
+        }
+        // Shown before it's placed: placing skips a hidden toast, and it came
+        // up where it was last (off-centre after a resize, or nowhere at first).
+        if view.isHidden { view.alphaValue = 0; view.isHidden = false }
+        place(in: stage)
+        if wasHidden { Motion.animate(0.2) { view.animator().alphaValue = 1 } }
+        scheduleHide()
+    }
+
+    /// Gone a few seconds after the last change, but not while the pointer
+    /// is on it (on its way to Reset).
+    private func scheduleHide() {
+        hiding?.cancel()
+        guard !model.hovering else { return }
+        let work = DispatchWorkItem { [weak self] in self?.hide() }
+        hiding = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.6, execute: work)
+    }
+
+    func hide() {
+        hiding?.cancel()
+        guard made, !view.isHidden else { return }
+        Motion.animate(0.18, { self.view.animator().alphaValue = 0 }, completion: { [weak self] in
+            if let self, self.view.alphaValue == 0 { self.view.isHidden = true }
+        })
+    }
+
+    /// Where it is while it shows (the status pill keeps clear of it).
+    var shownFrame: NSRect? { made && !view.isHidden ? view.frame : nil }
+
+    /// Bottom middle, where Sill's other toasts sit.
+    func place(in stage: NSView) {
+        guard made, !view.isHidden else { return }
+        // Measured once: the toast is one size whatever it shows.
+        if measured == nil { measured = view.fittingSize }
+        let size = measured ?? view.fittingSize
+        view.frame = NSRect(x: ((stage.bounds.width - size.width) / 2).rounded(), y: stage.bounds.height - size.height - 18,
+                            width: size.width, height: size.height)
+    }
+}
+
+private struct ZoomToastView: View {
+    @ObservedObject var model: ZoomToast.Model
+
+    /// One size whatever the figure: the figure has a box as wide as the
+    /// widest ("500%") and Reset is always there, dimmed at 100%, so the
+    /// toast never changes shape (it wrapped its text while growing).
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Zoom").fixedSize()
+            Text("\(model.percent)%")
+                .monospacedDigit()
+                .contentTransition(.numericText(value: Double(model.percent)))
+                .lineLimit(1)
+                .frame(width: 42, alignment: .leading)
+            Button("Reset") { model.reset() }
+                .buttonStyle(.glass)
+                .controlSize(.small)
+                .disabled(model.percent == 100)
+                .fixedSize()
+        }
+        .font(.system(size: 12.5, weight: .medium))
+        .padding(.leading, 18)
+        .padding(.trailing, 8)
+        .frame(height: 40)
+        .fixedSize()
+        .glassEffect(.regular, in: .capsule)
+        .onHover { model.hovering = $0 }
     }
 }

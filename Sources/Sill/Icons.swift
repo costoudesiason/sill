@@ -193,13 +193,13 @@ private struct Parts: View {
 /// settings' X): the system's glass button with an SF Symbol, both the same
 /// size, still.
 final class GlassIconButton: NSButton {
-    init(symbol: String, label: String, weight: NSFont.Weight = .regular) {
+    init(symbol: String, label: String, weight: NSFont.Weight = .regular, pointSize: CGFloat = 14) {
         super.init(frame: .zero)
         bezelStyle = .glass
         borderShape = .circle
         controlSize = .large
         image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
-            .withSymbolConfiguration(.init(pointSize: 14, weight: weight))
+            .withSymbolConfiguration(.init(pointSize: pointSize, weight: weight))
         imagePosition = .imageOnly
         toolTip = label
     }

@@ -15,6 +15,11 @@
 #include "include/cef_parser.h"
 #include "include/cef_parser.h"
 #include "include/cef_request_context.h"
+#include "include/cef_resource_bundle.h"
+#include "include/cef_resource_bundle_handler.h"
+#include "include/cef_urlrequest.h"
+#include "include/views/cef_browser_view.h"
+#include "include/views/cef_window.h"
 #include "include/wrapper/cef_library_loader.h"
 
 static NSString* S(const CefString& s) { return [NSString stringWithUTF8String:s.ToString().c_str()] ?: @""; }
@@ -97,16 +102,106 @@ static CefRefPtr<CefDictionaryValue> PageScriptsInfo() {
   return info;
 }  // folders of the extensions that come with Sill, comma separated
 
-// MARK: - Menu items
+// MARK: - Right-click
 
-@implementation SEMenuItem
-- (instancetype)initWithID:(NSInteger)commandID title:(NSString*)title enabled:(BOOL)enabled checked:(BOOL)checked {
+/// Fetches one address's bytes for Copy Image, as the frame would (its cookies).
+class SEFetch : public CefURLRequestClient {
+ public:
+  explicit SEFetch(void (^done)(NSData*, NSString*)) : done_(done), data_([NSMutableData data]) {}
+  void OnRequestComplete(CefRefPtr<CefURLRequest> request) override {
+    CefRefPtr<CefResponse> response = request->GetResponse();
+    bool ok = request->GetRequestStatus() == UR_SUCCESS && response && response->GetStatus() < 400 && data_.length;
+    NSString* mime = response ? S(response->GetMimeType()) : nil;
+    NSData* data = ok ? [data_ copy] : nil;
+    void (^done)(NSData*, NSString*) = done_;
+    done_ = nil;
+    if (done) dispatch_async(dispatch_get_main_queue(), ^{ done(data, mime); });
+  }
+  void OnUploadProgress(CefRefPtr<CefURLRequest>, int64_t, int64_t) override {}
+  void OnDownloadProgress(CefRefPtr<CefURLRequest>, int64_t, int64_t) override {}
+  void OnDownloadData(CefRefPtr<CefURLRequest>, const void* bytes, size_t size) override {
+    if (data_.length + size > 64 * 1024 * 1024) return;  // not a picture
+    [data_ appendBytes:bytes length:size];
+  }
+  bool GetAuthCredentials(bool, const CefString&, int, const CefString&, const CefString&,
+                          CefRefPtr<CefAuthCallback>) override { return false; }
+ private:
+  void (^done_)(NSData*, NSString*);
+  NSMutableData* data_;
+  IMPLEMENT_REFCOUNTING(SEFetch);
+};
+
+static NSURL* _Nullable U(const CefString& s) {
+  NSString* text = S(s);
+  return text.length ? [NSURL URLWithString:text] : nil;
+}
+
+@implementation SEContextMenu {
+  CefRefPtr<CefBrowser> browser_;
+  CefRefPtr<CefFrame> frame_;
+  CefPoint at_;
+}
+
+- (instancetype)initWithBrowser:(CefRefPtr<CefBrowser>)browser frame:(CefRefPtr<CefFrame>)frame
+                         params:(CefRefPtr<CefContextMenuParams>)params point:(NSPoint)point {
   self = [super init];
-  _commandID = commandID;
-  _title = [title copy];
-  _enabled = enabled;
-  _checked = checked;
+  browser_ = browser;
+  frame_ = frame;
+  at_ = CefPoint(params->GetXCoord(), params->GetYCoord());
+  _point = point;
+  int type = params->GetTypeFlags();
+  _linkURL = (type & CM_TYPEFLAG_LINK) ? U(params->GetLinkUrl()) : nil;
+  _sourceURL = U(params->GetSourceUrl());
+  _pageURL = U(params->GetPageUrl());
+  _frameURL = U(params->GetFrameUrl());
+  _linkText = [S(params->GetTitleText()) copy];
+  _selection = [[S(params->GetSelectionText()) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] copy];
+  _mediaKind = (SEMediaKind)params->GetMediaType();
+  _mediaState = (SEMediaState)params->GetMediaStateFlags();
+  _editState = (SEEditState)params->GetEditStateFlags();
+  _editable = params->IsEditable();
+  _inFrame = frame && !frame->IsMain();
+  NSString* word = S(params->GetMisspelledWord());
+  _misspelledWord = word.length ? word : nil;
+  std::vector<CefString> suggestions;
+  NSMutableArray* list = [NSMutableArray array];
+  if (_misspelledWord && params->GetDictionarySuggestions(suggestions))
+    for (auto& one : suggestions) [list addObject:S(one)];
+  _suggestions = [list copy];
   return self;
+}
+
+- (void)edit:(NSString*)command {
+  if (!frame_) return;
+  if ([command isEqual:@"undo"]) frame_->Undo();
+  else if ([command isEqual:@"redo"]) frame_->Redo();
+  else if ([command isEqual:@"cut"]) frame_->Cut();
+  else if ([command isEqual:@"copy"]) frame_->Copy();
+  else if ([command isEqual:@"paste"]) frame_->Paste();
+  else if ([command isEqual:@"pasteAndMatchStyle"]) frame_->PasteAndMatchStyle();
+  else if ([command isEqual:@"delete"]) frame_->Delete();
+  else if ([command isEqual:@"selectAll"]) frame_->SelectAll();
+}
+- (void)replaceMisspelling:(NSString*)word { if (browser_) browser_->GetHost()->ReplaceMisspelling(word.UTF8String); }
+- (void)learnSpelling {
+  if (browser_ && _misspelledWord) browser_->GetHost()->AddWordToDictionary(_misspelledWord.UTF8String);
+}
+- (void)inspect {
+  if (!browser_) return;
+  CefWindowInfo info;
+  info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
+  browser_->GetHost()->ShowDevTools(info, nullptr, CefBrowserSettings(), at_);
+}
+- (void)runScript:(NSString*)script { if (frame_) frame_->ExecuteJavaScript(script.UTF8String, "", 0); }
+- (void)reloadFrame { if (frame_ && _frameURL) frame_->LoadURL(_frameURL.absoluteString.UTF8String); }
+- (void)fetch:(NSURL*)url completion:(void (^)(NSData*, NSString*))completion {
+  if (!frame_ || !frame_->IsValid()) { completion(nil, nil); return; }
+  CefRefPtr<CefRequest> request = CefRequest::Create();
+  request->SetURL(url.absoluteString.UTF8String);
+  request->SetMethod("GET");
+  if (_pageURL) request->SetReferrer(_pageURL.absoluteString.UTF8String, REFERRER_POLICY_DEFAULT);
+  request->SetFlags(UR_FLAG_ALLOW_STORED_CREDENTIALS);
+  frame_->CreateURLRequest(request, new SEFetch(completion));
 }
 @end
 
@@ -114,7 +209,8 @@ static CefRefPtr<CefDictionaryValue> PageScriptsInfo() {
 
 class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayHandler, public CefLoadHandler,
                  public CefKeyboardHandler, public CefContextMenuHandler, public CefRequestHandler,
-                 public CefDownloadHandler, public CefDevToolsMessageObserver, public CefJSDialogHandler {
+                 public CefDownloadHandler, public CefDevToolsMessageObserver, public CefJSDialogHandler,
+                 public CefFocusHandler {
  public:
   explicit SEClient(SEWebView* view) : view_(view) {}
 
@@ -126,6 +222,18 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
   CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override { return this; }
+  CefRefPtr<CefFocusHandler> GetFocusHandler() override { return this; }
+
+  // A page starting to load takes the keys only if it's the one you see: a
+  // page loading out of sight (⌘T's top hit loaded ahead as you type, a tab
+  // opened behind) took them from the ⌘T field, the rest of what was typed
+  // and the completion's highlight going into the hidden page. Focus asked
+  // for any other way (a click, the page itself) is as ever.
+  bool OnSetFocus(CefRefPtr<CefBrowser>, FocusSource source) override {
+    if (source != FOCUS_SOURCE_NAVIGATION) return false;
+    SEWebView* view = view_;
+    return !view || !view.window || !view.takesFocusOnLoad || view.hiddenOrHasHiddenAncestor || view.pageHidden;
+  }
 
   // A page's alert, confirm or prompt. While an agent drives the page, it's
   // held for the agent to answer (it never lands on the page in front);
@@ -213,6 +321,7 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
     if ([d respondsToSelector:@selector(webView:faviconURLs:)]) [d webView:view_ faviconURLs:list];
   }
   void OnFullscreenModeChange(CefRefPtr<CefBrowser>, bool on) override {
+    fullscreen_ = on;
     id<SEWebViewDelegate> d = view_.pageDelegate;
     if ([d respondsToSelector:@selector(webView:fullscreen:)]) [d webView:view_ fullscreen:on];
   }
@@ -292,6 +401,17 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
     if ([d respondsToSelector:@selector(webViewProcessEnded:)]) [d webViewProcessEnded:view_];
   }
 
+  // Esc leaves a page's full screen before the page hears it, as in Chrome
+  // and Safari: a player that takes Esc for itself (YouTube) kept you in.
+  bool OnPreKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent& event, CefEventHandle, bool*) override {
+    if (!fullscreen_ || event.type != KEYEVENT_RAWKEYDOWN || event.windows_key_code != 0x1B) return false;
+    if (event.modifiers & (EVENTFLAG_SHIFT_DOWN | EVENTFLAG_CONTROL_DOWN | EVENTFLAG_ALT_DOWN | EVENTFLAG_COMMAND_DOWN)) return false;
+    if (NSDate.timeIntervalSinceReferenceDate < view_.agentKeysUntil) return false;
+    browser->GetHost()->ExitFullscreen(true);
+    return true;
+  }
+  bool fullscreen_ = false;
+
   // Keys: what the page didn't take goes to Sill (its menus).
   bool OnKeyEvent(CefRefPtr<CefBrowser>, const CefKeyEvent& event, CefEventHandle os_event) override {
     NSEvent* ns = (__bridge NSEvent*)os_event;
@@ -304,28 +424,19 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
     return (ns.modifierFlags & NSEventModifierFlagCommand) && [[NSApp mainMenu] performKeyEquivalent:ns];
   }
 
-  // The right-click menu: Sill draws it.
-  bool RunContextMenu(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, CefRefPtr<CefContextMenuParams> params,
-                      CefRefPtr<CefMenuModel> model, CefRefPtr<CefRunContextMenuCallback> callback) override {
+  // The right-click menu: Sill builds its own (Safari's) from what was
+  // clicked; Chromium's is never shown.
+  bool RunContextMenu(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, CefRefPtr<CefContextMenuParams> params,
+                      CefRefPtr<CefMenuModel>, CefRefPtr<CefRunContextMenuCallback> callback) override {
+    callback->Cancel();
     id<SEWebViewDelegate> d = view_.pageDelegate;
-    if (![d respondsToSelector:@selector(webView:menu:at:choose:)]) return false;
-    NSMutableArray* items = [NSMutableArray array];
-    for (size_t i = 0; i < model->GetCount(); i++) {
-      if (model->GetTypeAt(i) == MENUITEMTYPE_SEPARATOR) {
-        [items addObject:[[SEMenuItem alloc] initWithID:-1 title:@"" enabled:NO checked:NO]];
-        continue;
-      }
-      if (model->GetTypeAt(i) == MENUITEMTYPE_SUBMENU) continue;
-      NSString* title = [S(model->GetLabelAt(i)) stringByReplacingOccurrencesOfString:@"&" withString:@""];
-      [items addObject:[[SEMenuItem alloc] initWithID:model->GetCommandIdAt(i) title:title
-                                              enabled:model->IsEnabledAt(i) checked:model->IsCheckedAt(i)]];
-    }
+    if (![d respondsToSelector:@selector(webView:contextMenu:)]) return true;
     NSPoint point = NSMakePoint(params->GetXCoord(), view_.bounds.size.height - params->GetYCoord());
     point = [view_ convertPoint:point toView:nil];
-    CefRefPtr<CefRunContextMenuCallback> keep = callback;
-    [d webView:view_ menu:items at:point choose:^(NSInteger commandID) {
-      if (commandID < 0) keep->Cancel(); else keep->Continue((int)commandID, EVENTFLAG_NONE);
-    }];
+    SEContextMenu* menu = [[SEContextMenu alloc] initWithBrowser:browser frame:frame params:params point:point];
+    SEWebView* view = view_;
+    // Out of Chromium's call first: the menu runs its own loop while it's open.
+    dispatch_async(dispatch_get_main_queue(), ^{ [d webView:view contextMenu:menu]; });
     return true;
   }
 
@@ -334,21 +445,38 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   bool OnBeforeDownload(CefRefPtr<CefBrowser>, CefRefPtr<CefDownloadItem> item, const CefString& name,
                         CefRefPtr<CefBeforeDownloadCallback> callback) override {
     id<SEWebViewDelegate> d = view_.pageDelegate;
-    NSURL* where = [d respondsToSelector:@selector(webView:downloadNamed:)] ? [d webView:view_ downloadNamed:S(name)] : nil;
+    NSURL* source = U(item->GetOriginalUrl());
+    NSURL* where = source && [d respondsToSelector:@selector(webView:downloadNamed:from:)]
+                       ? [d webView:view_ downloadNamed:S(name) from:source]
+                   : [d respondsToSelector:@selector(webView:downloadNamed:)] ? [d webView:view_ downloadNamed:S(name)] : nil;
     if (!where) return false;
-    downloads_[item->GetId()] = where;
+    downloads_[item->GetId()] = {where, nullptr, false};
     callback->Continue(where.path.UTF8String, false);
     return true;
   }
-  void OnDownloadUpdated(CefRefPtr<CefBrowser>, CefRefPtr<CefDownloadItem> item, CefRefPtr<CefDownloadItemCallback>) override {
+  void OnDownloadUpdated(CefRefPtr<CefBrowser>, CefRefPtr<CefDownloadItem> item, CefRefPtr<CefDownloadItemCallback> callback) override {
     auto found = downloads_.find(item->GetId());
     if (found == downloads_.end()) return;
+    // Kept, so the Downloads list can stop it; stopped now if it was asked
+    // to before Chromium first said how it was going.
+    found->second.callback = callback;
+    if (found->second.cancel && item->IsInProgress()) { callback->Cancel(); return; }
     id<SEWebViewDelegate> d = view_.pageDelegate;
-    double progress = item->GetPercentComplete() < 0 ? 0 : item->GetPercentComplete() / 100.0;
-    BOOL done = item->IsComplete() || item->IsCanceled();
-    if ([d respondsToSelector:@selector(webView:download:progress:done:)])
-      [d webView:view_ download:found->second progress:progress done:done];
+    // −1: the size isn't known (the list shows it moving rather than filling).
+    double progress = item->GetPercentComplete() < 0 ? -1 : item->GetPercentComplete() / 100.0;
+    BOOL failed = item->IsCanceled() || item->IsInterrupted();
+    BOOL done = item->IsComplete() || failed;
+    if ([d respondsToSelector:@selector(webView:download:progress:done:failed:)])
+      [d webView:view_ download:found->second.file progress:progress done:done failed:failed];
     if (done) downloads_.erase(found);
+  }
+
+  /// The Downloads list's Stop.
+  void CancelDownload(NSURL* file) {
+    for (auto& entry : downloads_) {
+      if (![entry.second.file isEqual:file]) continue;
+      if (entry.second.callback) entry.second.callback->Cancel(); else entry.second.cancel = true;
+    }
   }
 
   // DevTools answers: scripts' results and snapshots.
@@ -429,7 +557,12 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   NSURL* shownFor_ = nil;
   int nextID_ = 0;
   std::map<int, void (^)(BOOL, NSDictionary*)> pending_;
-  std::map<uint32_t, NSURL*> downloads_;
+  struct Download {
+    NSURL* file;
+    CefRefPtr<CefDownloadItemCallback> callback;
+    bool cancel;
+  };
+  std::map<uint32_t, Download> downloads_;
   CefRefPtr<CefRegistration> devtools_;
   CefRefPtr<CefJSDialogCallback> dialog_;
   IMPLEMENT_REFCOUNTING(SEClient);
@@ -446,6 +579,22 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   BOOL hidden_;
   BOOL muted_;
   double zoom_;
+  __weak NSWindow* lastWindow_;
+}
+
+// Into another window (a tab dragged out, or into another window's row):
+// Chromium is told of its new screen and size, and shown again so it draws
+// a frame there. Without it the page stayed blank in its new window.
+- (void)viewDidMoveToWindow {
+  [super viewDidMoveToWindow];
+  NSWindow* now = self.window;
+  if (now && browser_ && lastWindow_ && lastWindow_ != now) {
+    CefRefPtr<CefBrowserHost> host = browser_->GetHost();
+    host->NotifyScreenInfoChanged();
+    host->WasResized();
+    if (!hidden_) { host->WasHidden(true); host->WasHidden(false); }
+  }
+  if (now) lastWindow_ = now;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame private:(BOOL)isPrivate {
@@ -455,6 +604,7 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
 - (instancetype)initWithFrame:(NSRect)frame private:(BOOL)isPrivate create:(BOOL)create {
   self = [super initWithFrame:frame];
   _isPrivate = isPrivate;
+  _takesFocusOnLoad = YES;
   zoom_ = 1;
   self.wantsLayer = YES;
   // What a page being resized shows where it hasn't drawn yet: white, as
@@ -525,6 +675,7 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
 - (void)goBack { if (browser_) browser_->GoBack(); }
 - (void)goForward { if (browser_) browser_->GoForward(); }
 - (void)reload { if (browser_) browser_->Reload(); }
+- (void)cancelDownloadTo:(NSURL*)file { if (client_) client_->CancelDownload(file); }
 - (void)reloadFromOrigin { if (browser_) browser_->ReloadIgnoreCache(); }
 - (void)stopLoading { if (browser_) browser_->StopLoad(); }
 
@@ -672,6 +823,10 @@ class SEClient : public CefClient, public CefLifeSpanHandler, public CefDisplayH
   browser_->GetHost()->ShowDevTools(info, nullptr, CefBrowserSettings(), CefPoint());
 }
 
+- (void)startDownload:(NSURL*)url { if (browser_) browser_->GetHost()->StartDownload(url.absoluteString.UTF8String); }
+- (void)print { if (browser_) browser_->GetHost()->Print(); }
+- (NSView*)contentView { return browser_ ? self.subviews.firstObject : nil; }
+
 - (void)closePage {
   if (!browser_) return;
   client_->markClosing();
@@ -720,6 +875,144 @@ class WidevineDone : public CefComponentUpdateCallback {
   IMPLEMENT_REFCOUNTING(WidevineDone);
 };
 
+// MARK: - Chromium's own settings, as Sill's
+
+// Chromium's words, in Sill's name: every string with "Chromium" in it is
+// read as Chromium has it and handed back with "Sill" instead (settings,
+// page titles, dialogs). Asked from any thread; the original is read with
+// this handler stood aside, so it isn't asked again for its own answer.
+class SEStrings : public CefResourceBundleHandler {
+ public:
+  bool GetLocalizedString(int id, CefString& string) override {
+    static thread_local bool reading = false;
+    if (reading) return false;
+    reading = true;
+    std::string text = CefResourceBundle::GetGlobal()->GetLocalizedString(id).ToString();
+    reading = false;
+    bool changed = false;
+    for (size_t at = text.find("Chromium"); at != std::string::npos; at = text.find("Chromium", at + 4)) {
+      text.replace(at, 8, "Sill");
+      changed = true;
+    }
+    if (changed) string = text;
+    return changed;
+  }
+  bool GetDataResource(int, void*&, size_t&) override { return false; }
+  bool GetDataResourceForScale(int, ScaleFactor, void*&, size_t&) override { return false; }
+  IMPLEMENT_REFCOUNTING(SEStrings);
+};
+
+// What Sill does itself, or that doesn't apply to it, out of Chromium's
+// settings: Google sign-in and sync, autofill and passwords (the Keychain's),
+// the search engine (Sill's own), the default browser, start-up, reset,
+// About, extensions (Sill's own panel) and Google's AI. Hidden in the page
+// as it draws, in every shadow root, and kept hidden as it changes.
+static const char* kSettingsTidy = R"JS(
+(() => {
+  if (window.__sillTidy) return; window.__sillTidy = true;
+  const paths = ['/people','/syncSetup','/autofill','/yourSavedInfo','/search','/defaultBrowser','/onStartup',
+                 '/reset','/help','/ai','/glic','/getTheMostOutOfChrome'];
+  const sections = ['people','autofill','yourSavedInfo','search','defaultBrowser','onStartup','reset','ai','glic',
+                    'getTheMostOutOfChrome'];
+  const hide = [...paths.map(p => `a[href="${p}"]`), ...sections.map(s => `settings-section[section="${s}"]`),
+                '#extensionsLink', '#about-menu', '#product-logo', '#getTheMostOutOfChrome'];
+  // Settings show one page at a time; one of those left out (or the start,
+  // which is Google's) is never shown: Privacy and security is.
+  // Once, in place: a click on Chromium's own menu link opened a stock
+  // Chromium window for each time this ran while the page was building.
+  let leaving = false;
+  const away = () => {
+    if (leaving) return;
+    const path = location.pathname.replace(/\/$/, '') || '/';
+    if (path !== '/' && !paths.some(p => path === p || path.startsWith(p + '/'))) return;
+    leaving = true;
+    location.replace('chrome://settings/privacy');
+  };
+  const seen = new WeakSet();
+  const tidy = root => {
+    for (const el of root.querySelectorAll(hide.join(','))) el.style.setProperty('display', 'none', 'important');
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode())
+      if (n.nodeValue.includes('Chromium')) n.nodeValue = n.nodeValue.replaceAll('Chromium', 'Sill');
+    for (const el of root.querySelectorAll('*')) if (el.shadowRoot) watch(el.shadowRoot);
+  };
+  const watch = root => {
+    if (seen.has(root)) return; seen.add(root);
+    let queued = false;
+    new MutationObserver(() => {
+      if (queued) return; queued = true;
+      requestAnimationFrame(() => { queued = false; tidy(root); away(); });
+    }).observe(root, {childList: true, subtree: true});
+    tidy(root);
+  };
+  watch(document);
+  away();
+  addEventListener('popstate', away);
+  if (document.title.includes('Chromium')) document.title = document.title.replaceAll('Chromium', 'Sill');
+})();
+)JS";
+
+class SESettingsClient : public CefClient, public CefLoadHandler, public CefLifeSpanHandler {
+ public:
+  // Counted with Sill's pages: quitting waits for it to close too.
+  void OnAfterCreated(CefRefPtr<CefBrowser>) override { gOpenBrowsers++; }
+  void OnBeforeClose(CefRefPtr<CefBrowser>) override {
+    if (--gOpenBrowsers <= 0 && gQuitting) CefQuitMessageLoop();
+  }
+  CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+  CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
+  void OnLoadEnd(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, int) override {
+    if (frame->IsMain()) frame->ExecuteJavaScript(kSettingsTidy, frame->GetURL(), 0);
+  }
+  // Links out of settings (help pages, a site's data) open in Sill, not in
+  // a stock Chromium window.
+  bool OnBeforePopup(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame>, int, const CefString& url, const CefString&,
+                     WindowOpenDisposition, bool, const CefPopupFeatures&, CefWindowInfo&, CefRefPtr<CefClient>&,
+                     CefBrowserSettings&, CefRefPtr<CefDictionaryValue>&, bool*) override {
+    NSURL* link = [NSURL URLWithString:[NSString stringWithUTF8String:url.ToString().c_str()]];
+    if (link) dispatch_async(dispatch_get_main_queue(), ^{ [NSApp.delegate application:NSApp openURLs:@[ link ]]; });
+    return true;
+  }
+  IMPLEMENT_REFCOUNTING(SESettingsClient);
+};
+
+class SESettingsView : public CefBrowserViewDelegate {
+ public:
+  cef_runtime_style_t GetBrowserRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+  ChromeToolbarType GetChromeToolbarType(CefRefPtr<CefBrowserView>) override { return CEF_CTT_NONE; }
+  IMPLEMENT_REFCOUNTING(SESettingsView);
+};
+
+static CefRefPtr<CefWindow> gSettingsWindow;
+
+class SESettingsWindow : public CefWindowDelegate {
+ public:
+  explicit SESettingsWindow(CefRefPtr<CefBrowserView> view) : view_(view) {}
+  cef_runtime_style_t GetWindowRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+  void OnWindowCreated(CefRefPtr<CefWindow> window) override {
+    window->AddChildView(view_);
+    window->SetTitle("Advanced Settings");
+    window->Show();
+    view_->RequestFocus();
+  }
+  void OnWindowDestroyed(CefRefPtr<CefWindow>) override {
+    view_ = nullptr;
+    gSettingsWindow = nullptr;
+  }
+  bool CanClose(CefRefPtr<CefWindow>) override {
+    CefRefPtr<CefBrowser> browser = view_ ? view_->GetBrowser() : nullptr;
+    return browser ? browser->GetHost()->TryCloseBrowser() : true;
+  }
+  CefRect GetInitialBounds(CefRefPtr<CefWindow>) override {
+    NSRect screen = NSScreen.mainScreen.visibleFrame;
+    int w = 1100, h = 780;
+    return CefRect((int)(NSMidX(screen) - w / 2), (int)(NSHeight(NSScreen.screens.firstObject.frame) - NSMidY(screen) - h / 2), w, h);
+  }
+ private:
+  CefRefPtr<CefBrowserView> view_;
+  IMPLEMENT_REFCOUNTING(SESettingsWindow);
+};
+
 static void (^gRelaunched)(void) = nil;
 
 class SEApp : public CefApp, public CefBrowserProcessHandler {
@@ -729,6 +1022,8 @@ class SEApp : public CefApp, public CefBrowserProcessHandler {
     if (updater) updater->Update("oimompecagnajdejgnnjijobebaeigek", CEF_COMPONENT_UPDATE_PRIORITY_FOREGROUND, new WidevineDone());
   }
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
+  CefRefPtr<CefResourceBundleHandler> GetResourceBundleHandler() override { return strings_; }
+  CefRefPtr<SEStrings> strings_ = new SEStrings();
   void OnBeforeCommandLineProcessing(const CefString& type, CefRefPtr<CefCommandLine> line) override {
     if (!type.empty()) return;
     // None of Chrome's background traffic, update checks or reporting.
@@ -813,7 +1108,8 @@ static std::string InstallExtensions(NSString* profile) {
   std::string folders;
   // Switched off in Sill's Extensions panel: installed, not loaded.
   NSArray* off = [[NSUserDefaults standardUserDefaults] stringArrayForKey:@"disabledExtensions"] ?: @[];
-  for (NSString* name in [files contentsOfDirectoryAtPath:shipped error:nil]) {
+  NSArray* shippedNames = [files contentsOfDirectoryAtPath:shipped error:nil] ?: @[];
+  for (NSString* name in shippedNames) {
     NSString* from = [shipped stringByAppendingPathComponent:name];
     NSString* to = [installed stringByAppendingPathComponent:name];
     NSString* (^version)(NSString*) = ^NSString*(NSString* folder) {
@@ -827,9 +1123,28 @@ static std::string InstallExtensions(NSString* profile) {
       [files removeItemAtPath:to error:nil];
       if (![files copyItemAtPath:from toPath:to error:nil]) continue;
     }
+    // Marked as Sill's: once Sill stops shipping it, it goes (below),
+    // rather than staying on at its old version as if it were yours.
+    [[NSData data] writeToFile:[to stringByAppendingPathComponent:@".sill-shipped"] atomically:NO];
     if ([off containsObject:name]) continue;
     if (!folders.empty()) folders += ",";
     folders += to.UTF8String;
+  }
+  // Your own, unpacked, put in the profile's Extensions folder beside them
+  // (as Chrome's Load Unpacked): loaded as they are, unless switched off.
+  for (NSString* name in [files contentsOfDirectoryAtPath:installed error:nil]) {
+    if ([shippedNames containsObject:name] || [name hasPrefix:@"."] || [off containsObject:name]) continue;
+    NSString* folder = [installed stringByAppendingPathComponent:name];
+    if ([files fileExistsAtPath:[folder stringByAppendingPathComponent:@".sill-shipped"]]) {
+      [files removeItemAtPath:folder error:nil];   // Sill shipped it once, and no longer does
+      continue;
+    }
+    // Chromium's list of folders is split at commas: a name with one in it
+    // would load as two wrong folders and stop the rest loading.
+    if ([folder containsString:@","]) continue;
+    if (![files fileExistsAtPath:[folder stringByAppendingPathComponent:@"manifest.json"]]) continue;
+    if (!folders.empty()) folders += ",";
+    folders += folder.UTF8String;
   }
   return folders;
 }
@@ -844,6 +1159,10 @@ static std::string InstallExtensions(NSString* profile) {
   CefMainArgs args(*_NSGetArgc(), *_NSGetArgv());
   CefSettings settings;
   [[NSFileManager defaultManager] createDirectoryAtPath:profile withIntermediateDirectories:YES attributes:nil error:nil];
+  // Chromium's own session (Sill keeps its tabs itself, in session.json):
+  // left, it brought back every Chrome-style window ever opened (Advanced
+  // settings) as a stock Chromium window, one more at each launch.
+  [[NSFileManager defaultManager] removeItemAtPath:[profile stringByAppendingPathComponent:@"Default/Sessions"] error:nil];
   CefString(&settings.root_cache_path) = profile.UTF8String;
   CefString(&settings.cache_path) = [profile stringByAppendingPathComponent:@"Default"].UTF8String;
   settings.persist_session_cookies = true;
@@ -863,8 +1182,24 @@ static std::string InstallExtensions(NSString* profile) {
 
 + (void)run { CefRunMessageLoop(); }
 
++ (void)openChromiumSettings:(NSString*)page {
+  if (gSettingsWindow) {
+    if (CefRefPtr<CefBrowserView> view = gSettingsWindow->GetChildViewAt(0) ? gSettingsWindow->GetChildViewAt(0)->AsBrowserView() : nullptr)
+      if (view->GetBrowser() && page.length) view->GetBrowser()->GetMainFrame()->LoadURL(std::string("chrome://settings/") + page.UTF8String);
+    gSettingsWindow->Show();
+    gSettingsWindow->Activate();
+    return;
+  }
+  CefBrowserSettings settings;
+  std::string url = std::string("chrome://settings/") + (page.length ? page.UTF8String : "privacy");
+  CefRefPtr<CefBrowserView> view =
+      CefBrowserView::CreateBrowserView(new SESettingsClient(), url, settings, nullptr, nullptr, new SESettingsView());
+  gSettingsWindow = CefWindow::CreateTopLevelWindow(new SESettingsWindow(view));
+}
+
 + (void)quit {
   gQuitting = true;
+  if (gSettingsWindow) gSettingsWindow->Close();
   for (SEWebView* v in gViews.allObjects) [v closePage];
   if (gOpenBrowsers <= 0) { CefQuitMessageLoop(); return; }
   // A page that won't close doesn't keep Sill open.
@@ -872,6 +1207,7 @@ static std::string InstallExtensions(NSString* profile) {
 }
 
 + (void)shutdown {
+  gSettingsWindow = nullptr;
   gPrivateContext = nullptr;
   CefShutdown();
 }

@@ -1,14 +1,19 @@
 import AppKit
 import SwiftUI
-import WebKit
 
 /// Sill's settings, all of them, inside the ⌘T palette: the slider button in
 /// its corner (or ⌘,) turns the card into this list, and the glass X at its
 /// top right (or Esc) turns it back. Laid out the way Alcove's settings are:
 /// rounded groups of 42-point rows with hairlines between, a title over
 /// each group, a choice shown as its value with ⌃⌄ that opens Sill's own
-/// glass menu, and picture cards for the look. Each icon's parts move when
-/// the pointer comes onto its row (Icons.swift).
+/// glass menu, and picture cards for the look. The icons hold still.
+/// Settings are one short list; what agents and claude.ai may do is a page
+/// of its own, a row away.
+final class SettingsNav: ObservableObject {
+    enum Page { case main, agents }
+    @Published var page: Page = .main
+}
+
 struct PaletteSettingsView: View {
     @ObservedObject private var prefs = Preferences.shared
     @ObservedObject private var passwords = ApplePasswords.shared
@@ -23,150 +28,210 @@ struct PaletteSettingsView: View {
     @State private var signedOut = false
     @State private var forgotHabits = false
 
-    enum Choice { case engine }
+    enum Choice {
+        case engine
+        /// Clear browsing data's three choices; the second clears cookies and site data.
+        case clear(data: () -> Void)
+    }
+
+    /// Which page is showing, shared with the palette: its back button is
+    /// glass in the card's corner, as the X is (Palette).
+    @ObservedObject var nav: SettingsNav
+    private var page: SettingsNav.Page { nav.page }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Text("Settings").font(.system(size: 21))
+            HStack(spacing: 6) {
+                Text(page == .agents ? "Agents" : "Settings").font(.system(size: 21))
                 Spacer()
             }
-            .padding(.leading, 24)
+            // After the glass back button on the Agents page.
+            .padding(.leading, page == .agents ? 64 : 24)
             .frame(height: Palette.fieldHeight)
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    SettingsGroup {
-                        ChoiceRow(icon: .search, tint: .blue, title: "Search with", value: prefs.engine.name) {
-                            onChoose(.engine, $0)
-                        }
-                        Hairline()
-                        LookCards(selection: $prefs.theme)
-                        Hairline()
-                        SwitchRow(icon: .corners, tint: .gray, title: "Rounder corners",
-                                  detail: "The window turns see-through, which costs some smoothness",
-                                  isOn: $prefs.roundCorners)
-                    }
+            ZStack {
+                // Kept while Agents shows, so coming back finds it scrolled
+                // where it was (rebuilt, it came back at the top).
+                ScrollView { mainPage }
+                    .opacity(page == .main ? 1 : 0)
+                    .offset(x: page == .main ? 0 : -40)
+                    .allowsHitTesting(page == .main)
+                    .accessibilityHidden(page != .main)
+                if page == .agents {
+                    ScrollView { agentsPage }
+                        .transition(Motion.reduced ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+                }
+            }
+            .scrollIndicators(.automatic)
+            .clipped()
+        }
+        .coordinateSpace(.named("settings"))
+        // "Copied", "Cleared", "Signed out": said for a moment, not for good.
+        .onChange(of: copied) { _, on in if on { after { copied = false } } }
+        .onChange(of: copiedConnector) { _, on in if on { after { copiedConnector = false } } }
+        .onChange(of: cleared) { _, on in if on { after { cleared = false } } }
+        .onChange(of: signedOut) { _, on in if on { after { signedOut = false } } }
+    }
 
-                    GroupTitle("Tabs")
-                    SettingsGroup {
-                        SwitchRow(icon: .reopen, tint: .mint, title: "Reopen tabs from last time", isOn: $prefs.restoresTabs)
-                        Hairline()
-                        SwitchRow(icon: .previews, tint: .teal, title: "Preview a tab when pointing at it", isOn: $prefs.showsTabPreviews)
-                        Hairline()
-                        SwitchRow(icon: .pip, tint: .orange, title: "Float playing video when you switch tabs",
-                                  isOn: $prefs.autoPictureInPicture)
-                        Hairline()
-                        SwitchRow(icon: .sleep, tint: .indigo, title: "Put idle tabs to sleep",
-                                  detail: "After two hours; they wake as you point at them", isOn: $prefs.sleepsTabs)
-                        Hairline()
-                        SwitchRow(icon: .claude, tint: .orange, title: "Keep Claude ready",
-                                  detail: "claude.ai links open at once", isOn: $prefs.keepsClaudeReady)
-                    }
+    private func after(_ reset: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: reset)
+    }
 
-                    GroupTitle("Privacy")
-                    SettingsGroup {
-                        SwitchRow(icon: .shield, tint: .green, title: "Block ads and trackers", isOn: $prefs.blocksAds)
-                        Hairline()
-                        SwitchRow(icon: .key, tint: .yellow, title: "Passwords from iCloud Keychain", isOn: $prefs.applePasswords)
-                        if prefs.applePasswords {
-                            Hairline()
-                            passwordsRow
-                        }
-                        Hairline()
-                        ActionRow(icon: .permissions, tint: .blue, title: "Reset website permissions…") {
-                            AppDelegate.shared.resetSitePermissions(nil)
-                        }
-                        Hairline()
-                        ActionRow(icon: .history, tint: .gray, title: "Clear history…") { AppDelegate.shared.clearHistory(nil) }
-                        Hairline()
-                        ActionRow(icon: .trash, tint: .red, title: "Clear cookies and website data…",
-                                  value: cleared ? "Cleared" : nil) { clearWebsiteData() }
-                    }
+    private var mainPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsGroup {
+                LookCards(selection: $prefs.theme)
+                Hairline()
+                ChoiceRow(icon: .search, tint: .blue, title: "Search with", value: prefs.engine.name) {
+                    onChoose(.engine, $0)
+                }
+                Hairline()
+                SwitchRow(icon: .corners, tint: .gray, title: "Rounder corners", isOn: $prefs.roundCorners)
+            }
 
-                    GroupTitle("Sill")
-                    SettingsGroup {
-                        if !isDefault {
-                            ActionRow(icon: .globe, tint: .blue, title: "Make Sill your default browser") {
-                                AppDelegate.shared.makeDefaultBrowser(nil)
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { isDefault = SettingsSupport.isDefaultBrowser }
-                            }
-                            Hairline()
-                        }
-                        ActionRow(icon: .importing, tint: .cyan,
-                                  title: importer.running ? "Importing from Safari…" : "Import from Safari",
-                                  value: importer.report) { importFromSafari() }
+            GroupTitle("Tabs")
+            SettingsGroup {
+                SwitchRow(icon: .reopen, tint: .mint, title: "Reopen tabs from last time", isOn: $prefs.restoresTabs)
+                Hairline()
+                SwitchRow(icon: .previews, tint: .teal, title: "Preview tabs on hover", isOn: $prefs.showsTabPreviews)
+                Hairline()
+                SwitchRow(icon: .pip, tint: .orange, title: "Float video when you switch tabs", isOn: $prefs.autoPictureInPicture)
+                Hairline()
+                SwitchRow(icon: .sleep, tint: .indigo, title: "Sleep tabs idle for two hours", isOn: $prefs.sleepsTabs)
+            }
+
+            GroupTitle("Privacy")
+            SettingsGroup {
+                SwitchRow(icon: .shield, tint: .green, title: "Block ads and trackers", isOn: $prefs.blocksAds)
+                Hairline()
+                SwitchRow(icon: .key, tint: .yellow, title: "Passwords from iCloud Keychain", isOn: $prefs.applePasswords)
+                if prefs.applePasswords {
+                    Hairline()
+                    passwordsRow
+                }
+                Hairline()
+                clearRow
+            }
+
+            GroupTitle("Sill")
+            SettingsGroup {
+                if !isDefault {
+                    ActionRow(icon: .globe, tint: .blue, title: "Make Sill your default browser") {
+                        AppDelegate.shared.makeDefaultBrowser(nil)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { isDefault = SettingsSupport.isDefaultBrowser }
+                    }
+                    Hairline()
+                }
+                ActionRow(icon: .importing, tint: .cyan,
+                          title: importer.running ? "Importing from Safari…" : "Import from Safari",
+                          value: importer.report) { importFromSafari() }
+                Hairline()
+                ActionRow(icon: .terminal, tint: .gray, title: "Agents",
+                          value: prefs.agentControl ? (prefs.remoteConnector ? "On, with claude.ai" : "On") : "Off") {
+                    if Motion.reduced { nav.page = .agents } else { withAnimation(.smooth(duration: 0.28)) { nav.page = .agents } }
+                }
+                Hairline()
+                ActionRow(icon: .permissions, tint: .gray, title: "Advanced settings", value: "Chromium") {
+                    SEEngine.openChromiumSettings(nil)
+                }
+            }
+
+            Button {
+                NSWorkspace.shared.open(URL(string: "https://github.com/costoudesiason/sill")!)
+            } label: {
+                Text("Sill \(SettingsSupport.version)").font(.system(size: 11)).foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .help("Sill on GitHub")
+            .frame(maxWidth: .infinity)
+            .padding(.top, 14)
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 16)
+    }
+
+    private var agentsPage: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsGroup {
+                SwitchRow(icon: .terminal, tint: .gray, title: "Allow agents to control Sill",
+                          detail: "Claude Code, Codex and other MCP clients on this Mac", isOn: $prefs.agentControl)
+                if prefs.agentControl {
+                    Hairline()
+                    ActionRow(icon: .copy, tint: .gray, title: "Copy the command for Claude Code",
+                              value: copied ? "Copied" : nil) {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString("claude mcp add sill -- \(SettingsSupport.mcpHelper)", forType: .string)
+                        copied = true
+                    }
+                    Hairline()
+                    ActionRow(icon: .history, tint: .gray, title: "Agent activity", value: "Show") { AgentLog.show() }
+                    Hairline()
+                    SwitchRow(icon: .importing, tint: .blue, title: "Let agents find and read my files",
+                              detail: "Desktop, Documents, Downloads, Pictures, Movies, Music and iCloud Drive",
+                              isOn: $prefs.agentFiles)
+                    Hairline()
+                    SwitchRow(icon: .history, tint: .indigo, title: "Learn from what I do",
+                              detail: "What you click on your sites and where it goes, so agents know the way. On this Mac only",
+                              isOn: $prefs.learnsHabits)
+                    if prefs.learnsHabits {
                         Hairline()
-                        SwitchRow(icon: .terminal, tint: .gray, title: "Allow agents to control Sill",
-                                  detail: "Claude Code, Codex and other MCP clients on this Mac", isOn: $prefs.agentControl)
-                        if prefs.agentControl {
-                            Hairline()
-                            ActionRow(icon: .copy, tint: .gray, title: "Copy the command for Claude Code",
-                                      value: copied ? "Copied" : nil) {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString("claude mcp add sill -- \(SettingsSupport.mcpHelper)", forType: .string)
-                                copied = true
-                            }
-                            Hairline()
-                            SwitchRow(icon: .claude, tint: .orange, title: "Let claude.ai control Sill",
-                                      detail: prefs.remoteConnector ? connector.summary : "A custom connector, through your own relay",
-                                      isOn: $prefs.remoteConnector)
-                            Hairline()
-                            ActionRow(icon: .history, tint: .gray, title: "Agent activity", value: "Show") { AgentLog.show() }
-                            Hairline()
-                            SwitchRow(icon: .importing, tint: .blue, title: "Let agents find and read my files",
-                                      detail: "Desktop, Documents, Downloads, Pictures, Movies, Music and iCloud Drive",
-                                      isOn: $prefs.agentFiles)
-                            Hairline()
-                            SwitchRow(icon: .history, tint: .indigo, title: "Learn from what I do",
-                                      detail: "What you click on your sites and where it goes, so agents know the way. On this Mac only",
-                                      isOn: $prefs.learnsHabits)
-                            if prefs.learnsHabits {
-                                Hairline()
-                                ActionRow(icon: .trash, tint: .gray, title: "Forget what Sill learned",
-                                          value: forgotHabits ? "Forgotten" : nil) {
-                                    Habits.shared.forget()
-                                    forgotHabits = true
-                                }
-                            }
-                            if prefs.remoteConnector {
-                                Hairline()
-                                SwitchRow(icon: .code, tint: .gray, title: "Let claude.ai run scripts in pages",
-                                          detail: "Off: it uses Sill’s tools, which Sill can check", isOn: $prefs.remoteScripts)
-                                Hairline()
-                                ActionRow(icon: .key, tint: .red, title: "Sign out claude.ai",
-                                          value: signedOut ? "Signed out" : nil) {
-                                    ConnectorBridge.shared.signEveryoneOut()
-                                    signedOut = true
-                                }
-                                Hairline()
-                                ActionRow(icon: .link, tint: .gray, title: "Relay",
-                                          value: ConnectorBridge.relayOrigin.flatMap { URL(string: $0)?.host } ?? "Set Up…") {
-                                    ConnectorSetup.run()
-                                }
-                                if let address = ConnectorBridge.connectorAddress {
-                                    Hairline()
-                                    ActionRow(icon: .copy, tint: .gray, title: "Copy the connector address",
-                                              value: copiedConnector ? "Copied" : nil) {
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.setString(address, forType: .string)
-                                        copiedConnector = true
-                                    }
-                                }
-                            }
-                        }
-                        Hairline()
-                        ActionRow(icon: .code, tint: .gray, title: "Sill \(SettingsSupport.version)", value: "GitHub") {
-                            NSWorkspace.shared.open(URL(string: "https://github.com/costoudesiason/sill")!)
+                        ActionRow(icon: .trash, tint: .gray, title: "Forget what Sill learned",
+                                  value: forgotHabits ? "Forgotten" : nil) {
+                            Habits.shared.forget()
+                            forgotHabits = true
                         }
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 16)
             }
-            .scrollIndicators(.automatic)
+
+            if prefs.agentControl {
+                GroupTitle("claude.ai")
+                SettingsGroup {
+                    SwitchRow(icon: .claude, tint: .orange, title: "Let claude.ai control Sill",
+                              detail: prefs.remoteConnector ? connector.summary : "Through your own relay",
+                              isOn: $prefs.remoteConnector)
+                    if prefs.remoteConnector {
+                        Hairline()
+                        SwitchRow(icon: .code, tint: .gray, title: "Let it run scripts in pages", isOn: $prefs.remoteScripts)
+                        Hairline()
+                        ActionRow(icon: .link, tint: .gray, title: "Relay",
+                                  value: ConnectorBridge.relayOrigin.flatMap { URL(string: $0)?.host } ?? "Set Up…") {
+                            ConnectorSetup.run()
+                        }
+                        if let address = ConnectorBridge.connectorAddress {
+                            Hairline()
+                            ActionRow(icon: .copy, tint: .gray, title: "Copy the connector address",
+                                      value: copiedConnector ? "Copied" : nil) {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(address, forType: .string)
+                                copiedConnector = true
+                            }
+                        }
+                        Hairline()
+                        ActionRow(icon: .key, tint: .red, title: "Sign out claude.ai",
+                                  value: signedOut ? "Signed out" : nil) {
+                            ConnectorBridge.shared.signEveryoneOut()
+                            signedOut = true
+                        }
+                    }
+                }
+            }
+
+            GroupTitle("Claude")
+            SettingsGroup {
+                SwitchRow(icon: .claude, tint: .orange, title: "Keep claude.ai ready",
+                          detail: "Its links open at once", isOn: $prefs.keepsClaudeReady)
+            }
         }
-        .coordinateSpace(.named("settings"))
+        .padding(.horizontal, 16)
+        .padding(.bottom, 16)
+    }
+
+    /// History, cookies and site permissions: three ways to forget, one row.
+    private var clearRow: some View {
+        ChoiceRow(icon: .trash, tint: .red, title: "Clear browsing data", value: cleared ? "Cleared" : "Choose…") {
+            onChoose(.clear(data: clearWebsiteData), $0)
+        }
     }
 
     @ViewBuilder private var passwordsRow: some View {
@@ -215,9 +280,7 @@ struct PaletteSettingsView: View {
         alert.addButton(withTitle: "Cancel")
         alert.buttons.first?.hasDestructiveAction = true
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {
-            cleared = true
-        }
+        SEEngine.clearWebsiteData { cleared = true }
     }
 
     private func importFromSafari() {
@@ -269,9 +332,8 @@ private struct Hairline: View {
 private struct Tile: View {
     let icon: IconKind
     let tint: Color
-    let on: Bool
     var body: some View {
-        HoverIcon(kind: icon, on: on, size: 13)
+        HoverIcon(kind: icon, on: false, size: 13)
             .foregroundStyle(.white)
             .frame(width: 24, height: 24)
             .background(tint.gradient, in: RoundedRectangle(cornerRadius: 6.5, style: .continuous))
@@ -284,11 +346,10 @@ private struct RowFrame<Trailing: View>: View {
     let title: String
     var detail: String?
     @ViewBuilder var trailing: Trailing
-    @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 12) {
-            Tile(icon: icon, tint: tint, on: hovering)
+            Tile(icon: icon, tint: tint)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(.system(size: 13)).lineLimit(1)
                 if let detail {
@@ -302,7 +363,6 @@ private struct RowFrame<Trailing: View>: View {
         .padding(.trailing, 14)
         .frame(height: detail == nil ? 42 : 50)
         .contentShape(Rectangle())
-        .onHover { hovering = $0 }
     }
 }
 
@@ -312,7 +372,7 @@ private struct SwitchRow: View {
     @Binding var isOn: Bool
     var body: some View {
         RowFrame(icon: icon, tint: tint, title: title, detail: detail) {
-            Toggle("", isOn: $isOn).toggleStyle(.switch).controlSize(.small).labelsHidden()
+            Toggle(title, isOn: $isOn).toggleStyle(.switch).controlSize(.small).labelsHidden()
         }
     }
 }
@@ -338,7 +398,9 @@ private struct ChoiceRow: View {
         }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("settings")) } action: { frame = $0 }
         .onTapGesture { choose(frame) }
+        .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
+        .accessibilityAction { choose(frame) }
     }
 }
 
@@ -356,7 +418,9 @@ private struct ActionRow: View {
             }
         }
         .onTapGesture(perform: run)
+        .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
+        .accessibilityAction { run() }
     }
 }
 
@@ -382,7 +446,7 @@ private struct LookCards: View {
             ForEach(Theme.allCases) { theme in
                 VStack(spacing: 7) {
                     preview(theme)
-                        .frame(height: 46)
+                        .frame(height: 64)
                         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
                             .strokeBorder(Color.primary.opacity(0.15), lineWidth: 1))
@@ -403,30 +467,89 @@ private struct LookCards: View {
         .padding(.vertical, 12)
     }
 
-    /// A tiny window: its bar and two lines of page, in that look's colours.
+    /// Sill itself in miniature, in that look, on the desktop, as macOS
+    /// shows its own appearances: the bar with its traffic lights, back and
+    /// forward, tabs and buttons, and a page under it. System is both, cut
+    /// across, light on the left.
     @ViewBuilder private func preview(_ theme: Theme) -> some View {
         switch theme {
-        case .light: MiniWindow(dark: false)
-        case .dark: MiniWindow(dark: true)
+        case .light: MiniSill(dark: false)
+        case .dark: MiniSill(dark: true)
         case .system:
-            HStack(spacing: 0) { MiniWindow(dark: false); MiniWindow(dark: true) }
+            ZStack {
+                MiniSill(dark: true)
+                MiniSill(dark: false).mask(
+                    GeometryReader { g in
+                        Path { p in
+                            p.move(to: .zero)
+                            p.addLine(to: CGPoint(x: g.size.width * 0.62, y: 0))
+                            p.addLine(to: CGPoint(x: g.size.width * 0.38, y: g.size.height))
+                            p.addLine(to: CGPoint(x: 0, y: g.size.height))
+                        }
+                    })
+            }
         }
     }
 }
 
-private struct MiniWindow: View {
+private struct MiniSill: View {
     let dark: Bool
+
     var body: some View {
-        let page = dark ? Color(white: 0.12) : Color(white: 0.97)
-        let ink = dark ? Color.white.opacity(0.22) : Color.black.opacity(0.12)
+        let wallpaper = dark
+            ? LinearGradient(colors: [Color(red: 0.10, green: 0.13, blue: 0.32), Color(red: 0.32, green: 0.14, blue: 0.38)],
+                             startPoint: .topLeading, endPoint: .bottomTrailing)
+            : LinearGradient(colors: [Color(red: 0.55, green: 0.74, blue: 0.98), Color(red: 0.98, green: 0.76, blue: 0.82)],
+                             startPoint: .topLeading, endPoint: .bottomTrailing)
+        let bar = dark ? Color(white: 0.17) : Color(white: 0.92)
+        let glass = dark ? Color(white: 0.30) : Color.white.opacity(0.95)
+        let plain = dark ? Color.white.opacity(0.10) : Color.black.opacity(0.07)
+        let page = dark ? Color(white: 0.11) : Color.white
+        let ink = dark ? Color.white.opacity(0.24) : Color.black.opacity(0.13)
+
         ZStack(alignment: .topLeading) {
-            page
-            VStack(alignment: .leading, spacing: 5) {
-                Capsule().fill(ink).frame(height: 6).padding(.trailing, 18)
-                Capsule().fill(ink.opacity(0.7)).frame(height: 4).padding(.trailing, 30)
-                Capsule().fill(ink.opacity(0.7)).frame(height: 4).padding(.trailing, 40)
+            wallpaper
+            // The window, running off the card's right and bottom edges.
+            VStack(spacing: 0) {
+                HStack(spacing: 3) {
+                    HStack(spacing: 2) {
+                        Circle().fill(Color(red: 1, green: 0.37, blue: 0.34))
+                        Circle().fill(Color(red: 1, green: 0.74, blue: 0.18))
+                        Circle().fill(Color(red: 0.16, green: 0.79, blue: 0.25))
+                    }
+                    .frame(width: 13, height: 3.5)
+                    Capsule().fill(glass).frame(width: 13, height: 7)
+                    Capsule().fill(glass).frame(height: 7)
+                    Capsule().fill(plain).frame(height: 7)
+                    Capsule().fill(plain).frame(height: 7)
+                    Capsule().fill(glass).frame(width: 14, height: 7)
+                }
+                .padding(.horizontal, 4)
+                .frame(height: 13)
+                .background(bar)
+                ZStack(alignment: .topLeading) {
+                    page
+                    VStack(alignment: .leading, spacing: 3) {
+                        RoundedRectangle(cornerRadius: 1.5).fill(ink).frame(width: 34, height: 4)
+                        HStack(alignment: .top, spacing: 4) {
+                            VStack(alignment: .leading, spacing: 2.5) {
+                                Capsule().fill(ink.opacity(0.7)).frame(height: 2.5)
+                                Capsule().fill(ink.opacity(0.7)).frame(height: 2.5)
+                                Capsule().fill(ink.opacity(0.7)).frame(width: 26, height: 2.5)
+                            }
+                            RoundedRectangle(cornerRadius: 2).fill(ink.opacity(0.55)).frame(width: 22, height: 15)
+                        }
+                    }
+                    .padding(6)
+                }
             }
-            .padding(10)
+            .clipShape(UnevenRoundedRectangle(topLeadingRadius: 5, topTrailingRadius: 5, style: .continuous))
+            .shadow(color: .black.opacity(0.22), radius: 2, y: 1)
+            .padding(.leading, 13)
+            .padding(.top, 11)
+            .padding(.trailing, -8)
+            .padding(.bottom, -8)
         }
+        .clipped()
     }
 }

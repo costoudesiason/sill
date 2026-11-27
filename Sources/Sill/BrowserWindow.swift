@@ -46,8 +46,25 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private lazy var bar = TopBar(strip: strip)
     private let stage = StageView()
     private let pageHost = PageHostView()
-    /// Two tabs side by side, if one was split (the tab menu's Split Left/Right).
-    private(set) var split: SplitPair?
+    /// Pairs of tabs side by side (the tab menu's Split Left/Right): as
+    /// many as you make, each tab in one at most.
+    private(set) var splits: [SplitPair] = []
+    /// A split being made, waiting for its second tab.
+    private var pendingSplit: SplitPair?
+    /// The split showing: the one being made, else the one the tab in
+    /// front belongs to.
+    var split: SplitPair? { pendingSplit ?? splits.first { $0.contains(selected) } }
+    /// The split `tab` is one half of, if any.
+    func split(of tab: Tab?) -> SplitPair? { splits.first { $0.contains(tab) } }
+    /// Every whole split, for the row's capsules.
+    private func showPairs() {
+        strip.showPairs(splits.compactMap { pair in pair.left.flatMap { l in pair.right.map { (l, $0) } } })
+    }
+    /// Takes `tab` out of whatever split it's in, which then ends.
+    private func dissolveSplit(of tab: Tab?) {
+        if let pending = pendingSplit, pending.contains(tab) { pendingSplit = nil }
+        splits.removeAll { $0.contains(tab) }
+    }
     private var neighbourWarming: DispatchWorkItem?
     private lazy var splitView: PageSplitView = {
         let view = PageSplitView()
@@ -126,6 +143,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// Made the first time there is something to say: a window is opened,
     /// resized and laid out many times for each note it shows.
     private var madeToast: Toast?
+    private lazy var zoomToast = ZoomToast(reset: { [weak self] in self?.actualSize(nil) })
+    /// The zoom toast, for the page in front, after you changed its zoom.
+    /// The tab in front shows it too, for as long as you're zooming.
+    private func showZoom(up: Bool?) {
+        guard let tab = selected, let webView = tab.webView, fullScreenPage == nil else { return }
+        madeToast?.dismiss()   // one toast at a time, in one place
+        zoomToast.show(Double(webView.pageZoom), in: stage, above: madeToast ?? status)
+        strip.showZoom(Int((Double(webView.pageZoom) * 100).rounded()), up: up, for: tab)
+    }
     private var downloadsPopover: NSPopover?
     /// Recently closed in this window, newest last, for ⇧⌘T.
     private var closed: [(url: URL, title: String, index: Int, state: Any?)] = []
@@ -177,8 +203,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // The toolbar makes the whole bar a place macOS drags the window
         // from by itself, before Sill sees the mouse: dragging a tab to
         // reorder it dragged the window. Sill moves the window itself, from
-        // the bar's bare glass only (TopBar, TabStripView).
-        window.isMovable = false
+        // the bar's bare glass only (TopBar, TabStripView). Only while the
+        // pointer is over the tabs: a window that is never movable can't
+        // Fill, Center or tile (TabStripView.mouseEntered).
         super.init(window: window)
         window.delegate = self
 
@@ -200,6 +227,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         stage.addSubview(top)
         stage.addSubview(pageHost)
         stage.addSubview(status)
+        status.toastFrame = { [weak self] in
+            guard let self else { return nil }
+            if let frame = self.zoomToast.shownFrame { return frame }
+            if let toast = self.madeToast, !toast.isHidden { return toast.frame }
+            return nil
+        }
         watchForPeek()
         stage.onLayout = { [weak self] in self?.stageLaidOut() }
         // The Find bar, the palette and its settings are built ahead of their
@@ -214,6 +247,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         bar.reload.target = self
         bar.reload.action = #selector(reloadOrStop(_:))
         bar.isPopup = isPopup
+        if isPrivate { bar.profile.markPrivate() }
         bar.extensions.target = self
         bar.extensions.action = #selector(showExtensions(_:))
         bar.profile.target = self
@@ -224,6 +258,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         bar.add.action = #selector(newTab(_:))
         bar.allTabs.target = self
         bar.allTabs.action = #selector(showAllTabs(_:))
+        // A file or link dropped on the bar: a new tab each, where it was let
+        // go, the last one in front. (A popup's bar holds only its one page.)
+        if !isPopup {
+            bar.onDrop = { [weak self] urls, index in
+                guard let self else { return }
+                var at = index
+                for (n, url) in urls.enumerated() {
+                    let tab = self.addTab(url: url, at: at, select: n == urls.count - 1)
+                    if let placed = self.tabs.firstIndex(where: { $0 === tab }) { at = placed + 1 }
+                }
+            }
+        }
         updateNavigation()
         applyLooks()
         // Settings apply as they change, to every window.
@@ -264,7 +310,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         let before = appliedLooks
         guard looks != before else { return }
         appliedLooks = looks
-        if before?.theme != looks.theme, !isPrivate { window?.appearance = prefs.theme.appearance }
+        if before?.theme != looks.theme, !isPrivate {
+            window?.appearance = prefs.theme.appearance
+            madePalette?.takeAppearance(of: window)
+        }
         if before?.tabWidth != looks.tabWidth || before?.closeButtons != looks.closeButtons || before?.tabPreviews != looks.tabPreviews {
             strip.prefsChanged()
         }
@@ -369,13 +418,21 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     // MARK: - Bar
 
+    /// A download began: the list opens, unless it's open already or the
+    /// window is out of sight.
+    func revealDownloads() {
+        guard downloadsPopover?.isShown != true, !isPopup, fullScreenPage == nil,
+              let window, window.isVisible, !window.isMiniaturized else { return }
+        showDownloads(nil)
+    }
+
     @objc func showDownloads(_ sender: Any?) {
         if downloadsPopover?.isShown == true { downloadsPopover?.close(); return }
         let popover = NSPopover()
         popover.behavior = .transient
         // Measured before it shows: a popover that shrinks after appearing
         // shrinks from the top, and lands far below its button.
-        let host = NSHostingController(rootView: DownloadsView())
+        let host = NSHostingController(rootView: DownloadsView(isPrivate: isPrivate).modifier(PanelBacking()))
         host.sizingOptions = .preferredContentSize
         popover.contentViewController = host
         popover.contentSize = host.view.fittingSize
@@ -406,7 +463,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         let host = NSHostingController(rootView: ExtensionsView(open: { [weak self, weak popover] url in
             popover?.close()
             _ = self?.addTab(url: url)
-        }, site: site, reload: { [weak self] in self?.selected?.webView?.reload() }))
+        }, site: site, reload: { [weak self] in self?.selected?.webView?.reload() }).modifier(PanelBacking()))
         host.sizingOptions = .preferredContentSize
         popover.contentViewController = host
         popover.contentSize = host.view.fittingSize
@@ -486,6 +543,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         showPalette(.history)
     }
 
+    /// History › Clear History…: ⌘Y, with how far back to clear asked at once.
+    @objc func clearHistory(_ sender: Any?) {
+        if !(paletteOpen && palette.mode == .history) { showPalette(.history) }
+        DispatchQueue.main.async { [weak self] in self?.palette.showClearMenu() }
+    }
+
     private func updateNavigation() {
         bar.back.isEnabled = selected?.canGoBack ?? false
         bar.forward.isEnabled = selected?.canGoForward ?? false
@@ -522,6 +585,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if let findBar = madeFindBar, findBar.isOpen { findBar.place(in: stage, top: topInset) }
         // Out of sight it's placed when next shown, not measured each frame of a resize.
         if !status.isHidden { status.place(in: stage) }
+        zoomToast.place(in: stage)
         if let toast = madeToast, !toast.isHidden { toast.place(in: stage) }
         placePrompts()
     }
@@ -531,7 +595,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         stage.needsLayout = true
     }
     func windowDidEnterFullScreen(_ notification: Notification) { stage.needsLayout = true }
-    func windowDidExitFullScreen(_ notification: Notification) { stage.needsLayout = true; keepCorners() }
+    func windowDidExitFullScreen(_ notification: Notification) {
+        if fullScreenPage == nil, window?.toolbar?.isVisible == false { window?.toolbar?.isVisible = true }
+        stage.needsLayout = true
+        keepCorners()
+    }
+    /// In full screen the toolbar (there for the traffic lights) hides with
+    /// the menu bar: kept, it was a blank strip over the top of the bar.
+    func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposed: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
+        proposed.union([.fullScreen, .autoHideMenuBar, .autoHideToolbar])
+    }
     func windowDidChangeScreen(_ notification: Notification) { keepCorners() }
     /// Rounder corners asked for again where AppKit might set its own. A
     /// probe kept them through appearance changes, minimise and restore,
@@ -556,6 +629,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             page.webView?.exitFullScreen()
             stage.needsLayout = true
         }
+        window?.toolbar?.isVisible = true
     }
 
     /// A page in its own full screen (a video), and whether the window went
@@ -565,18 +639,29 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if on {
             guard tab === selected else { tab.webView?.exitFullScreen(); return }
             fullScreenPage = tab
+            zoomToast.hide()
+            madeToast?.dismiss()
+            downloadsPopover?.close()
+            // The window's (empty) toolbar stays as a blank strip over the
+            // top of the screen in full screen: none while a page fills it.
+            window.toolbar?.isVisible = false
             if !window.styleMask.contains(.fullScreen) { enteredForPage = true; window.toggleFullScreen(nil) }
         } else {
             guard fullScreenPage === tab else { return }
             fullScreenPage = nil
-            if enteredForPage, window.styleMask.contains(.fullScreen) { enteredForPage = false; window.toggleFullScreen(nil) }
+            if enteredForPage, window.styleMask.contains(.fullScreen) {
+                enteredForPage = false
+                window.toggleFullScreen(nil)   // the toolbar comes back once out (windowDidExitFullScreen)
+            } else {
+                window.toolbar?.isVisible = true
+            }
         }
         stage.needsLayout = true
     }
 
     // MARK: - Tabs
 
-    func restore(_ states: [SessionTab], selectedIndex: Int, split saved: SessionSplit? = nil) {
+    func restore(_ states: [SessionTab], selectedIndex: Int, splits saved: [SessionSplit] = []) {
         // The icons on disk, if they are nearly read: the row comes up with them.
         Favicons.shared.settle(within: 0.03)
         tabs = states.compactMap { state in
@@ -588,14 +673,18 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
         warmAfterRestore = tabs.filter { $0.seenAt != nil }.sorted { $0.seenAt! > $1.seenAt! }
         strip.sync(animated: false)
-        // The split you left, as you left it: in place before the tab in front
-        // is chosen, so that tab comes up already beside its partner.
-        if let saved, saved.left != saved.right, tabs.count == states.count,
-           tabs.indices.contains(saved.left), tabs.indices.contains(saved.right) {
-            let pair = SplitPair(left: tabs[saved.left], right: tabs[saved.right])
-            pair.fraction = CGFloat(min(max(saved.fraction, 0.15), 0.85))
-            split = pair
-            strip.showPair(pair.left, pair.right)
+        // The splits you left, as you left them: in place before the tab in
+        // front is chosen, so that tab comes up already beside its partner.
+        if tabs.count == states.count {
+            for saved in saved where saved.left != saved.right
+                && tabs.indices.contains(saved.left) && tabs.indices.contains(saved.right) {
+                let left = tabs[saved.left], right = tabs[saved.right]
+                guard split(of: left) == nil, split(of: right) == nil else { continue }
+                let pair = SplitPair(left: left, right: right)
+                pair.fraction = CGFloat(min(max(saved.fraction, 0.15), 0.85))
+                splits.append(pair)
+            }
+            showPairs()
         }
         if tabs.indices.contains(selectedIndex) { select(tabs[selectedIndex]) } else if let first = tabs.first { select(first) }
     }
@@ -609,10 +698,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         var index = min(index ?? tabs.count, tabs.count)
         // Never between the two halves of a split: a link from the left one
         // opens after the pair, which stays together.
-        if let split, let left = split.left, let right = split.right,
-           let l = tabs.firstIndex(where: { $0 === left }), let r = tabs.firstIndex(where: { $0 === right }),
-           r == l + 1, index == r {
-            index = r + 1
+        for pair in splits {
+            if let left = pair.left, let right = pair.right,
+               let l = tabs.firstIndex(where: { $0 === left }), let r = tabs.firstIndex(where: { $0 === right }),
+               r == l + 1, index == r {
+                index = r + 1
+            }
         }
         tabs.insert(tab, at: index)
         if let popupView {
@@ -647,6 +738,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     func select(_ tab: Tab, animated: Bool = false) {
         guard tabs.contains(where: { $0 === tab }) else { return }
+        // A split still waiting for its second tab is given up on by going
+        // to a tab that isn't in it.
+        if let pending = pendingSplit, !pending.contains(tab) { pendingSplit = nil }
         if paletteOpen && selected !== tab { palette.close(animated: false, focusPage: false) }
         madeFindBar?.close()
         let previous = selected
@@ -700,10 +794,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         // Clicks, ⌘1–9 and ⌃Tab only move the selection; a tab added or
         // closed changes the row.
         if strip.matches(tabs) { strip.select(tab) } else { strip.sync(animated: animated) }
-        strip.showPair(split?.left, split?.right)
+        showPairs()
         warmNeighbours(of: tab)
         window?.title = tab.displayTitle
         updateNavigation()
+        zoomToast.hide()
         status.show(nil)
         hoveredLink = nil
         endPeek()
@@ -750,7 +845,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
         tabs.remove(at: index)
         // A split loses one side: the page left over has the window to itself.
-        if let split, split.contains(tab) { self.split = nil; strip.showPair(nil, nil) }
+        // A split loses one side: the page left over has the window to
+        // itself, and if that split was on screen, the window shows so.
+        let splitShown = split?.contains(tab) == true
+        if split(of: tab) != nil || pendingSplit?.contains(tab) == true { dissolveSplit(of: tab); showPairs() }
+        if splitShown, selected !== tab, !tabs.isEmpty { placePages(keep: nil) }
         // Its sound and video go with it, floating or not: nothing keeps
         // playing from a tab that's gone.
         if pictured === tab { pictured = nil }
@@ -785,6 +884,120 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         changed()
     }
 
+    /// Takes `tab` out of this window with its page alive, for another
+    /// window to take (a tab dragged out of the row). The last tab out
+    /// closes the window.
+    /// `keepingPage`: its page has already gone into another window (it
+    /// isn't taken out of that one).
+    func release(_ tab: Tab, keepingPage: Bool = false) {
+        guard let index = tabs.firstIndex(where: { $0 === tab }) else { return }
+        hidePreview(animated: false)
+        tab.dropAsks()
+        tabs.remove(at: index)
+        // A split loses one side: the page left over has the window to
+        // itself, and if that split was on screen, the window shows so.
+        let splitShown = split?.contains(tab) == true
+        if split(of: tab) != nil || pendingSplit?.contains(tab) == true { dissolveSplit(of: tab); showPairs() }
+        if splitShown, selected !== tab, !tabs.isEmpty { placePages(keep: nil) }
+        if pictured === tab { pictured = nil }
+        if !keepingPage { tab.webView?.removeFromSuperview() }
+        let wasFront = selected === tab
+        // Not "the page being left": it isn't, it's going on to another window.
+        if wasFront { selected = nil }
+        if tabs.isEmpty {
+            // Closed a moment later: a window closing with the page still
+            // settling into its new one left that page blank there.
+            DispatchQueue.main.async { [weak self] in self?.window?.close() }
+            return
+        }
+        if wasFront { select(tabs[min(index, tabs.count - 1)], animated: true) } else { strip.sync(animated: true) }
+        changed()
+    }
+
+    /// A tab from another window, page and all, in front at `index`.
+    func take(_ tab: Tab, at index: Int? = nil) {
+        tab.host = self
+        var index = min(index ?? tabs.count, tabs.count)
+        // Never between the two halves of a split: after the pair instead.
+        for pair in splits {
+            if let left = pair.left, let right = pair.right,
+               let l = tabs.firstIndex(where: { $0 === left }), let r = tabs.firstIndex(where: { $0 === right }),
+               r == l + 1, index == r {
+                index = r + 1
+            }
+        }
+        tabs.insert(tab, at: index)
+        select(tab, animated: true)
+        changed()
+    }
+
+    /// A tab dragged off the row. One of several goes into a window of its
+    /// own; a window's only tab brings its window along. Either way the
+    /// window follows the pointer until it's let go, and let go over another
+    /// Sill window's tabs, the tab joins them there (its window closing if
+    /// it's left empty). `grab` is where the pointer holds the window, in
+    /// window coordinates.
+    func tearOff(_ tab: Tab, grab: NSPoint) {
+        guard let window, tabs.contains(where: { $0 === tab }) else { return }
+        let carrier: BrowserWindowController
+        if tabs.count > 1 {
+            carrier = AppDelegate.shared.makeBrowser(isPrivate: isPrivate)
+            guard let newWindow = carrier.window else { return }
+            newWindow.setFrame(window.frame, display: false)
+            release(tab)
+            carrier.take(tab)
+        } else {
+            carrier = self
+        }
+        carry(tab, in: carrier, grab: grab)
+    }
+
+    private func carry(_ tab: Tab, in carrier: BrowserWindowController, grab: NSPoint) {
+        guard let moving = carrier.window else { return }
+        let app = AppDelegate.shared
+        /// The window whose row of tabs is under the pointer, if any but the carried one.
+        func target(at mouse: NSPoint) -> (BrowserWindowController, Int)? {
+            for other in app.browsers where other !== carrier && !other.isPopup && other.isPrivate == carrier.isPrivate {
+                guard let otherWindow = other.window, otherWindow.isVisible, !otherWindow.isMiniaturized,
+                      otherWindow.frame.contains(mouse) else { continue }
+                let point = other.strip.convert(otherWindow.convertPoint(fromScreen: mouse), from: nil)
+                // The row and a little either side of it, so it needn't be hit exactly.
+                if other.strip.bounds.insetBy(dx: 0, dy: -14).contains(point) {
+                    return (other, other.strip.dropIndex(at: point.x))
+                }
+            }
+            return nil
+        }
+        func follow() {
+            let mouse = NSEvent.mouseLocation
+            moving.setFrameTopLeftPoint(NSPoint(x: mouse.x - grab.x, y: mouse.y + (moving.frame.height - grab.y)))
+            // See-through over a row it can join, so that row shows where it goes.
+            let over = target(at: mouse) != nil
+            let alpha: CGFloat = over ? 0.45 : 1
+            if moving.alphaValue != alpha { moving.alphaValue = alpha }
+        }
+        follow()
+        carrier.showWindow(nil)
+        moving.makeKeyAndOrderFront(nil)
+        while let event = NSApp.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture,
+                                          inMode: .eventTracking, dequeue: true) {
+            if event.type == .leftMouseUp { break }
+            follow()
+        }
+        moving.alphaValue = 1
+        carrier.strip.syncMovable()
+        strip.syncMovable()
+        if let (other, index) = target(at: NSEvent.mouseLocation) {
+            // Into its new window first, then out of the old one (which
+            // closes if that was its last tab): the other way round, the
+            // page stayed blank in its new window.
+            other.take(tab, at: index)
+            carrier.release(tab, keepingPage: true)
+            other.window?.makeKeyAndOrderFront(nil)
+            other.strip.syncMovable()
+        }
+    }
+
     func move(_ tab: Tab, to index: Int) {
         guard let from = tabs.firstIndex(where: { $0 === tab }) else { return }
         tabs.remove(at: from)
@@ -798,20 +1011,25 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     /// them ends up after the pair. Whether anything had to move.
     @discardableResult
     private func keepPairTogether(moved: Tab?) -> Bool {
-        guard let split, let left = split.left, let right = split.right,
-              let l = tabs.firstIndex(where: { $0 === left }), let r = tabs.firstIndex(where: { $0 === right }),
-              r != l + 1 else { return false }
-        if moved === right {
-            tabs.remove(at: l)
-            tabs.insert(left, at: tabs.firstIndex(where: { $0 === right }) ?? r)
-        } else {
-            tabs.remove(at: r)
-            tabs.insert(right, at: (tabs.firstIndex(where: { $0 === left }) ?? l) + 1)
+        var changed = false
+        for pair in splits {
+            guard let left = pair.left, let right = pair.right,
+                  let l = tabs.firstIndex(where: { $0 === left }), let r = tabs.firstIndex(where: { $0 === right }),
+                  r != l + 1 else { continue }
+            if moved === right {
+                tabs.remove(at: l)
+                tabs.insert(left, at: tabs.firstIndex(where: { $0 === right }) ?? r)
+            } else {
+                tabs.remove(at: r)
+                tabs.insert(right, at: (tabs.firstIndex(where: { $0 === left }) ?? l) + 1)
+            }
+            changed = true
         }
-        return true
+        return changed
     }
 
     func navigate(to url: URL, newTab: Bool, typed: Bool) {
+        if ChromiumSettings.open(url) { return }
         if newTab || selected == nil {
             addTab(url: url, typed: typed)
         } else {
@@ -1036,6 +1254,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         view.pauseAllMediaPlayback { }
         view.closeAllMediaPresentations { }
         view.removeFromSuperview()
+        // A download still running from it keeps the page (out of sight)
+        // until it's done: closed, Chromium went on writing the file but
+        // Sill heard no more of it, and Stop no longer stopped it.
+        if Downloads.shared.isDownloading(in: view) {
+            Downloads.shared.outlive(view)
+            return
+        }
         // Unloaded a moment later, once the pause has landed.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak view] in
             view?.closePage()
@@ -1055,36 +1280,44 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         AppDelegate.shared.windowClosed(self)
     }
 
-    func windowDidBecomeKey(_ notification: Notification) { AppDelegate.shared.lastBrowser = self }
+    func windowDidBecomeKey(_ notification: Notification) {
+        AppDelegate.shared.lastBrowser = self
+        strip.syncMovable()
+    }
     func windowDidResignKey(_ notification: Notification) { endPeek(); hidePreview(animated: false) }
 
     // MARK: - Context menu for a tab
 
+    /// A tab's commands, shown in Sill's glass menu; only those that can
+    /// be done now are in it.
     func menu(for tab: Tab) -> NSMenu {
         let menu = NSMenu()
-        func add(_ title: String, _ handler: @escaping () -> Void, enabled: Bool = true) {
-            let item = ClosureMenuItem(title: title, handler: handler)
-            item.isEnabled = enabled
-            menu.addItem(item)
+        func add(_ title: String, enabled: Bool = true, _ handler: @escaping () -> Void) {
+            guard enabled else { return }
+            menu.addItem(ClosureMenuItem(title: title, handler: handler))
         }
+        let url = tab.webView?.url ?? tab.url
         add("New Tab") { [weak self] in self?.showPalette(.newTab) }
         menu.addItem(.separator())
         add("Reload") { tab.reload() }
         add("Duplicate") { [weak self] in
-            guard let self, let url = tab.webView?.url ?? tab.url,
-                  let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
+            guard let self, let url, let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
             self.addTab(url: url, at: index + 1)
         }
-        add("Copy Link", { if let url = tab.webView?.url ?? tab.url { Pasteboard.copy(url) } }, enabled: tab.url != nil)
+        add("Copy Link", enabled: url != nil) { if let url { Pasteboard.copy(url) } }
+        if let view = tab.webView, tab.audible || view.audioMuted {
+            add(view.audioMuted ? "Unmute Tab" : "Mute Tab") { view.audioMuted.toggle() }
+        }
         menu.addItem(.separator())
-        if split?.contains(tab) == true {
-            add("Separate Split View") { [weak self] in self?.unsplit() }
+        if let pair = split(of: tab) {
+            add("Separate Split View") { [weak self] in self?.unsplit(pair) }
         } else {
             add("Split Left") { [weak self] in self?.split(tab, onLeft: true) }
             add("Split Right") { [weak self] in self?.split(tab, onLeft: false) }
         }
+        add("Move to New Window", enabled: tabs.count > 1) { [weak self] in self?.moveToNewWindow(tab) }
         // Off for the one site it broke, rather than everywhere.
-        if Preferences.shared.blocksAds, let host = (tab.webView?.url ?? tab.url)?.host(), !host.isEmpty {
+        if Preferences.shared.blocksAds, let host = url?.host(), !host.isEmpty {
             let paused = Shield.shared.isPaused(on: host)
             let item = ClosureMenuItem(title: "Block Ads on \(Domains.bare(host))") { [weak tab] in
                 Shield.shared.pause(host, !paused) { tab?.reload() }
@@ -1094,27 +1327,51 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         }
         menu.addItem(.separator())
         add("Close Tab") { [weak self] in self?.close(tab) }
-        add("Close Other Tabs", { [weak self] in
+        add("Close Other Tabs", enabled: tabs.count > 1) { [weak self] in
             guard let self else { return }
             for other in self.tabs where other !== tab { self.close(other) }
-        }, enabled: tabs.count > 1)
-        add("Close Tabs to the Right", { [weak self] in
+        }
+        add("Close Tabs to the Right", enabled: tabs.last !== tab) { [weak self] in
             guard let self, let index = self.tabs.firstIndex(where: { $0 === tab }) else { return }
             for other in self.tabs[(index + 1)...] { self.close(other) }
-        }, enabled: tabs.last !== tab)
+        }
         return menu
+    }
+
+    /// A right-click on the tab bar beside the tabs.
+    func tabBarMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(ClosureMenuItem(title: "New Tab") { [weak self] in self?.showPalette(.newTab) })
+        if !closed.isEmpty {
+            menu.addItem(ClosureMenuItem(title: "Reopen Closed Tab") { [weak self] in self?.reopenClosedTab(nil) })
+        }
+        return menu
+    }
+
+    /// The tab on its own in a new window, a little down and to the right of this one.
+    func moveToNewWindow(_ tab: Tab) {
+        guard let window, tabs.count > 1, tabs.contains(where: { $0 === tab }) else { return }
+        let other = AppDelegate.shared.makeBrowser(isPrivate: isPrivate)
+        guard let newWindow = other.window else { return }
+        newWindow.setFrame(window.frame.offsetBy(dx: 28, dy: -28), display: false)
+        release(tab)
+        other.take(tab)
+        other.showWindow(nil)
     }
 
     // MARK: - Status, toast
 
     func toast(_ text: String, action: (String, () -> Void)? = nil) {
-        let toast = madeToast ?? {
-            let made = Toast()
-            // Where it has always been: over the page and the status, under the rest.
-            stage.addSubview(made, positioned: .above, relativeTo: status)
-            madeToast = made
-            return made
-        }()
+        zoomToast.hide()   // one toast at a time, in one place
+        let toast = madeToast ?? Toast()
+        madeToast = toast
+        // Over the page and the status, under the rest; over the palette
+        // while it's open, so an Undo for what it just did can be clicked.
+        if paletteOpen {
+            if stage.subviews.last !== toast { stage.addSubview(toast, positioned: .above, relativeTo: nil) }
+        } else if toast.superview !== stage || stage.subviews.firstIndex(of: toast) != stage.subviews.firstIndex(of: status).map({ $0 + 1 }) {
+            stage.addSubview(toast, positioned: .above, relativeTo: status)
+        }
         toast.show(text, action: action, in: stage)
     }
 
@@ -1160,10 +1417,19 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
 
     @objc func zoomIn(_ sender: Any?) { zoom(by: 1.1) }
     @objc func zoomOut(_ sender: Any?) { zoom(by: 1 / 1.1) }
-    @objc func actualSize(_ sender: Any?) { selected?.webView?.pageZoom = 1 }
+    @objc func actualSize(_ sender: Any?) {
+        selected?.webView?.pageZoom = 1
+        showZoom(up: nil)
+    }
+    /// Chromium's own steps (90, 100, 110, 125…), as in any Chromium browser,
+    /// so a figure is never 109% or 121%.
+    private static let zoomSteps: [CGFloat] = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5]
     private func zoom(by factor: CGFloat) {
         guard let webView = selected?.webView else { return }
-        webView.pageZoom = max(0.3, min(3, (webView.pageZoom * factor * 100).rounded() / 100))
+        let now = webView.pageZoom
+        let next = factor > 1 ? Self.zoomSteps.first { $0 > now + 0.001 } : Self.zoomSteps.last { $0 < now - 0.001 }
+        webView.pageZoom = next ?? now
+        showZoom(up: factor > 1)
     }
 
     @objc func copyPageLink(_ sender: Any?) {
@@ -1527,7 +1793,7 @@ extension BrowserWindowController {
                     view.shownBefore = true
                     view.cameIntoView()
                 } else {
-                    chooser.offer(tabs.filter { !split.contains($0) })
+                    chooser.offer(tabs.filter { !split.contains($0) && self.split(of: $0) == nil })
                     pane.show(chooser)
                 }
             }
@@ -1548,6 +1814,9 @@ extension BrowserWindowController {
             if webView.superview !== pageHost {
                 webView.frame = pageHost.bounds
                 pageHost.addSubview(webView, positioned: under ? .below : .above, relativeTo: nil)
+                // Put aside hidden where it was before (another window, for
+                // a tab dragged in): it stayed hidden here, a blank page.
+                webView.isHidden = false
             } else if !placed || keep != nil {
                 // Only hidden since it was last in front (see SillWebView.park),
                 // or already here under a page kept for its video to float:
@@ -1632,26 +1901,33 @@ extension BrowserWindowController {
     /// than the one you're on pairs with yours at once, yours on the other
     /// side; the tab you're on itself waits there while you pick its partner.
     func split(_ tab: Tab, onLeft: Bool) {
+        // A tab is in one split at most: one already in another leaves it.
         if let current = selected, current !== tab, tabs.contains(where: { $0 === current }) {
-            split = onLeft ? SplitPair(left: nil, right: current) : SplitPair(left: current, right: nil)
+            dissolveSplit(of: current)
+            dissolveSplit(of: tab)
+            pendingSplit = onLeft ? SplitPair(left: nil, right: current) : SplitPair(left: current, right: nil)
             fillSplit(with: tab)
             return
         }
-        split = onLeft ? SplitPair(left: tab, right: nil) : SplitPair(left: nil, right: tab)
+        dissolveSplit(of: tab)
+        pendingSplit = onLeft ? SplitPair(left: tab, right: nil) : SplitPair(left: nil, right: tab)
+        showPairs()
         if selected === tab {
             placePages(keep: nil)
-            strip.showPair(nil, nil)
         } else {
             select(tab)
         }
     }
 
     fileprivate func fillSplit(with tab: Tab) {
-        guard let split else { return }
-        if split.left == nil { split.left = tab } else { split.right = tab }
+        guard let pair = pendingSplit else { return }
+        dissolveSplit(of: tab)
+        if pair.left == nil { pair.left = tab } else { pair.right = tab }
+        pendingSplit = nil
+        splits.append(pair)
         // The pair sits together in the row, left then right, in one capsule.
         // The tab just picked moves beside the one already there, which stays put.
-        if let left = split.left, let right = split.right,
+        if let left = pair.left, let right = pair.right,
            let l = tabs.firstIndex(where: { $0 === left }), let r = tabs.firstIndex(where: { $0 === right }), r != l + 1 {
             if tab === left {
                 tabs.remove(at: l)
@@ -1661,22 +1937,29 @@ extension BrowserWindowController {
                 tabs.insert(right, at: (tabs.firstIndex(where: { $0 === left }) ?? l) + 1)
             }
             strip.sync(animated: true)
-            changed()
         }
         select(tab)
         placePages(keep: nil)
-        strip.showPair(split.left, split.right)
+        showPairs()
         changed()
     }
 
+    /// Ends the split in front (or the one being made): its pages each go
+    /// back to being a tab of their own.
     @objc func unsplit() {
-        guard split != nil else { return }
-        split = nil
+        guard let pair = split else { return }
+        unsplit(pair)
+    }
+
+    func unsplit(_ pair: SplitPair) {
+        if pendingSplit === pair { pendingSplit = nil }
+        splits.removeAll { $0 === pair }
         changed()
-        strip.showPair(nil, nil)
+        showPairs()
         placePages(keep: nil)
         if let webView = selected?.webView { window?.makeFirstResponder(webView) }
     }
+
 
     var windowNumber: Int { window?.windowNumber ?? 0 }
 
@@ -1841,7 +2124,7 @@ extension BrowserWindowController {
         selected = tab
         tab.lastShown = Date()
         strip.select(tab)
-        strip.showPair(split.left, split.right)
+        showPairs()
         window?.title = tab.displayTitle
         updateNavigation()
         changed()

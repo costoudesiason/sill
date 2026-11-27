@@ -40,6 +40,8 @@ final class Tab: NSObject {
     let id = UUID()
     let isPrivate: Bool
     weak var host: TabHost?
+    /// Files chosen with the right-click menu's Save As…, by the address being saved.
+    var saveAs: [String: URL] = [:]
     /// When the window last showed this tab's title or address, the last two
     /// times, and whether a showing is waiting its turn.
     var retitled: (CFTimeInterval, CFTimeInterval) = (0, 0)
@@ -278,7 +280,7 @@ final class Tab: NSObject {
     /// Lets the page go to save memory; it comes back, with its history and
     /// place, when shown.
     func sleep() {
-        guard let webView, !webView.isLoading else { return }
+        guard let webView, !webView.isLoading, !Downloads.shared.isDownloading(in: webView) else { return }
         // Waking reloads it anyway: a crash noted before sleeping mustn't reload it twice.
         needsReload = false
         dropHeldPrompts()
@@ -357,7 +359,10 @@ final class Tab: NSObject {
     /// loading loads its address.
     func loadIfEmpty() {
         guard let webView, url != nil else { return }
-        let check = "(function(){ var b = document.body; var r = b || document.documentElement; return location.href === 'about:blank' || !r || (r.childElementCount === 0 && !r.textContent.trim()); })()"
+        // Only an HTML page can be empty this way: a PDF's own document is an
+        // empty body (its viewer is a frame of Chromium's, not in the page),
+        // and was reloaded each time its tab came back.
+        let check = "(function(){ if (location.href === 'about:blank') return true; var t = document.contentType; if (t !== 'text/html' && t !== 'application/xhtml+xml') return false; var r = document.body || document.documentElement; return !r || (r.childElementCount === 0 && !r.textContent.trim() && window.frames.length === 0); })()"
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self, weak webView] in
             guard let self, let webView, self.webView === webView, (webView as? SillWebView)?.isShown == true, !webView.isLoading else { return }
             webView.evaluateJavaScript(check, in: nil, in: Web.world) { [weak self, weak webView] result in
@@ -573,6 +578,16 @@ extension Tab {
 extension Tab: SEWebViewDelegate {
     func webView(_ view: SEWebView, shouldLoad url: URL, userGesture: Bool) -> Bool {
         let scheme = url.scheme?.lowercased() ?? ""
+        // Chromium's settings open only in a page Chromium hosts itself: in
+        // their own window, wherever they're asked for (typed, or a link).
+        if ChromiumSettings.open(url) {
+            // A tab that was only ever for them has nothing to show: it goes,
+            // rather than opening them again each time it comes to the front.
+            if view.url == nil || view.url?.absoluteString == "about:blank" {
+                DispatchQueue.main.async { [weak self] in if let self { self.host?.closeRequested(self) } }
+            }
+            return false
+        }
         let web = ["http", "https", "about", "data", "blob", "file", "javascript", "chrome", "devtools", "chrome-extension"].contains(scheme)
         if !web {
             // mailto:, facetime:, zoommtg:… belong to other apps.
@@ -694,29 +709,12 @@ extension Tab: SEWebViewDelegate {
         host?.pageFullScreen(self, on)
     }
 
-    /// Chromium's right-click menu, drawn as Sill's glass one; Chromium runs
-    /// what's picked.
-    func webView(_ view: SEWebView, menu items: [SEMenuItem], at point: NSPoint, choose: @escaping (Int) -> Void) {
+    /// A right-click in the page: Safari's menu, built from what it landed on.
+    func webView(_ view: SEWebView, contextMenu menu: SEContextMenu) {
         // An agent's right-click: the page's own menu, never Sill's over your screen.
-        if AgentActivity.shared.isWorking(on: self) { return choose(-1) }
-        guard let window = host?.window else { return choose(-1) }
-        var chosen = false
-        var entries: [GlassMenu.Entry] = []
-        for item in items {
-            if item.commandID < 0 {
-                if case .item = entries.last { entries.append(.separator) }
-                continue
-            }
-            let id = item.commandID
-            let title = item.title.replacingOccurrences(of: "New Window", with: "New Tab")
-            entries.append(.item(GlassMenu.Item(title: title, symbol: SillWebView.menuSymbols[title], isOn: item.checked,
-                                                isEnabled: item.enabled) { chosen = true; choose(id) }))
-        }
-        if case .separator = entries.last { entries.removeLast() }
-        guard !entries.isEmpty else { return choose(-1) }
-        let menu = GlassMenu(title: nil, entries: entries, searchable: entries.count > 8)
-        menu.onDismiss = { DispatchQueue.main.async { if !chosen { chosen = true; choose(-1) } } }
-        menu.show(in: window, at: point, from: nil)
+        if AgentActivity.shared.isWorking(on: self), PageMenu.Dump.path == nil { return }
+        guard let view = view as? SillWebView, view === webView else { return }
+        PageMenu.show(menu, for: self, in: view)
     }
 
     /// The page's process died. Shown, it comes back at once; behind another
@@ -743,22 +741,41 @@ extension Tab: SEWebViewDelegate {
     }
 
     /// Where a download goes: the Downloads folder, under a name not taken.
+    func webView(_ view: SEWebView, downloadNamed name: String, from source: URL) -> URL? {
+        // Save As… from the right-click menu: the file was chosen first.
+        let target: URL?
+        if let chosen = saveAs.removeValue(forKey: source.absoluteString) {
+            try? FileManager.default.removeItem(at: chosen)
+            Downloads.shared.started(chosen, from: view, in: host?.window, reveal: host?.isInFront(self) == true)
+            target = chosen
+        } else {
+            target = webView(view, downloadNamed: name)
+        }
+        return target
+    }
+
     func webView(_ view: SEWebView, downloadNamed name: String) -> URL? {
         let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
         var target = folder.appendingPathComponent(name.isEmpty ? "Download" : name)
         let base = target.deletingPathExtension().lastPathComponent, ext = target.pathExtension
         var n = 2
-        while FileManager.default.fileExists(atPath: target.path) {
+        // Not a name being downloaded into right now either (Chromium writes
+        // "name.crdownload" until it's done): two at once shared one row.
+        while FileManager.default.fileExists(atPath: target.path)
+                || FileManager.default.fileExists(atPath: target.path + ".crdownload")
+                || Downloads.shared.items.contains(where: { $0.active && $0.url == target }) {
             target = folder.appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)")
             n += 1
         }
-        (host?.window?.windowController as? BrowserWindowController)?.toast("Downloading “\(target.lastPathComponent)”")
+        // The list opens for a download you started in the tab you're on;
+        // one an agent started, or a background tab's, waits in it unannounced.
+        let yours = !openedByAgent && host?.isInFront(self) == true
+        Downloads.shared.started(target, from: view, in: host?.window, reveal: yours)
         return target
     }
 
-    func webView(_ view: SEWebView, download file: URL, progress: Double, done: Bool) {
-        guard done else { return }
-        (host?.window?.windowController as? BrowserWindowController)?.toast("Downloaded “\(file.lastPathComponent)”")
+    func webView(_ view: SEWebView, download file: URL, progress: Double, done: Bool, failed: Bool) {
+        Downloads.shared.progressed(file, from: view, fraction: progress, done: done, failed: failed)
     }
 
     /// A frame of its video for picture in picture.

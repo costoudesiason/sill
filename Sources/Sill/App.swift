@@ -13,7 +13,9 @@ struct SessionWindow: Codable {
     var tabs: [SessionTab]
     var selected: Int
     var frame: String?
-    /// Two tabs side by side, by place in `tabs`, and the left one's share.
+    /// Tabs side by side, by place in `tabs`, and the left one's share.
+    var splits: [SessionSplit]?
+    /// The one split of sessions saved before a window could hold several.
     var split: SessionSplit?
 }
 
@@ -102,7 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for state in windows where !state.tabs.isEmpty {
             let browser = makeBrowser(isPrivate: false)
             if let frame = state.frame { browser.window?.setFrame(from: frame) }
-            browser.restore(state.tabs, selectedIndex: state.selected, split: state.split)
+            browser.restore(state.tabs, selectedIndex: state.selected, splits: state.splits ?? state.split.map { [$0] } ?? [])
             browser.showWindow(nil)
         }
         return !browsers.isEmpty
@@ -111,6 +113,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { newWindow(nil) }
         return true
+    }
+
+    /// Right-click on Sill in the Dock: a new window, as any browser has.
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        let window = NSMenuItem(title: "New Window", action: #selector(newWindowFromDock(_:)), keyEquivalent: "")
+        window.target = self
+        let privateWindow = NSMenuItem(title: "New Private Window", action: #selector(newWindowFromDock(_:)), keyEquivalent: "")
+        privateWindow.target = self
+        privateWindow.tag = 1
+        menu.addItem(window)
+        menu.addItem(privateWindow)
+        return menu
+    }
+
+    @objc private func newWindowFromDock(_ sender: NSMenuItem) {
+        NSApp.activate()
+        if sender.tag == 1 { newPrivateWindow(sender) } else { newWindow(sender) }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -172,6 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func open(_ url: URL) {
+        if ChromiumSettings.open(url) { return }
         let browser = current(isPrivate: false) ?? {
             let made = makeBrowser(isPrivate: false)
             made.showWindow(nil)
@@ -223,13 +244,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 kept.append(tab)
                 return SessionTab(url: url.absoluteString, title: tab.title, shown: tab.seenAt?.timeIntervalSince1970)
             }
-            let selected = browser.tabs.firstIndex { $0 === browser.selected } ?? 0
-            var split: SessionSplit?
-            if let pair = browser.split, let left = pair.left, let right = pair.right,
-               let l = kept.firstIndex(where: { $0 === left }), let r = kept.firstIndex(where: { $0 === right }) {
-                split = SessionSplit(left: l, right: r, fraction: Double(pair.fraction))
+            // Among the tabs kept (http and https), which the index is into.
+            let selected = kept.firstIndex { $0 === browser.selected } ?? 0
+            let splits = browser.splits.compactMap { pair -> SessionSplit? in
+                guard let left = pair.left, let right = pair.right,
+                      let l = kept.firstIndex(where: { $0 === left }), let r = kept.firstIndex(where: { $0 === right }) else { return nil }
+                return SessionSplit(left: l, right: r, fraction: Double(pair.fraction))
             }
-            return SessionWindow(tabs: tabs, selected: selected, frame: browser.window?.frameDescriptor, split: split)
+            return SessionWindow(tabs: tabs, selected: selected, frame: browser.window?.frameDescriptor,
+                                 splits: splits.isEmpty ? nil : splits)
         }
     }
 
@@ -283,7 +306,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Clear History")
         alert.addButton(withTitle: "Cancel")
         alert.buttons.first?.hasDestructiveAction = true
-        if alert.runModal() == .alertFirstButtonReturn { History.shared.clear() }
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let gone = History.shared.clear()
+        guard !gone.isEmpty else { return }
+        current?.toast("Cleared all history", action: ("Undo", { History.shared.restore(gone) }))
     }
 
     @objc func resetSitePermissions(_ sender: Any?) {
@@ -313,7 +339,8 @@ enum MainMenu {
             item("Settings…", #selector(AppDelegate.showSettings(_:)), ",", target: app),
             item("Make Sill Your Default Browser", #selector(AppDelegate.makeDefaultBrowser(_:)), target: app),
             .separator(),
-            item("Clear History…", #selector(AppDelegate.clearHistory(_:)), target: app),
+            // The window in front asks how far back; with no window, everything.
+            item("Clear History…", #selector(AppDelegate.clearHistory(_:))),
             item("Reset Website Permissions", #selector(AppDelegate.resetSitePermissions(_:)), target: app),
             .separator(),
             servicesItem(),
@@ -357,6 +384,8 @@ enum MainMenu {
         main.addItem(submenu("View", [
             item("Reload Page", #selector(BrowserWindowController.reloadPage(_:)), "r"),
             item("Reload Page From Origin", #selector(BrowserWindowController.reloadFromOrigin(_:)), "r", [.command, .option]),
+            // ⇧⌘R, as other browsers have it (Safari's is Reader, which Sill hasn't).
+            hidden(item("Reload Page From Origin", #selector(BrowserWindowController.reloadFromOrigin(_:)), "r", [.command, .shift])),
             item("Stop", #selector(BrowserWindowController.stopLoading(_:)), "."),
             .separator(),
             item("Actual Size", #selector(BrowserWindowController.actualSize(_:)), "0"),
@@ -376,6 +405,8 @@ enum MainMenu {
             item("Forward", #selector(BrowserWindowController.goForward(_:)), "]"),
             .separator(),
             item("Show History", #selector(BrowserWindowController.showHistory(_:)), "y"),
+            .separator(),
+            item("Clear History…", #selector(BrowserWindowController.clearHistory(_:))),
         ]))
 
         var tabItems: [NSMenuItem] = [

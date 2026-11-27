@@ -350,6 +350,8 @@ enum AgentCommands {
             host.addSubview(view, positioned: .below, relativeTo: nil)
         }
         view.agentAtWork = true
+        // Drawn in the window but not yours: a load there never takes the keys.
+        view.takesFocusOnLoad = false
         if view.pageHidden { view.insistShown() }
     }
 
@@ -373,6 +375,7 @@ enum AgentCommands {
         }
         guard view.agentAtWork else { return }
         view.agentAtWork = false
+        view.takesFocusOnLoad = !view.drawingAhead
         if let browser = browser(of: tab), onScreen(tab, in: browser) { return }
         view.park()
     }

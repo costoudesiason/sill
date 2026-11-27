@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Combine
 
 /// ⌘T and ⌘L: one glass panel over the page with a field and a list, the
 /// way Spotlight floats over the desktop. ⌘T opens what you pick in a new
@@ -14,6 +15,8 @@ final class Palette: NSObject {
         case go(URL)
         case search(String)
         case suggestion(String)
+        /// A search made before, from history.
+        case pastSearch(String)
         case tab(Tab)
         case visit(Visit)
     }
@@ -48,7 +51,12 @@ final class Palette: NSObject {
     /// Settings in the card, in place of the field, list and footer, and the
     /// glass X that turns it back: the same size as the settings button.
     private var settingsHost: NSHostingView<PaletteSettingsView>?
-    private let backButton = GlassIconButton(symbol: "xmark", label: "Back (Esc)", weight: .semibold)
+    /// Back from a page of the settings (Agents) to their list: glass, in
+    /// the card's other top corner, the X's twin.
+    private let pageBackButton = GlassIconButton(symbol: "chevron.backward", label: "Back to Settings", weight: .semibold, pointSize: 16)
+    private let settingsNav = SettingsNav()
+    private var navWatch: AnyCancellable?
+    private let backButton = GlassIconButton(symbol: "xmark", label: "Close Settings (Esc)", weight: .semibold, pointSize: 16)
     private(set) var showingSettings = false
 
     private(set) var isOpen = false
@@ -57,10 +65,20 @@ final class Palette: NSObject {
     /// The text the rows were made for: what they set in semibold.
     private var shownQuery = ""
     private var suggestions: [String] = []
+    /// The text `suggestions` were asked for: until the answer for newer
+    /// text comes, only those that still begin with it are shown, so the
+    /// list doesn't empty and fill again on every key.
+    private var suggestionsFor = ""
+    /// Answers already had while the palette is open: deleting back shows
+    /// them at once.
+    private var suggestionCache: [String: [String]] = [:]
     private var suggestionTask: URLSessionDataTask?
     private var suggestionTimer: Timer?
-    /// What was actually typed, not counting the inline completion.
+    /// What was actually typed, not counting the inline completion: what
+    /// the rows, the search and the suggestions are made for.
     private var typed = ""
+    /// The rest of a site's address, shown selected after what was typed.
+    private var inline: String?
     private var completing = true
 
     static let width: CGFloat = 680
@@ -119,6 +137,12 @@ final class Palette: NSObject {
         table.delegate = self
         table.target = self
         table.action = #selector(clicked)
+        table.onRightClick = { [weak self] row, point in
+            guard let self, row < self.rows.count, self.rows[row].item != nil else { return }
+            self.table.selectRowIndexes([row], byExtendingSelection: false)
+            self.updateFooter()
+            self.showActions(at: point)
+        }
         table.onHover = { [weak self] row in
             guard let self, row < self.rows.count, self.rows[row].item != nil, self.table.selectedRow != row else { return }
             self.table.selectRowIndexes([row], byExtendingSelection: false)
@@ -145,23 +169,50 @@ final class Palette: NSObject {
         footer.passes = [footerGlass, footerContent]
         content.addSubview(footer)
 
+        pageBackButton.target = self
+        pageBackButton.action = #selector(settingsPageBack)
+        pageBackButton.isHidden = true
+        navWatch = settingsNav.$page.dropFirst().sink { [weak self] page in
+            DispatchQueue.main.async { self?.showPageBack(page == .agents) }
+        }
         backButton.target = self
         backButton.action = #selector(closeSettings)
         backButton.keyEquivalent = "\u{1b}"
         backButton.isHidden = true
     }
 
-    @objc private func closeSettings() { showSettings(false) }
+    @objc private func closeSettings() {
+        // Esc closes what's on top first: the engine menu, then the Agents page.
+        if GlassMenu.dismissCurrent() { return }
+        if settingsNav.page == .agents { return settingsPageBack() }
+        showSettings(false)
+    }
+
+    @objc private func settingsPageBack() {
+        if Motion.reduced { settingsNav.page = .main } else { withAnimation(.smooth(duration: 0.28)) { settingsNav.page = .main } }
+    }
+
+    private func showPageBack(_ on: Bool) {
+        if on {
+            if pageBackButton.superview !== content { content.addSubview(pageBackButton) }
+            layoutBackButton()
+            pageBackButton.alphaValue = 0
+            pageBackButton.isHidden = false
+            Motion.animate(0.2) { pageBackButton.animator().alphaValue = 1 }
+        } else {
+            Motion.animate(0.16, { self.pageBackButton.animator().alphaValue = 0 }, completion: { [weak self] in
+                if self?.settingsNav.page == .main { self?.pageBackButton.isHidden = true }
+            })
+        }
+    }
 
     // MARK: - opening and closing
 
-    func open(_ mode: Mode, in stage: NSView) {
-        guard let browser else { return }
-        self.mode = mode
-        // Glass picks its look from what's behind it a frame late; pin the
-        // window's own, and fixed colours with it, before anything is drawn,
-        // so no text (placeholder included) flips from dark to light.
-        let appearance = stage.window?.effectiveAppearance ?? NSApp.effectiveAppearance
+    /// The window's look, pinned on the card and its fixed colours. Again
+    /// when the look changes with the palette open (Settings' Light/Dark):
+    /// the card stayed in the old one until it was closed.
+    func takeAppearance(of window: NSWindow?) {
+        let appearance = window?.effectiveAppearance ?? NSApp.effectiveAppearance
         let named = NSAppearance(named: appearance.bestMatch(from: [.aqua, .darkAqua]) ?? .aqua)
         card.appearance = named
         content.appearance = named
@@ -170,10 +221,22 @@ final class Palette: NSObject {
         // enough that a white page behind doesn't turn it pale, light enough
         // to stay glass.
         glass.style = .regular
-        glass.tintColor = Ink.current.dark ? NSColor(white: 0.16, alpha: 0.3) : nil
+        // (0.3 left it mid-grey over a white page, white text on it under
+        // 3:1; at 0.55 it holds 4.5:1 or better, still glass over dark pages.)
+        glass.tintColor = Ink.current.dark ? NSColor(white: 0.12, alpha: 0.55) : nil
         field.textColor = Ink.current.primary
         searchIcon.contentTintColor = Ink.current.secondary
         pill.needsLayout = true
+        if card.superview != nil { rebuild(keepSelection: true, fresh: true) }
+    }
+
+    func open(_ mode: Mode, in stage: NSView) {
+        guard let browser else { return }
+        self.mode = mode
+        // Glass picks its look from what's behind it a frame late; pin the
+        // window's own, and fixed colours with it, before anything is drawn,
+        // so no text (placeholder included) flips from dark to light.
+        takeAppearance(of: stage.window)
         ready(in: stage)
         // Above whatever came after it was readied, as when it was made here.
         if !raised, stage.subviews.last !== card {
@@ -192,12 +255,16 @@ final class Palette: NSObject {
         }
         field.placeholderAttributedString = NSAttributedString(
             string: mode == .tabs ? "Search tabs" : mode == .history ? "Search history"
-                : mode == .newTab ? "Search or enter website" : "Search or enter address",
+                : mode == .newTab ? (browser.isPrivate ? "Search privately or enter website" : "Search or enter website")
+                : "Search or enter address",
             attributes: [.foregroundColor: Ink.current.tertiary, .font: field.font!])
         field.stringValue = initial
         typed = initial
+        inline = nil
         completing = false
         suggestions = []
+        suggestionsFor = ""
+        suggestionCache = [:]
         layout(in: stage)
         // From scratch: the rows on screen were drawn in the last opening's colours.
         rebuild(fresh: true)
@@ -211,9 +278,29 @@ final class Palette: NSObject {
             editor.textColor = Ink.current.primary
             editor.insertionPointColor = .controlAccentColor
             editor.typingAttributes = [.foregroundColor: Ink.current.primary, .font: field.font!]
+            Self.plain(editor)
             editor.selectAll(nil)
         }
         if !wasOpen { appear() }
+    }
+
+    /// Addresses and searches, typed as they are: none of the system's
+    /// corrections, substitutions or predictions, which turned "--" into a
+    /// dash, "teh" into "the", and drew grey guesses over the completion.
+    private static func plain(_ editor: NSTextView) {
+        editor.isAutomaticSpellingCorrectionEnabled = false
+        editor.isContinuousSpellCheckingEnabled = false
+        editor.isGrammarCheckingEnabled = false
+        editor.isAutomaticTextReplacementEnabled = false
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
+        editor.isAutomaticLinkDetectionEnabled = false
+        editor.isAutomaticDataDetectionEnabled = false
+        editor.isAutomaticTextCompletionEnabled = false
+        editor.smartInsertDeleteEnabled = false
+        editor.inlinePredictionType = .no
+        editor.mathExpressionCompletionType = .no
+        editor.writingToolsBehavior = .none
     }
 
     /// Brought above the window's other views once, on its first opening.
@@ -341,7 +428,7 @@ final class Palette: NSObject {
 
     // MARK: - results
 
-    private var query: String { field.stringValue.trimmingCharacters(in: .whitespaces) }
+    private var query: String { typed.trimmingCharacters(in: .whitespaces) }
 
     private func rebuild(keepSelection: Bool = false, fresh: Bool = false) {
         guard let browser else { return }
@@ -388,15 +475,36 @@ final class Palette: NSObject {
                 }
             }
         } else {
-            // The top hit: what Return does.
+            // The top hit, what Return does: the site the completion finished
+            // (or the address typed), then a search for exactly what was
+            // typed, never for the completion ("you", not "youtube.com").
             var top: [Item] = []
             let lowered = text.lowercased()
-            if let url = Address.url(from: text) {
-                top = [.go(url), .search(text)]
-            } else {
-                top = [.search(text)]
+            if let inline, let url = Address.url(from: text + inline) {
+                top.append(.go(url))
+            } else if let url = Address.url(from: text) {
+                top.append(.go(url))
             }
+            top.append(.search(text))
             rows += top.map { .item($0) }
+
+            // Searches: yours from before first, then the engine's, each once.
+            var said: Set<String> = [lowered]
+            var searches: [Item] = []
+            if !browser.isPrivate {
+                for q in History.shared.searches(matching: text, limit: 3) where said.insert(q.lowercased()).inserted {
+                    searches.append(.pastSearch(q))
+                }
+            }
+            for q in suggestions where searches.count < 6 {
+                let lower = q.lowercased()
+                guard suggestionsFor == text || lower.hasPrefix(lowered), said.insert(lower).inserted else { continue }
+                searches.append(.suggestion(q))
+            }
+            if !searches.isEmpty {
+                rows.append(.header("\(Preferences.shared.engine.name) Suggestions"))
+                rows += searches.prefix(5).map { .item($0) }
+            }
 
             let tabMatches = others.filter {
                 $0.displayTitle.lowercased().contains(lowered) || Address.display($0.url).lowercased().contains(lowered)
@@ -408,16 +516,14 @@ final class Palette: NSObject {
             if !browser.isPrivate {
                 let topURL = top.compactMap { if case .go(let url) = $0 { return History.key(url) }; return nil }.first
                 let open = Set(tabMatches.compactMap { $0.url.flatMap(History.key) })
-                let visits = History.shared.search(text, limit: 8).filter { $0.url != topURL && !open.contains($0.url) }
+                // Results pages are the searches above, not pages of their own.
+                let visits = History.shared.search(text, limit: 14).filter {
+                    $0.url != topURL && !open.contains($0.url) && SearchEngine.google.query(in: $0.address) == nil
+                }
                 if !visits.isEmpty {
                     rows.append(.header("History"))
                     rows += visits.prefix(6).map { .item(.visit($0)) }
                 }
-            }
-            let fresh = suggestions.filter { $0.lowercased() != lowered }.prefix(5)
-            if !fresh.isEmpty {
-                rows.append(.header("\(Preferences.shared.engine.name) Suggestions"))
-                rows += fresh.map { .item(.suggestion($0)) }
             }
         }
         show(rows, for: text, fresh: fresh)
@@ -472,7 +578,7 @@ final class Palette: NSObject {
         switch item {
         case .go(let url): "go:" + url.absoluteString
         case .search(let q): "search:" + q
-        case .suggestion(let q): "suggest:" + q
+        case .suggestion(let q), .pastSearch(let q): "suggest:" + q.lowercased()
         case .tab(let tab): "tab:" + tab.id.uuidString
         case .visit(let visit): "visit:" + visit.url
         }
@@ -520,7 +626,7 @@ final class Palette: NSObject {
         if row >= 0, row < rows.count, let item = rows[row].item {
             switch item {
             case .tab: text = "Switch to Tab"
-            case .search, .suggestion: text = mode == .newTab ? "Search in New Tab" : "Search"
+            case .search, .suggestion, .pastSearch: text = mode == .newTab ? "Search in New Tab" : "Search"
             default: break
             }
         }
@@ -539,9 +645,11 @@ final class Palette: NSObject {
               Address.url(from: text) == nil || text.contains(" "),
               let url = Preferences.shared.engine.suggestions(text)
         else {
-            if !suggestions.isEmpty { suggestions = []; rebuild(keepSelection: true) }
+            if !suggestions.isEmpty { suggestions = []; suggestionsFor = ""; rebuild(keepSelection: true) }
             return
         }
+        // Had already (put in place before the rows were made): nothing to ask.
+        if suggestionCache[text] != nil { return }
         // Only once typing pauses, briefly.
         suggestionTimer = Timer.scheduledTimer(withTimeInterval: 0.07, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -550,8 +658,12 @@ final class Palette: NSObject {
                     guard let data else { return }
                     let list = Self.parseSuggestions(data)
                     DispatchQueue.main.async {
-                        guard let self, self.isOpen, self.query == text else { return }
+                        guard let self, self.isOpen else { return }
+                        if self.suggestionCache.count > 300 { self.suggestionCache = [:] }
+                        self.suggestionCache[text] = list
+                        guard self.query == text else { return }
                         self.suggestions = list
+                        self.suggestionsFor = text
                         self.rebuild(keepSelection: true)
                     }
                 }
@@ -559,6 +671,11 @@ final class Palette: NSObject {
                 task.resume()
             }
         }
+    }
+
+    /// The answer had before for this text, put in place before its rows are made.
+    private func useCachedSuggestions() {
+        if let cached = suggestionCache[query] { suggestions = cached; suggestionsFor = query }
     }
 
     nonisolated private static func parseSuggestions(_ data: Data) -> [String] {
@@ -595,6 +712,10 @@ final class Palette: NSObject {
             layoutBackButton()
             host.isHidden = false
             backButton.isHidden = false
+            // The back button as the page it opens on calls for (always the
+            // list: reset when they last closed).
+            pageBackButton.isHidden = settingsNav.page != .agents
+            pageBackButton.alphaValue = 1
             // Keys go to the settings, never to the hidden field; Esc is the X's.
             if content.window?.makeFirstResponder(host) != true { content.window?.makeFirstResponder(nil) }
             Motion.animate(duration, {
@@ -608,6 +729,17 @@ final class Palette: NSObject {
             })
         } else {
             guard let host = settingsHost else { return }
+            // At once, not when the fade ends: opened again straight away
+            // (⌘, after closing), it came up on Agents with no back button.
+            GlassMenu.dismissCurrent()
+            settingsNav.page = .main
+            pageBackButton.isHidden = true
+            // A change of engine shows at once in what's listed.
+            suggestionCache = [:]
+            suggestions = []
+            suggestionsFor = ""
+            rebuild()
+            askForSuggestions()
             searchParts.forEach { $0.isHidden = false }
             content.window?.makeFirstResponder(field)
             if let editor = field.currentEditor() { editor.selectedRange = NSRange(location: (field.stringValue as NSString).length, length: 0) }
@@ -615,6 +747,7 @@ final class Palette: NSObject {
                 host.animator().frame = content.bounds.offsetBy(dx: shift, dy: 0)
                 host.animator().alphaValue = 0
                 backButton.animator().alphaValue = 0
+                pageBackButton.animator().alphaValue = 0
                 searchParts.forEach { $0.animator().alphaValue = 1 }
             }, completion: { [weak self] in
                 guard let self, !self.showingSettings else { return }
@@ -622,6 +755,7 @@ final class Palette: NSObject {
                 // drawn again from scratch (6 to 9 ms, measured; 2 ms shown again).
                 host.isHidden = true
                 self.backButton.isHidden = true
+
             })
         }
     }
@@ -630,7 +764,7 @@ final class Palette: NSObject {
         if let settingsHost { return settingsHost }
         let host = NSHostingView(rootView: PaletteSettingsView(onChoose: { [weak self] choice, rect in
             self?.choose(choice, at: rect)
-        }))
+        }, nav: settingsNav))
         settingsHost = host
         return host
     }
@@ -650,8 +784,9 @@ final class Palette: NSObject {
     }
 
     private func layoutBackButton() {
-        let size: CGFloat = 36
+        let size: CGFloat = 40
         backButton.frame = NSRect(x: content.bounds.width - 12 - size, y: (Self.fieldHeight - size) / 2, width: size, height: size)
+        pageBackButton.frame = NSRect(x: 12, y: (Self.fieldHeight - size) / 2, width: size, height: size)
     }
 
     /// A choice in the settings opens Sill's glass menu under its value.
@@ -666,6 +801,17 @@ final class Palette: NSObject {
             entries = SearchEngine.allCases.map { engine in
                 .item(GlassMenu.Item(title: engine.name, isOn: prefs.engine == engine) { prefs.engine = engine })
             }
+        case .clear(let data):
+            entries = [
+                .item(GlassMenu.Item(title: "History…", symbol: "clock") { [weak self] in
+                    // ⌘Y with its clear menu: a range, not only everything.
+                    DispatchQueue.main.async { self?.browser?.clearHistory(nil) }
+                }),
+                .item(GlassMenu.Item(title: "Cookies and Website Data…", symbol: "externaldrive", run: data)),
+                .item(GlassMenu.Item(title: "Website Permissions…", symbol: "hand.raised") {
+                    AppDelegate.shared.resetSitePermissions(nil)
+                }),
+            ]
         }
         // The rect is in the settings' own (top-left) space: under its right end.
         let corner = host.convert(NSPoint(x: rect.maxX - 14, y: rect.maxY - 4), to: nil)
@@ -673,9 +819,10 @@ final class Palette: NSObject {
     }
 
     /// ⌘K or the pill's Actions: what else can be done with the chosen row.
-    func showActions() {
+    /// A right-click on a row shows the same at the pointer.
+    func showActions(at point: NSPoint? = nil) {
         // ⌘K or a click on Actions while its menu is up closes it.
-        guard GlassMenu.shouldOpen(from: pill) else { return }
+        guard point != nil || GlassMenu.shouldOpen(from: pill) else { return }
         let row = table.selectedRow
         guard row >= 0, row < rows.count, let item = rows[row].item, let browser else { return }
         let menu = NSMenu()
@@ -684,7 +831,7 @@ final class Palette: NSObject {
         case .go(let u): url = u
         case .visit(let v): url = v.address
         case .tab(let t): url = t.url
-        case .search(let q), .suggestion(let q): url = Preferences.shared.engine.search(q)
+        case .search(let q), .suggestion(let q), .pastSearch(let q): url = Preferences.shared.engine.search(q)
         }
         if case .tab(let tab) = item {
             menu.addItem(ClosureMenuItem(title: "Switch to Tab") { [weak self] in self?.perform(item) })
@@ -712,17 +859,25 @@ final class Palette: NSObject {
             menu.addItem(.separator())
             menu.addItem(ClosureMenuItem(title: "Copy Link") { Pasteboard.copy(url) })
         }
+        var siteTitle: String?
         if case .visit(let visit) = item {
-            menu.addItem(ClosureMenuItem(title: "Remove from History") { [weak self] in
-                History.shared.remove(visit.url)
-                self?.rebuild()
-            })
+            menu.addItem(.separator())
+            menu.addItem(ClosureMenuItem(title: "Remove from History") { [weak self] in self?.removeSelectedVisit() })
+            // The whole site, when there is more of it than this one page.
+            if let host = visit.address?.host() {
+                let site = Domains.bare(host)
+                let more = History.shared.visits.values.contains { $0.url != visit.url && Domains.bare($0.address?.host()) == site }
+                if more {
+                    siteTitle = "Remove All from \(site)"
+                    menu.addItem(ClosureMenuItem(title: siteTitle!) { [weak self] in self?.removeSite(site) })
+                }
+            }
         }
         if mode == .history {
             menu.addItem(.separator())
             menu.addItem(ClosureMenuItem(title: "Clear History…") { [weak self] in
-                AppDelegate.shared.clearHistory(nil)
-                self?.rebuild()
+                // After this menu has gone: one glass menu at a time.
+                DispatchQueue.main.async { self?.showClearMenu() }
             })
         }
         // Raycast's way: a glass menu rising from the Actions pill, right-aligned.
@@ -733,16 +888,87 @@ final class Palette: NSObject {
             "Open in New Tab": "plus.square.on.square", "Open in Background Tab": "square.stack",
             "Open Here": "arrow.turn.down.right", "Copy Link": "link", "Remove from History": "trash",
             "Clear History…": "clock.arrow.circlepath",
-        ], keys: ["Open in New Tab": ["↩"], "Switch to Tab": ["↩"], "Copy Link": ["⇧", "⌘", "C"]])
+        ].merging(siteTitle.map { [$0: "trash.square"] } ?? [:]) { a, _ in a },
+        keys: ["Open in New Tab": ["↩"], "Switch to Tab": ["↩"], "Copy Link": ["⇧", "⌘", "C"],
+               "Remove from History": ["⌘", "⌫"]])
         let title: String
         switch item {
         case .tab(let tab): title = tab.displayTitle
         case .visit(let visit): title = visit.title.isEmpty ? Address.display(visit.address) : visit.title
         case .go(let url): title = Address.display(url)
-        case .search(let q), .suggestion(let q): title = q
+        case .search(let q), .suggestion(let q), .pastSearch(let q): title = q
         }
-        GlassMenu(title: title, entries: entries)
+        if let point {
+            GlassMenu(title: title, entries: entries, searchable: false).show(in: window, at: point, from: nil)
+        } else {
+            GlassMenu(title: title, entries: entries)
+                .show(in: window, at: NSPoint(x: anchor.maxX, y: anchor.maxY + 8), above: true, alignRight: true, from: pill)
+        }
+    }
+
+    // MARK: - removing history
+
+    /// ⌘⌫ (or ⌫ with nothing typed) in ⌘Y, or Remove from History: the
+    /// chosen page goes at once, the next one is chosen, and Undo brings it back.
+    private func removeSelectedVisit() {
+        let row = table.selectedRow
+        guard mode == .history || mode == .newTab || mode == .address,
+              row >= 0, row < rows.count, case .visit(let visit)? = rows[row].item,
+              let gone = History.shared.remove(visit.url) else { return }
+        rebuild()
+        // The row that took its place, else the one before.
+        let selectable = rows.indices.filter { rows[$0].item != nil }
+        select(selectable.first { $0 >= row } ?? selectable.last)
+        let name = visit.title.isEmpty ? Address.display(visit.address) : visit.title
+        offerUndo("Removed “\(name)”", [gone])
+    }
+
+    private func removeSite(_ site: String) {
+        let gone = History.shared.remove { Domains.bare($0.address?.host()) == site }
+        rebuild()
+        offerUndo(gone.count == 1 ? "Removed 1 page from \(site)" : "Removed \(gone.count) pages from \(site)", gone)
+    }
+
+    /// How far back to clear, as Safari asks it: the last hour, today, today
+    /// and yesterday, or everything. Each but the last goes at once, with Undo.
+    func showClearMenu() {
+        // Never a click's toggle (it follows the Actions menu, or a menu
+        // command), so not held back by a menu from the pill just closing.
+        guard let window = pill.window else { return }
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let ranges: [(String, Date)] = [
+            ("Last Hour", Date().addingTimeInterval(-3600)),
+            ("Today", today),
+            ("Today and Yesterday", calendar.date(byAdding: .day, value: -1, to: today) ?? today),
+        ]
+        // Only the ranges with something in them; nothing greyed out.
+        var entries: [GlassMenu.Entry] = ranges.compactMap { title, since in
+            let count = History.shared.visits.values.reduce(0) { $1.last >= since ? $0 + 1 : $0 }
+            guard count > 0 else { return nil }
+            return .item(GlassMenu.Item(title: "Clear \(title)", symbol: "clock",
+                                        subtitle: count == 1 ? "1 page" : "\(count) pages") { [weak self] in
+                let gone = History.shared.remove { $0.last >= since }
+                self?.rebuild()
+                self?.offerUndo("Cleared \(title.lowercased()) of history", gone)
+            })
+        }
+        if !entries.isEmpty { entries.append(.separator) }
+        entries.append(.item(GlassMenu.Item(title: "Clear All History…", symbol: "trash") { [weak self] in
+            AppDelegate.shared.clearHistory(nil)
+            self?.rebuild()
+        }))
+        let anchor = pill.convert(pill.actionsAnchor, to: nil)
+        GlassMenu(title: "Clear History", entries: entries, searchable: false)
             .show(in: window, at: NSPoint(x: anchor.maxX, y: anchor.maxY + 8), above: true, alignRight: true, from: pill)
+    }
+
+    private func offerUndo(_ text: String, _ gone: [Visit]) {
+        guard !gone.isEmpty else { return }
+        browser?.toast(text, action: ("Undo", { [weak self] in
+            History.shared.restore(gone)
+            self?.rebuild(keepSelection: true)
+        }))
     }
 
     @objc private func clicked() {
@@ -769,7 +995,7 @@ final class Palette: NSObject {
         switch item {
         case .tab(let tab): handsOff = tab !== browser.selected
         case .visit(let visit): handsOff = mode == .newTab && visit.address != nil
-        case .go, .search, .suggestion: handsOff = mode == .newTab
+        case .go, .search, .suggestion, .pastSearch: handsOff = mode == .newTab
         }
         close(focusPage: !handsOff)
         switch item {
@@ -779,27 +1005,70 @@ final class Palette: NSObject {
             browser.navigate(to: url, newTab: mode == .newTab, typed: true)
         case .visit(let visit):
             if let url = visit.address { browser.navigate(to: url, newTab: mode == .newTab || mode == .history, typed: true) }
-        case .search(let q), .suggestion(let q):
+        case .search(let q), .suggestion(let q), .pastSearch(let q):
             browser.navigate(to: engine.search(q), newTab: mode == .newTab, typed: false)
         }
     }
 
     // MARK: - inline completion
 
+    /// After each change to the text: notes what was typed and, if it
+    /// begins a site you've been to, puts the rest of its address after it,
+    /// selected, so the next letter typed replaces it.
     private func complete() {
-        guard let editor = field.currentEditor() as? NSTextView else { return }
+        inline = nil
+        guard let editor = field.currentEditor() as? NSTextView else { typed = field.stringValue; return }
+        let before = (typed as NSString).length
         let text = editor.string
         typed = text
-        guard completing, !text.isEmpty, editor.selectedRange().location == (text as NSString).length,
-              let completion = History.shared.completion(for: text)
+        let length = (text as NSString).length
+        // Not while a letter is being composed (accents, Japanese), nor on a
+        // paste: what was pasted is what was meant. A paste from the Edit
+        // menu or a right-click comes with no ⌘ key, but it brings more than
+        // the one letter typing does.
+        let event = NSApp.currentEvent
+        let pasted = (event?.type == .keyDown && event?.modifierFlags.contains(.command) == true) || length - before > 1
+        guard completing, !pasted, !editor.hasMarkedText(), !text.isEmpty,
+              editor.selectedRange() == NSRange(location: length, length: 0),
+              let completion = History.shared.completion(for: text),
+              completion.lowercased().hasPrefix(text.lowercased())
         else { return }
         browser?.expect(Address.url(from: completion))
         // Keep the case they typed; add the rest, selected, so typing on replaces it.
         let rest = String(completion.dropFirst(text.count))
         guard !rest.isEmpty else { return }
-        let start = (text as NSString).length
         editor.string = text + rest
-        editor.setSelectedRange(NSRange(location: start, length: (rest as NSString).length))
+        editor.setSelectedRange(NSRange(location: length, length: (rest as NSString).length))
+        // Undo knows nothing of the completion: undoing the typing under it
+        // left half an address ("thub.com"). What's typed is short to retype.
+        editor.undoManager?.removeAllActions()
+        inline = rest
+    }
+
+    /// Whether the completion is there as it was put: after the text, selected.
+    private func showsInline(_ editor: NSTextView) -> Bool {
+        guard let inline else { return false }
+        let text = editor.string as NSString, rest = (inline as NSString).length
+        let range = editor.selectedRange()
+        return range.length == rest && NSMaxRange(range) == text.length && editor.string == typed + inline
+    }
+
+    /// The completion, kept as typed text (Tab, →, End, a click past it).
+    private func acceptInline(_ editor: NSTextView, moveToEnd: Bool) {
+        inline = nil
+        typed = editor.string
+        if moveToEnd { editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0)) }
+        useCachedSuggestions()
+        rebuild()
+        askForSuggestions()
+    }
+
+    /// The completion taken away, leaving what was typed (Esc, Delete).
+    private func dropInline(_ editor: NSTextView) {
+        inline = nil
+        editor.string = typed
+        editor.setSelectedRange(NSRange(location: (typed as NSString).length, length: 0))
+        rebuild()
     }
 }
 
@@ -809,6 +1078,7 @@ extension Palette: NSTextFieldDelegate {
     func controlTextDidChange(_ note: Notification) {
         complete()
         completing = true
+        useCachedSuggestions()
         rebuild()
         askForSuggestions()
     }
@@ -817,38 +1087,47 @@ extension Palette: NSTextFieldDelegate {
         switch selector {
         case #selector(NSResponder.moveDown(_:)): move(1); return true
         case #selector(NSResponder.moveUp(_:)): move(-1); return true
-        case #selector(NSResponder.insertNewline(_:)): performSelected(); return true
-        case #selector(NSResponder.insertLineBreak(_:)): performSelected(); return true
+        case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertLineBreak(_:)),
+             #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
+            performSelected(); return true
         case #selector(NSResponder.cancelOperation(_:)):
             // First Esc takes back the completion; the next one closes.
-            if textView.selectedRange().length > 0, textView.selectedRange().location > 0,
-               NSMaxRange(textView.selectedRange()) == (textView.string as NSString).length, textView.string != typed {
-                textView.string = String(textView.string.prefix(typed.count))
-                rebuild()
-                return true
-            }
+            if showsInline(textView) { dropInline(textView); return true }
             close()
             return true
         case #selector(NSResponder.insertTab(_:)):
-            // Tab accepts the completion.
-            let end = (textView.string as NSString).length
-            textView.setSelectedRange(NSRange(location: end, length: 0))
-            typed = textView.string
+            // Tab keeps the completion; with none, it stays in the field.
+            if showsInline(textView) { acceptInline(textView, moveToEnd: true) }
             return true
-        case #selector(NSResponder.deleteBackward(_:)), #selector(NSResponder.deleteForward(_:)),
-             #selector(NSResponder.deleteWordBackward(_:)), #selector(NSResponder.deleteToBeginningOfLine(_:)):
-            completing = false
-            // Deleting a selected completion shouldn't bring it straight back.
-            if selector == #selector(NSResponder.deleteBackward(_:)), textView.selectedRange().length > 0,
-               NSMaxRange(textView.selectedRange()) == (textView.string as NSString).length, textView.string != typed {
-                textView.string = String(textView.string.prefix(textView.selectedRange().location))
-                typed = textView.string
-                rebuild()
-                askForSuggestions()
-                return true
-            }
+        case #selector(NSResponder.moveRight(_:)), #selector(NSResponder.moveToEndOfLine(_:)),
+             #selector(NSResponder.moveToEndOfDocument(_:)), #selector(NSResponder.moveToRightEndOfLine(_:)):
+            guard showsInline(textView) else { return false }
+            acceptInline(textView, moveToEnd: true)
+            return true
+        case #selector(NSResponder.moveLeft(_:)), #selector(NSResponder.moveToBeginningOfLine(_:)),
+             #selector(NSResponder.moveToBeginningOfDocument(_:)), #selector(NSResponder.moveToLeftEndOfLine(_:)),
+             #selector(NSResponder.moveWordLeft(_:)), #selector(NSResponder.moveWordRight(_:)):
+            // The caret moves as usual, and the completion stays as text.
+            if showsInline(textView) { acceptInline(textView, moveToEnd: false) }
             return false
-        case #selector(NSResponder.moveToEndOfDocument(_:)), #selector(NSResponder.moveToBeginningOfDocument(_:)):
+        case #selector(NSResponder.deleteToBeginningOfLine(_:)) where mode == .history && table.selectedRow >= 0:
+            // ⌘⌫, as in Safari's history and Finder: the chosen page goes.
+            removeSelectedVisit()
+            return true
+        case #selector(NSResponder.deleteBackward(_:)) where mode == .history && textView.string.isEmpty && table.selectedRow >= 0:
+            removeSelectedVisit()
+            return true
+        case #selector(NSResponder.deleteBackward(_:)):
+            completing = false
+            // Delete with the completion showing takes only the completion,
+            // and the next letter completes again (no text change follows
+            // to turn completing back on).
+            if showsInline(textView) { dropInline(textView); completing = true; return true }
+            return false
+        case #selector(NSResponder.deleteForward(_:)), #selector(NSResponder.deleteWordBackward(_:)),
+             #selector(NSResponder.deleteToBeginningOfLine(_:)), #selector(NSResponder.deleteToEndOfLine(_:)),
+             #selector(NSResponder.deleteWordForward(_:)):
+            completing = false
             return false
         default:
             return false
@@ -955,7 +1234,17 @@ final class PaletteTable: NSTableView {
     /// The row under a moving pointer; only real movement counts, so a list
     /// changing under a still pointer doesn't steal the keyboard's choice.
     var onHover: ((Int) -> Void)?
+    /// A right-click (or Control-click) on a row, with where, in window space.
+    var onRightClick: ((Int, NSPoint) -> Void)?
     override var acceptsFirstResponder: Bool { false }
+    override func rightMouseDown(with event: NSEvent) {
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        if row >= 0 { onRightClick?(row, event.locationInWindow) }
+    }
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control) { rightMouseDown(with: event); return }
+        super.mouseDown(with: event)
+    }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.filter { $0.owner === self }.forEach(removeTrackingArea)
@@ -1062,6 +1351,10 @@ final class PaletteItemCell: NSTableCellView {
         case .suggestion(let q):
             symbol = "magnifyingglass"
             name = q
+        case .pastSearch(let q):
+            symbol = "clock"
+            name = q
+            right = "Searched Before"
         case .tab(let tab):
             image = tab.favicon
             symbol = "square.on.square"

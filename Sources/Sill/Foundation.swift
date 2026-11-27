@@ -103,10 +103,15 @@ enum SearchEngine: String, CaseIterable, Identifiable {
     /// The query, if `url` is one of this engine's result pages.
     func query(in url: URL?) -> String? {
         guard let url, let host = url.host()?.lowercased(),
-              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
+              let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedQueryItems else { return nil }
         let isEngine = ["google.", "duckduckgo.com", "bing.com", "kagi.com", "ecosia.org"].contains { host.contains($0) }
         guard isEngine, url.path.contains("search") || host.contains("duckduckgo") else { return nil }
-        return items.first { $0.name == "q" }?.value
+        // A results page's own form writes spaces as "+" ("webkit+vs+chromium"),
+        // which URLComponents leaves as they are; a real plus arrives as %2B.
+        guard let raw = items.first(where: { $0.name == "q" })?.value else { return nil }
+        let query = (raw.replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? raw)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty ? nil : query
     }
 }
 

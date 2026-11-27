@@ -78,7 +78,13 @@ final class History {
     nonisolated private static func read() -> [String: Visit] {
         let url = Places.support.appendingPathComponent("history.json")
         guard let data = try? Data(contentsOf: url), let list = try? JSONDecoder().decode([Visit].self, from: data) else { return [:] }
-        return Dictionary(list.map { ($0.url, $0) }, uniquingKeysWith: { a, b in a.last > b.last ? a : b })
+        // Kept before checking-pages' titles were skipped: shown by address.
+        let cleaned = list.map { visit -> Visit in
+            var visit = visit
+            if isPlaceholder(visit.title) { visit.title = "" }
+            return visit
+        }
+        return Dictionary(cleaned.map { ($0.url, $0) }, uniquingKeysWith: { a, b in a.last > b.last ? a : b })
     }
 
     /// The one made, once it is: the background work hands it what it made.
@@ -206,13 +212,22 @@ final class History {
         return text
     }
 
+    /// What a site shows while it checks you're a person (Cloudflare and
+    /// the like): never a page's title, so never kept as one.
+    nonisolated static func isPlaceholder(_ title: String) -> Bool {
+        let t = title.trimmingCharacters(in: .whitespaces).lowercased()
+        return t.hasPrefix("just a moment") || t.hasPrefix("attention required") || t.hasPrefix("please wait")
+            || t.hasPrefix("checking your browser") || t == "ddos-guard" || t.hasPrefix("one moment, please")
+            || t == "security check" || t.hasPrefix("verifying you are human")
+    }
+
     func record(_ url: URL, title: String?, typed: Bool = false) {
         guard let key = Self.key(url) else { return }
         var visit = visits[key] ?? Visit(url: key, title: "", count: 0, last: Date())
         visit.count += 1
         visit.last = Date()
         if typed { visit.typed += 1 }
-        if let title, !title.isEmpty { visit.title = title }
+        if let title, !title.isEmpty, !Self.isPlaceholder(title) { visit.title = title }
         visits[key] = visit
         noted(visit)
         trim()
@@ -220,7 +235,7 @@ final class History {
     }
 
     func retitle(_ url: URL, _ title: String) {
-        guard !title.isEmpty, let key = Self.key(url), var visit = visits[key], visit.title != title else { return }
+        guard !title.isEmpty, !Self.isPlaceholder(title), let key = Self.key(url), var visit = visits[key], visit.title != title else { return }
         visit.title = title
         visits[key] = visit
         noted(visit)
@@ -303,8 +318,30 @@ final class History {
         persist()
     }
 
-    func remove(_ key: String) {
-        visits[key] = nil
+    /// Forgets one entry; what it was comes back, for an Undo.
+    @discardableResult
+    func remove(_ key: String) -> Visit? {
+        guard let gone = visits.removeValue(forKey: key) else { return nil }
+        changed()
+        persist()
+        return gone
+    }
+
+    /// Forgets every entry that matches (since a time, or on one site), in one write.
+    @discardableResult
+    func remove(where matches: (Visit) -> Bool) -> [Visit] {
+        let gone = visits.values.filter(matches)
+        guard !gone.isEmpty else { return [] }
+        for visit in gone { visits[visit.url] = nil }
+        changed()
+        persist()
+        return gone
+    }
+
+    /// Puts back what was just removed (Undo).
+    func restore(_ list: [Visit]) {
+        guard !list.isEmpty else { return }
+        for visit in list { visits[visit.url] = visit }
         changed()
         persist()
     }
@@ -318,10 +355,13 @@ final class History {
         edits += 1
     }
 
-    func clear() {
+    @discardableResult
+    func clear() -> [Visit] {
+        let gone = Array(visits.values)
         visits = [:]
         changed()
         persist()
+        return gone
     }
 
     /// What searching needs of an entry, worked out once rather than on every
@@ -509,6 +549,59 @@ final class History {
         return result
     }
 
+    /// Searches made before, read from the results pages in history: each
+    /// query once (in its most visited spelling), with its visits summed.
+    /// Made again only after history changes, and then only the few entries
+    /// with a query in their address are read.
+    private struct PastSearch {
+        let query: String
+        let lower: String
+        let weight: Double
+        let last: Date
+    }
+    private var pastSearches: (at: Int, list: [PastSearch])?
+
+    private func searchList() -> [PastSearch] {
+        if let pastSearches, pastSearches.at == changes { return pastSearches.list }
+        var byQuery: [String: (query: String, best: Int, weight: Double, last: Date)] = [:]
+        for visit in visits.values where visit.url.contains("q=") {
+            guard let query = SearchEngine.google.query(in: visit.address) else { continue }
+            let lower = query.lowercased()
+            let weight = Double(visit.count) + Double(visit.typed) * 2
+            if var known = byQuery[lower] {
+                if visit.count > known.best { known.query = query; known.best = visit.count }
+                known.weight += weight
+                known.last = max(known.last, visit.last)
+                byQuery[lower] = known
+            } else {
+                byQuery[lower] = (query, visit.count, weight, visit.last)
+            }
+        }
+        let list = byQuery.map { PastSearch(query: $0.value.query, lower: $0.key, weight: $0.value.weight, last: $0.value.last) }
+        pastSearches = (changes, list)
+        return list
+    }
+
+    /// Searches made before that begin with what's typed (or whose words
+    /// do), best first, not counting the one typed exactly.
+    func searches(matching text: String, limit: Int) -> [String] {
+        let lower = text.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !lower.isEmpty else { return [] }
+        let words = lower.split(separator: " ").map { String($0) }
+        let now = Date()
+        var hits: [(query: String, score: Double)] = []
+        for search in searchList() where search.lower != lower {
+            let begins = search.lower.hasPrefix(lower)
+            // Its words matched further in only once there's enough typed to mean
+            // something: "y" isn't looking for "do you need".
+            guard begins || (lower.count >= 4 && words.allSatisfy({ search.lower.hasPrefix($0) || search.lower.contains(" " + $0) }))
+            else { continue }
+            let score = Visit.score(weight: search.weight, since: now.timeIntervalSince(search.last))
+            hits.append((search.query, begins ? score * 2 : score))
+        }
+        return hits.sorted { $0.score > $1.score }.prefix(limit).map(\.query)
+    }
+
     /// Whether you've been to this site before (www or not).
     func knows(host: String) -> Bool {
         let bare = Domains.bare(host)
@@ -561,8 +654,10 @@ final class History {
                             guard starts(at, Flat.host) || starts(at, Flat.rawHost) || (deep && starts(at, Flat.bare)),
                                   let rawHost = entries[at].1.rawHost else { continue }
                             let host = entries[at].1.host
+                            // Never into a page's query ("youtube.com/w" to one video
+                            // of many): those are in the list below the field.
                             for candidate in deep ? [host, rawHost, entries[at].1.bare] : [host, rawHost]
-                            where candidate.hasPrefix(prefix) && candidate.count > prefix.count {
+                            where candidate.hasPrefix(prefix) && candidate.count > prefix.count && !candidate.contains("?") {
                                 let score = entries[at].0.score(now: now) + (candidate == host ? 0.5 : 0)
                                 if best == nil || score > best!.1 { best = (candidate, score) }
                             }

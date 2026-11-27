@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// The bar across the top of the window, in place of an NSToolbar so its
 /// margins are ours: back, forward and reload in one glass capsule hard by the left
@@ -51,6 +52,11 @@ final class TopBar: NSView {
         }
     }
 
+    /// Files and links dropped on the bar: they open in new tabs, at the place
+    /// among the tabs where they were let go (nil: after the last). Dropped
+    /// on the page they stay the page's, for an upload.
+    var onDrop: (([URL], Int?) -> Void)?
+
     /// Room kept on the left for the window's traffic lights.
     var leadingInset: CGFloat = 0 { didSet { if leadingInset != oldValue { needsLayout = true } } }
 
@@ -90,6 +96,7 @@ final class TopBar: NSView {
         addSubview(profileGlass)
         addSubview(strip)
         strip.translatesAutoresizingMaskIntoConstraints = true
+        registerForDraggedTypes([.fileURL, .URL])
 
         back.toolTip = "Back"
         forward.toolTip = "Forward"
@@ -151,6 +158,42 @@ final class TopBar: NSView {
         NSRect(x: actionsGlass.frame.minX, y: actionsGlass.frame.minY, width: Self.buttonWidth, height: Self.capsule)
     }
     var profileRect: NSRect { profileGlass.frame }
+
+    // MARK: - dropping files and links
+
+    /// What a drag carries that a tab can show: web addresses, and files
+    /// Chromium displays (PDFs, pictures, pages, text, audio and video),
+    /// never a folder or an app, which would only download.
+    private static func openable(_ info: NSDraggingInfo) -> [URL] {
+        let board = info.draggingPasteboard
+        let urls = board.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] ?? []
+        let shown: [UTType] = [.pdf, .image, .html, .xml, .text, .json, .audiovisualContent, .webArchive]
+        return urls.filter { url in
+            if url.isFileURL {
+                guard let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType else { return false }
+                return shown.contains { type.conforms(to: $0) }
+            }
+            return url.scheme == "http" || url.scheme == "https"
+        }
+    }
+
+    // A copy, so the pointer wears the green plus: this opens it, it doesn't move it.
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        onDrop != nil && !Self.openable(sender).isEmpty ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        draggingEntered(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = Self.openable(sender)
+        guard let onDrop, !urls.isEmpty else { return false }
+        let point = convert(sender.draggingLocation, from: nil)
+        let index = strip.frame.contains(point) ? strip.dropIndex(at: strip.convert(point, from: self).x) : nil
+        onDrop(urls, index)
+        return true
+    }
 
     override func mouseDown(with event: NSEvent) {
         // A double-click on bare bar does what it does on any title bar.
@@ -258,4 +301,15 @@ final class ProfileButton: NSButton {
         image = Profile.picture(size: 26)
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    /// A private window says so where your picture would be, with Safari's
+    /// raised hand: dark like any dark window, it was otherwise no
+    /// different to look at.
+    func markPrivate() {
+        image = NSImage(systemSymbolName: "hand.raised.fill", accessibilityDescription: "Private Window")?
+            .withSymbolConfiguration(.init(pointSize: 14, weight: .semibold))
+        contentTintColor = .labelColor
+        toolTip = "Private Window"
+        setAccessibilityLabel("Private Window")
+    }
 }
